@@ -12,6 +12,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@discordjs/opus": "^0.10.0",
     "better-sqlite3": "^12.8.0",
     "express": "^5.2.1",
     "pino": "^10.3.1",
