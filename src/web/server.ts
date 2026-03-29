@@ -56,13 +56,13 @@ export function createWebServer(options: WebServerOptions): WebServer {
 
   if (options.staticDir) {
     app.use(express.static(options.staticDir));
-    app.get("*", (_req, res) => {
+    app.get(/^(?!\/api|\/ws)/, (_req, res) => {
       res.sendFile(path.join(options.staticDir!, "index.html"));
     });
   }
 
   const wss = new WebSocketServer({ server, path: "/ws" });
-  setupWebSocket(wss, options.botManager, logger);
+  const cleanupWs = setupWebSocket(wss, options.botManager, logger);
 
   return {
     async start(): Promise<void> {
@@ -74,6 +74,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
       });
     },
     stop(): void {
+      cleanupWs();
       wss.close();
       server.close();
     },

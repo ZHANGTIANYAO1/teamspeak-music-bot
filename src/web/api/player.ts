@@ -57,55 +57,46 @@ export function createPlayerRouter(
     }
   });
 
-  router.post("/:botId/pause", async (req, res) => {
-    const bot = (req as any).bot;
-    const cmd = parseCommand("!pause", "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
-  });
+  const simpleCommand = (cmdStr: string) => async (req: any, res: any) => {
+    try {
+      const bot = req.bot;
+      const cmd = parseCommand(cmdStr, "!")!;
+      const response = await bot.executeCommand(cmd);
+      res.json({ message: response });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  };
 
-  router.post("/:botId/resume", async (req, res) => {
-    const bot = (req as any).bot;
-    const cmd = parseCommand("!resume", "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
-  });
-
-  router.post("/:botId/next", async (req, res) => {
-    const bot = (req as any).bot;
-    const cmd = parseCommand("!next", "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
-  });
-
-  router.post("/:botId/prev", async (req, res) => {
-    const bot = (req as any).bot;
-    const cmd = parseCommand("!prev", "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
-  });
-
-  router.post("/:botId/stop", async (req, res) => {
-    const bot = (req as any).bot;
-    const cmd = parseCommand("!stop", "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
-  });
+  router.post("/:botId/pause", simpleCommand("!pause"));
+  router.post("/:botId/resume", simpleCommand("!resume"));
+  router.post("/:botId/next", simpleCommand("!next"));
+  router.post("/:botId/prev", simpleCommand("!prev"));
+  router.post("/:botId/stop", simpleCommand("!stop"));
+  router.post("/:botId/clear", simpleCommand("!clear"));
 
   router.post("/:botId/volume", async (req, res) => {
-    const bot = (req as any).bot;
-    const { volume } = req.body;
-    const cmd = parseCommand(`!vol ${volume}`, "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
+    try {
+      const bot = (req as any).bot;
+      const { volume } = req.body;
+      const cmd = parseCommand(`!vol ${volume}`, "!")!;
+      const response = await bot.executeCommand(cmd);
+      res.json({ message: response });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   router.post("/:botId/mode", async (req, res) => {
-    const bot = (req as any).bot;
-    const { mode } = req.body;
-    const cmd = parseCommand(`!mode ${mode}`, "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
+    try {
+      const bot = (req as any).bot;
+      const { mode } = req.body;
+      const cmd = parseCommand(`!mode ${mode}`, "!")!;
+      const response = await bot.executeCommand(cmd);
+      res.json({ message: response });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   router.get("/:botId/queue", (req, res) => {
@@ -113,18 +104,15 @@ export function createPlayerRouter(
     res.json({ queue: bot.getQueue(), status: bot.getStatus() });
   });
 
-  router.post("/:botId/clear", async (req, res) => {
-    const bot = (req as any).bot;
-    const cmd = parseCommand("!clear", "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
-  });
-
   router.delete("/:botId/queue/:index", async (req, res) => {
-    const bot = (req as any).bot;
-    const cmd = parseCommand(`!remove ${req.params.index}`, "!")!;
-    const response = await bot.executeCommand(cmd);
-    res.json({ message: response });
+    try {
+      const bot = (req as any).bot;
+      const cmd = parseCommand(`!remove ${req.params.index}`, "!")!;
+      const response = await bot.executeCommand(cmd);
+      res.json({ message: response });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   router.post("/:botId/playlist", async (req, res) => {

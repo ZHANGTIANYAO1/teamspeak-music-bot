@@ -6,7 +6,7 @@ export function setupWebSocket(
   wss: WebSocketServer,
   botManager: BotManager,
   logger: Logger
-): void {
+): () => void {
   const clients = new Set<WebSocket>();
 
   wss.on("connection", (ws) => {
@@ -65,6 +65,10 @@ export function setupWebSocket(
     }
   };
 
-  setInterval(attachBotListeners, 5000);
+  const intervalId = setInterval(attachBotListeners, 5000);
   attachBotListeners();
+
+  return () => {
+    clearInterval(intervalId);
+  };
 }
