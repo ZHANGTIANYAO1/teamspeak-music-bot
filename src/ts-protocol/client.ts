@@ -154,8 +154,7 @@ export class TS3Client extends EventEmitter {
   }
 
   sendVoiceData(opusFrame: Buffer): void {
-    if (!this.client) return;
-    // Codec 5 = CODEC_OPUS_MUSIC
+    if (!this.client || this.disconnecting) return;
     this.client.sendVoice(opusFrame, 5);
   }
 

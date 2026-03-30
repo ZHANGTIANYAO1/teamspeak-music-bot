@@ -24,13 +24,13 @@
         </div>
       </div>
 
-      <RouterLink to="/lyrics" class="player-left">
+      <div class="player-left" @click="toggleLyrics">
         <CoverArt :url="currentSong.coverUrl" :size="40" />
         <div class="song-info">
           <div class="song-name">{{ currentSong.name }}</div>
           <div class="song-artist">{{ currentSong.artist }}</div>
         </div>
-      </RouterLink>
+      </div>
 
       <div class="player-center">
         <span class="time-display time-current">{{ formatTime(currentElapsed) }}</span>
@@ -63,9 +63,9 @@
         <button class="control-btn" :class="{ active: showQueue }" @click="showQueue = !showQueue">
           <Icon icon="mdi:playlist-music" />
         </button>
-        <RouterLink to="/lyrics" class="control-btn lyrics-btn">
+        <button class="control-btn lyrics-btn" :class="{ active: route.path === '/lyrics' }" @click="toggleLyrics">
           <Icon icon="mdi:microphone" />
-        </RouterLink>
+        </button>
       </div>
     </div>
   </div>
@@ -74,15 +74,26 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import { Icon } from '@iconify/vue';
+import { useRoute, useRouter } from 'vue-router';
 import { usePlayerStore } from '../stores/player.js';
 import CoverArt from './CoverArt.vue';
 import Queue from './Queue.vue';
 
+const route = useRoute();
+const router = useRouter();
 const showQueue = ref(false);
 
 const store = usePlayerStore();
 const activeBot = computed(() => store.activeBot);
 const currentSong = computed(() => store.currentSong);
+
+function toggleLyrics() {
+  if (route.path === '/lyrics') {
+    router.back();
+  } else {
+    router.push('/lyrics');
+  }
+}
 
 // Progress — use manual timer instead of relying on reactive getters
 const currentElapsed = ref(0);

@@ -152,6 +152,7 @@ export function createPlayerRouter(
         return;
       }
       const queue = bot.getQueueManager();
+      bot.getPlayer().stop(); // Stop current playback first
       const song = queue.playAt(index);
       if (!song) {
         res.status(400).json({ error: "Invalid queue index" });

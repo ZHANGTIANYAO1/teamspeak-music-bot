@@ -491,7 +491,7 @@ export class BotInstance extends EventEmitter {
           for (let i = 0; i < 3; i++) {
             const retry = this.queue.next();
             if (!retry) break;
-            if (await this.resolveAndPlay(retry)) return;
+            if (await this.resolveAndPlay(retry)) break;
           }
           this.player.stop();
         }
