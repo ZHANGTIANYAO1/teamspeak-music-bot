@@ -28,8 +28,8 @@
         <div v-for="bot in store.bots" :key="bot.id" class="bot-item">
           <div class="bot-info">
             <div class="bot-name">{{ bot.name }}</div>
-            <div class="bot-status" :class="{ online: bot.connected }">
-              {{ bot.connected ? '在线' : '离线' }}
+            <div class="bot-status" :class="botStatusClass(bot)">
+              {{ botStatusText(bot) }}
             </div>
           </div>
           <div class="bot-actions">
@@ -374,6 +374,20 @@ import QRCode from 'qrcode';
 import { usePlayerStore } from '../stores/player.js';
 
 const store = usePlayerStore();
+
+function botStatusClass(bot: any) {
+  if (!bot.connected) return 'offline';
+  if (bot.playing) return 'playing';
+  if (bot.paused) return 'paused';
+  return 'online';
+}
+
+function botStatusText(bot: any) {
+  if (!bot.connected) return '离线';
+  if (bot.playing) return '播放中';
+  if (bot.paused) return '已暂停';
+  return '在线';
+}
 
 const newBotName = ref('');
 const newBotServer = ref('');
@@ -751,6 +765,14 @@ onUnmounted(() => {
   &.online {
     background: rgba(51, 94, 234, 0.15);
     color: var(--color-primary);
+  }
+  &.playing {
+    background: rgba(76, 175, 80, 0.15);
+    color: #4caf50;
+  }
+  &.paused {
+    background: rgba(255, 152, 0, 0.15);
+    color: #ff9800;
   }
 }
 
