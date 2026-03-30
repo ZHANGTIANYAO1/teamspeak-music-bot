@@ -23,7 +23,7 @@
 ## 功能特性
 
 - **三平台音源** — 网易云音乐 + QQ 音乐 + 哔哩哔哩，统一搜索，结果标注来源
-- **真实 TS3 客户端协议** — 机器人在 TeamSpeak 中可见（非 ServerQuery 隐身模式）
+- **真实 TS3 客户端协议** — 机器人在 TeamSpeak 中可见（非 ServerQuery 隐身模式），兼容 TS3/TS5/TS6 服务器
 - **YesPlayMusic 风格 WebUI** — 精美界面，支持深色/浅色主题切换
 - **完整播放控制** — 播放/暂停/上一首/下一首/进度跳转/音量调节
 - **四种播放模式** — 顺序播放/循环播放/随机播放/随机循环
@@ -59,7 +59,7 @@
 
 ### 方式二：手动安装（所有系统）
 
-**前置条件：** [Node.js 20+](https://nodejs.org/) 和一个 TeamSpeak 3 服务器。
+**前置条件：** [Node.js 20+](https://nodejs.org/) 和一个 TeamSpeak 服务器（TS3/TS5/TS6 均可）。
 FFmpeg **已自动内置**，无需手动安装。
 
 ```bash
@@ -246,7 +246,7 @@ tsmusicbot/
 | **后端框架** | Express 4, WebSocket (ws) |
 | **数据库** | better-sqlite3 (SQLite) |
 | **音频处理** | FFmpeg (ffmpeg-static 内置), @discordjs/opus |
-| **TS3 协议** | @honeybbq/teamspeak-client（完整客户端协议，ECDH + AES-EAX） |
+| **TS 协议** | @honeybbq/teamspeak-client（完整客户端协议，兼容 TS3/TS5/TS6） |
 | **网易云 API** | NeteaseCloudMusicApi |
 | **QQ 音乐 API** | @sansenjian/qq-music-api |
 | **哔哩哔哩** | BiliBili Web API（搜索、DASH 音频流、QR 登录） |
