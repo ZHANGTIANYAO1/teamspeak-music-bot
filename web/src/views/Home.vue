@@ -95,6 +95,26 @@
         </RouterLink>
       </div>
     </section>
+
+    <!-- B站热门 -->
+    <section class="section" v-if="store.bilibiliPopular.length > 0">
+      <h2 class="section-title">
+        <span class="bili-badge">B</span>
+        B站热门
+      </h2>
+      <div class="daily-grid">
+        <div
+          v-for="song in store.bilibiliPopular.slice(0, 12)"
+          :key="song.id"
+          class="daily-card hover-scale"
+          @click="store.playById(song.id, song.platform)"
+        >
+          <CoverArt :url="song.coverUrl" :size="120" :radius="10" :show-shadow="true" />
+          <div class="daily-name">{{ song.name }}</div>
+          <div class="daily-artist">{{ song.artist }}</div>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -182,6 +202,22 @@ onMounted(() => {
   font-size: 22px;
   font-weight: 700;
   margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bili-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: #00a1d6;
+  color: white;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 800;
 }
 
 // Now Playing

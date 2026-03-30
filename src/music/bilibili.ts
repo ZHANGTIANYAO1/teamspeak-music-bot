@@ -271,13 +271,92 @@ export class BiliBiliProvider implements MusicProvider {
     return this.cookie;
   }
 
-  // --- Not applicable for BiliBili (video platform) ---
+  // --- B站推荐内容 ---
 
-  async getPlaylistSongs(_playlistId: string): Promise<Song[]> {
+  /** 热门视频 (无需登录) */
+  async getRecommendPlaylists(): Promise<Playlist[]> {
+    // B站没有"歌单"概念，返回空
     return [];
   }
 
-  async getRecommendPlaylists(): Promise<Playlist[]> {
+  /** 音乐区排行榜 + 个性化推荐（如果已登录）作为"每日推荐" */
+  async getDailyRecommendSongs(): Promise<Song[]> {
+    await this.ensureBuvidCookie();
+    const songs: Song[] = [];
+
+    // 1. 个性化推荐（带 cookie 效果更好）
+    try {
+      const res = await this.api.get("/x/web-interface/index/top/rcmd", {
+        params: { ps: 10, fresh_type: 3 },
+        headers: this.cookieHeaders,
+      });
+      const items = res.data?.data?.item ?? [];
+      for (const v of items) {
+        songs.push({
+          id: String(v.bvid),
+          name: v.title ?? "",
+          artist: v.owner?.name ?? "",
+          album: "",
+          duration: v.duration ?? 0,
+          coverUrl: this.normalizeCover(v.pic ?? ""),
+          platform: "bilibili" as const,
+        });
+      }
+    } catch {
+      // fallback to popular
+    }
+
+    // 2. 如果推荐为空，用音乐区排行榜（tid=3）
+    if (songs.length === 0) {
+      try {
+        const res = await this.api.get("/x/web-interface/ranking/v2", {
+          params: { rid: 3, type: "all" },
+          headers: this.cookieHeaders,
+        });
+        const list = res.data?.data?.list ?? [];
+        for (const v of list.slice(0, 20)) {
+          songs.push({
+            id: String(v.bvid),
+            name: v.title ?? "",
+            artist: v.owner?.name ?? "",
+            album: "",
+            duration: v.duration ?? 0,
+            coverUrl: this.normalizeCover(v.pic ?? ""),
+            platform: "bilibili" as const,
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return songs;
+  }
+
+  /** 热门视频列表 */
+  async getPopularVideos(limit = 20): Promise<Song[]> {
+    try {
+      const res = await this.api.get("/x/web-interface/popular", {
+        params: { ps: limit, pn: 1 },
+        headers: this.cookieHeaders,
+      });
+      return (res.data?.data?.list ?? []).map((v: any) => ({
+        id: String(v.bvid),
+        name: v.title ?? "",
+        artist: v.owner?.name ?? "",
+        album: "",
+        duration: v.duration ?? 0,
+        coverUrl: this.normalizeCover(v.pic ?? ""),
+        platform: "bilibili" as const,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  // --- 不适用于B站 ---
+
+  async getPlaylistSongs(_playlistId: string): Promise<Song[]> {
     return [];
   }
 

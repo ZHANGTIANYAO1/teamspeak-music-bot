@@ -197,6 +197,23 @@ export function createMusicRouter(
     }
   });
 
+  // B站热门视频
+  router.get("/bilibili/popular", async (req, res) => {
+    try {
+      const provider = bilibiliProvider as any;
+      if (provider.getPopularVideos) {
+        const limit = parseInt(req.query.limit as string) || 20;
+        const songs = await provider.getPopularVideos(limit);
+        res.json({ songs });
+      } else {
+        res.json({ songs: [] });
+      }
+    } catch (err) {
+      logger.error({ err }, "Get bilibili popular failed");
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   // Get current quality
   router.get("/quality", (_req, res) => {
     res.json({
