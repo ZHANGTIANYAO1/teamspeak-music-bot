@@ -79,7 +79,9 @@ sudo ./scripts/install.sh
 
 自动安装 Node.js、依赖，配置 systemd 服务，开机自启。
 
-### Docker 部署
+### Docker 一键部署
+
+所有依赖已内置（Node.js、FFmpeg、Opus 编码器），无需安装任何额外软件。
 
 ```bash
 cd scripts/docker
@@ -87,6 +89,29 @@ docker-compose up -d
 ```
 
 访问 http://localhost:3000
+
+**说明：**
+- 首次构建需要几分钟（编译 native 模块）
+- 使用 `host` 网络模式，机器人可直接连接局域网 TS3 服务器
+- 数据持久化在 Docker named volume `tsmusicbot-data` 中（数据库、Cookie、日志）
+- 内置健康检查（`/api/health`），支持 Docker 自动重启
+
+```bash
+# 查看日志
+docker logs -f tsmusicbot
+
+# 停止
+docker-compose down
+
+# 重新构建（代码更新后）
+docker-compose up -d --build
+```
+
+如果 TS3 服务器不在同一台机器，可编辑 `docker-compose.yml` 将 `network_mode: host` 替换为端口映射：
+```yaml
+ports:
+  - "3000:3000"
+```
 
 ## 使用说明
 
