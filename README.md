@@ -292,6 +292,13 @@ A：可以。在设置页面创建多个实例，分别连接不同的 TS 服务
 **Q：端口 3200 被占用？**
 A：QQ 音乐 API 启动时自动监听 3200 端口。如果之前的进程还在运行，程序会自动复用。如需重启可手动结束 `node` 进程。
 
+**Q：播放歌曲时报 FFmpeg EACCES 错误？**
+A：`ffmpeg-static` 内置的 FFmpeg 二进制文件缺少执行权限。程序已自动尝试修复，如果仍然失败，请手动执行：
+```bash
+chmod +x node_modules/ffmpeg-static/ffmpeg
+```
+或者确保系统已安装 FFmpeg（`apt install ffmpeg` / `brew install ffmpeg`），程序会自动回退使用系统版本。
+
 **Q：Docker 构建失败？**
 A：原生模块（opus、sqlite3）需要编译工具，Dockerfile 已包含。确保 Docker 有足够内存（建议 2GB+）。
 

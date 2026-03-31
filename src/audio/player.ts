@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
+import { accessSync, chmodSync, constants } from "node:fs";
 import { createOpusEncoder, PCM_FRAME_BYTES, type Encoder } from "./encoder.js";
 import type { Logger } from "../logger.js";
 
@@ -8,10 +9,29 @@ import type { Logger } from "../logger.js";
 const require = createRequire(import.meta.url);
 const ffmpegPath: string | null = require("ffmpeg-static");
 
+/** Ensure the given binary has execute permission. */
+function isExecutable(binPath: string): boolean {
+  try {
+    accessSync(binPath, constants.X_OK);
+    return true;
+  } catch {
+    try {
+      chmodSync(binPath, 0o755);
+      accessSync(binPath, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** Resolved once at module load — no repeated fs checks per play(). */
+const resolvedFfmpeg: string =
+  ffmpegPath && isExecutable(ffmpegPath) ? ffmpegPath : "ffmpeg";
+
 /** Resolve ffmpeg binary: prefer bundled ffmpeg-static, fall back to system PATH. */
 function getFfmpegCommand(): string {
-  if (ffmpegPath) return ffmpegPath;
-  return "ffmpeg"; // fallback to system-installed ffmpeg
+  return resolvedFfmpeg;
 }
 
 export interface PlayerEvents {
