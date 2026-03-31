@@ -109,11 +109,12 @@ export class AudioPlayer extends EventEmitter {
     this.logger.debug({ ffmpeg: ffmpegBin }, "Using ffmpeg binary");
     this.ffmpeg = spawn(ffmpegBin, args, { stdio: ["ignore", "pipe", "pipe"] });
 
-    this.ffmpeg.stderr!.on("data", (data: Buffer) => {
-      this.logger.debug({ stderr: data.toString().trimEnd() }, "FFmpeg stderr");
-    });
-
+    let gotFirstData = false;
     this.ffmpeg.stdout!.on("data", (chunk: Buffer) => {
+      if (!gotFirstData) {
+        gotFirstData = true;
+        this.logger.info({ bytes: chunk.length }, "FFmpeg: first PCM data received");
+      }
       this.pcmBuffer = Buffer.concat([this.pcmBuffer, chunk]);
       // Backpressure: pause FFmpeg stdout when buffer is too large
       if (this.pcmBuffer.length > AudioPlayer.BUFFER_HIGH_WATER && !this.ffmpegPaused && this.ffmpeg?.stdout) {
@@ -122,7 +123,8 @@ export class AudioPlayer extends EventEmitter {
       }
     });
 
-    this.ffmpeg.on("close", () => {
+    this.ffmpeg.on("close", (code) => {
+      this.logger.info({ exitCode: code, gotData: gotFirstData, framesPlayed: this.framesPlayed }, "FFmpeg process closed");
       if (this.sessionId === playSessionId) {
         this.ffmpeg = null; // Signal frame loop that no more data is coming
       }
@@ -132,6 +134,17 @@ export class AudioPlayer extends EventEmitter {
       this.logger.error({ err }, "FFmpeg error");
       if (this.sessionId === playSessionId) {
         this.emit("error", err);
+      }
+    });
+
+    // Log FFmpeg stderr at info level for debugging playback issues
+    this.ffmpeg.stderr!.on("data", (data: Buffer) => {
+      const msg = data.toString().trimEnd();
+      // Log important FFmpeg messages at info level
+      if (msg.includes("Error") || msg.includes("error") || msg.includes("HTTP") || msg.includes("Opening") || msg.includes("Stream")) {
+        this.logger.info({ ffmpegStderr: msg }, "FFmpeg stderr");
+      } else {
+        this.logger.debug({ stderr: msg }, "FFmpeg stderr");
       }
     });
 
@@ -191,10 +204,23 @@ export class AudioPlayer extends EventEmitter {
       this.ffmpegPaused = false;
     }
 
-    const adjusted = this.applyVolume(pcmFrame);
-    const opusFrame = this.encoder.encode(adjusted);
-    this.emit("frame", opusFrame);
-    this.framesPlayed++;
+    try {
+      const adjusted = this.applyVolume(pcmFrame);
+      const opusFrame = this.encoder.encode(adjusted);
+      this.emit("frame", opusFrame);
+      this.framesPlayed++;
+
+      if (this.framesPlayed === 1) {
+        this.logger.info({ opusBytes: opusFrame.length }, "First audio frame encoded and emitted");
+      }
+      // Log every ~10 seconds (500 frames * 20ms = 10s)
+      if (this.framesPlayed % 500 === 0) {
+        this.logger.debug({ framesPlayed: this.framesPlayed, elapsed: this.getElapsed() }, "Playback progress");
+      }
+    } catch (err) {
+      this.logger.error({ err }, "Error encoding/sending audio frame");
+      this.emit("error", err as Error);
+    }
   }
 
   private applyVolume(pcm: Buffer): Buffer {

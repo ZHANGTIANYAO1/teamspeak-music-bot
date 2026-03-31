@@ -175,9 +175,21 @@ export class TS3Client extends EventEmitter {
     }
   }
 
+  private voiceFramesSent = 0;
+
   sendVoiceData(opusFrame: Buffer): void {
     if (!this.client || this.disconnecting) return;
-    this.client.sendVoice(opusFrame, 5);
+    try {
+      this.client.sendVoice(opusFrame, 5);
+      this.voiceFramesSent++;
+      if (this.voiceFramesSent === 1) {
+        this.logger.info({ opusBytes: opusFrame.length, clientId: this.clientId }, "First voice packet sent to TeamSpeak");
+      }
+    } catch (err) {
+      if (this.voiceFramesSent === 0) {
+        this.logger.error({ err }, "Failed to send first voice packet");
+      }
+    }
   }
 
   getIdentityExport(): string {
