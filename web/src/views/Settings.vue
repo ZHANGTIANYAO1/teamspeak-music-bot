@@ -73,6 +73,10 @@
             <input v-model="editForm.defaultChannel" class="input" placeholder="音乐频道" />
           </div>
           <div class="form-group">
+            <label>服务器密码（可选）</label>
+            <input v-model="editForm.serverPassword" class="input" type="password" placeholder="需要密码才能连接的服务器" />
+          </div>
+          <div class="form-group">
             <label>频道密码（可选）</label>
             <input v-model="editForm.channelPassword" class="input" type="password" />
           </div>
@@ -103,6 +107,10 @@
         <div class="form-group">
           <label>昵称</label>
           <input v-model="newBotNickname" class="input" placeholder="MusicBot" />
+        </div>
+        <div class="form-group">
+          <label>服务器密码（可选）</label>
+          <input v-model="newBotServerPassword" class="input" type="password" placeholder="需要密码才能连接的服务器" />
         </div>
         <div class="form-group">
           <label>默认频道（可选）</label>
@@ -393,6 +401,7 @@ const newBotName = ref('');
 const newBotServer = ref('');
 const newBotPort = ref(9987);
 const newBotNickname = ref('MusicBot');
+const newBotServerPassword = ref('');
 const newBotChannel = ref('');
 
 // Edit bot
@@ -404,6 +413,7 @@ const editForm = reactive({
   nickname: '',
   defaultChannel: '',
   channelPassword: '',
+  serverPassword: '',
 });
 
 const neteaseCookie = ref('');
@@ -558,6 +568,7 @@ async function createBot() {
       serverAddress: newBotServer.value,
       serverPort: newBotPort.value || 9987,
       nickname: newBotNickname.value || newBotName.value,
+      serverPassword: newBotServerPassword.value || undefined,
       defaultChannel: newBotChannel.value || undefined,
       autoStart: false,
     });
@@ -565,6 +576,7 @@ async function createBot() {
     newBotServer.value = '';
     newBotPort.value = 9987;
     newBotNickname.value = 'MusicBot';
+    newBotServerPassword.value = '';
     newBotChannel.value = '';
     await store.fetchBots();
   } catch {
@@ -598,6 +610,7 @@ async function openEditBot(bot: any) {
     editForm.nickname = res.data.nickname ?? '';
     editForm.defaultChannel = res.data.defaultChannel ?? '';
     editForm.channelPassword = res.data.channelPassword ?? '';
+    editForm.serverPassword = res.data.serverPassword ?? '';
   } catch {
     // Config not found — use defaults
     editForm.serverAddress = '';
@@ -605,6 +618,7 @@ async function openEditBot(bot: any) {
     editForm.nickname = bot.name;
     editForm.defaultChannel = '';
     editForm.channelPassword = '';
+    editForm.serverPassword = '';
   }
 }
 

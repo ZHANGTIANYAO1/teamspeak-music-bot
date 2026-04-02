@@ -12,6 +12,7 @@ import {
   type ClientInfo,
 } from "@honeybbq/teamspeak-client";
 import type { Logger } from "../logger.js";
+import { escapeValue } from "./commands.js";
 
 export { CODEC_OPUS_MUSIC } from "./voice.js";
 
@@ -112,6 +113,35 @@ export class TS3Client extends EventEmitter {
     });
 
     await this.client.connect();
+
+    // Monkey-patch handler.sendPacket to inject server password into clientinit.
+    // Must be applied AFTER connect() (which internally resets the handler) but
+    // BEFORE waitConnected() (clientinit is sent during the handshake).
+    // The library sends clientinit directly via handler.sendPacket, bypassing
+    // command middleware, so we intercept at the packet level.
+    // PacketType.Command = 2 in the library's enum.
+    if (this.options.serverPassword) {
+      const escaped = escapeValue(this.options.serverPassword);
+      const handler = this.client.handler;
+      const origSendPacket = handler.sendPacket.bind(handler);
+      handler.sendPacket = (pType, data, flags) => {
+        // Only inspect Command packets (type 2), and only until we've injected
+        if (pType === 2) {
+          const str = Buffer.from(data).toString("utf-8");
+          if (str.startsWith("clientinit ") && str.includes("client_server_password=")) {
+            const patched = str.replace(
+              "client_server_password=",
+              `client_server_password=${escaped}`
+            );
+            data = Buffer.from(patched);
+            // Restore original to avoid overhead on subsequent packets
+            handler.sendPacket = origSendPacket;
+          }
+        }
+        origSendPacket(pType, data, flags);
+      };
+    }
+
     await this.client.waitConnected();
     this.clientId = this.client.clientID();
     this.voiceFramesSent = 0;

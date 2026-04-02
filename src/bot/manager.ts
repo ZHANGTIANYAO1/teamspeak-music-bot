@@ -16,6 +16,7 @@ export interface CreateBotParams {
   nickname: string;
   defaultChannel?: string;
   channelPassword?: string;
+  serverPassword?: string;
   autoStart?: boolean;
 }
 
@@ -57,6 +58,7 @@ export class BotManager {
         nickname: params.nickname,
         defaultChannel: params.defaultChannel,
         channelPassword: params.channelPassword,
+        serverPassword: params.serverPassword,
       },
       neteaseProvider: this.neteaseProvider,
       qqProvider: this.qqProvider,
@@ -76,6 +78,7 @@ export class BotManager {
       nickname: params.nickname,
       defaultChannel: params.defaultChannel ?? "",
       channelPassword: params.channelPassword ?? "",
+      serverPassword: params.serverPassword ?? "",
       autoStart: params.autoStart ?? false,
     });
 
@@ -106,6 +109,7 @@ export class BotManager {
       nickname: params.nickname ?? existing.nickname,
       defaultChannel: params.defaultChannel ?? existing.defaultChannel,
       channelPassword: params.channelPassword ?? existing.channelPassword,
+      serverPassword: params.serverPassword ?? existing.serverPassword,
     });
     // Update in-memory name immediately (other fields need reconnect)
     const bot = this.bots.get(id);
@@ -152,6 +156,7 @@ export class BotManager {
           nickname: saved.nickname,
           defaultChannel: saved.defaultChannel || undefined,
           channelPassword: saved.channelPassword || undefined,
+          serverPassword: saved.serverPassword || undefined,
         },
         neteaseProvider: this.neteaseProvider,
         qqProvider: this.qqProvider,

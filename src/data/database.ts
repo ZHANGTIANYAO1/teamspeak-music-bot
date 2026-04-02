@@ -23,6 +23,7 @@ export interface BotInstance {
   nickname: string;
   defaultChannel: string;
   channelPassword: string;
+  serverPassword: string;
   autoStart: boolean;
 }
 
@@ -58,9 +59,16 @@ function initTables(db: Database.Database): void {
       nickname TEXT NOT NULL,
       defaultChannel TEXT NOT NULL,
       channelPassword TEXT NOT NULL,
+      serverPassword TEXT NOT NULL DEFAULT '',
       autoStart INTEGER NOT NULL DEFAULT 0
     );
   `);
+
+  // Migration: add serverPassword column for existing databases
+  const columns = db.pragma("table_info(bot_instances)") as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === "serverPassword")) {
+    db.exec(`ALTER TABLE bot_instances ADD COLUMN serverPassword TEXT NOT NULL DEFAULT ''`);
+  }
 }
 
 export function createDatabase(dbPath: string): BotDatabase {
@@ -78,8 +86,8 @@ export function createDatabase(dbPath: string): BotDatabase {
   `);
 
   const upsertInstance = db.prepare(`
-    INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelPassword, autoStart)
-    VALUES (@id, @name, @serverAddress, @serverPort, @nickname, @defaultChannel, @channelPassword, @autoStart)
+    INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelPassword, serverPassword, autoStart)
+    VALUES (@id, @name, @serverAddress, @serverPort, @nickname, @defaultChannel, @channelPassword, @serverPassword, @autoStart)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       serverAddress = excluded.serverAddress,
@@ -87,6 +95,7 @@ export function createDatabase(dbPath: string): BotDatabase {
       nickname = excluded.nickname,
       defaultChannel = excluded.defaultChannel,
       channelPassword = excluded.channelPassword,
+      serverPassword = excluded.serverPassword,
       autoStart = excluded.autoStart
   `);
 

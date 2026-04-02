@@ -43,6 +43,7 @@ export function createBotRouter(
         nickname,
         defaultChannel,
         channelPassword,
+        serverPassword,
         autoStart,
       } = req.body;
       if (!name || !serverAddress || !nickname) {
@@ -58,6 +59,7 @@ export function createBotRouter(
         nickname,
         defaultChannel,
         channelPassword,
+        serverPassword,
         autoStart: autoStart ?? false,
       });
       res.status(201).json(bot.getStatus());
@@ -75,10 +77,10 @@ export function createBotRouter(
         res.status(404).json({ error: "Bot not found" });
         return;
       }
-      const { name, serverAddress, serverPort, nickname, defaultChannel, channelPassword } = req.body;
+      const { name, serverAddress, serverPort, nickname, defaultChannel, channelPassword, serverPassword } = req.body;
       // Update in database
       botManager.updateBot(req.params.id, {
-        name, serverAddress, serverPort, nickname, defaultChannel, channelPassword,
+        name, serverAddress, serverPort, nickname, defaultChannel, channelPassword, serverPassword,
       });
       res.json({ success: true });
     } catch (err) {

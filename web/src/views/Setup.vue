@@ -46,6 +46,10 @@
         <input v-model="nickname" placeholder="MusicBot" class="input" />
       </div>
       <div class="form-group">
+        <label>服务器密码 (可选)</label>
+        <input v-model="serverPassword" type="password" placeholder="需要密码才能连接的服务器" class="input" />
+      </div>
+      <div class="form-group">
         <label>默认频道 (可选)</label>
         <input v-model="defaultChannel" placeholder="音乐频道" class="input" />
       </div>
@@ -86,6 +90,7 @@ const theme = ref('dark');
 const serverAddress = ref('');
 const serverPort = ref(9987);
 const nickname = ref('MusicBot');
+const serverPassword = ref('');
 const defaultChannel = ref('');
 
 async function createBotAndNext() {
@@ -95,6 +100,7 @@ async function createBotAndNext() {
       serverAddress: serverAddress.value,
       serverPort: serverPort.value,
       nickname: nickname.value,
+      serverPassword: serverPassword.value || undefined,
       defaultChannel: defaultChannel.value,
       autoStart: true,
     });

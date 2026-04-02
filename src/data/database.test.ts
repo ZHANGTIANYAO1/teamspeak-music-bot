@@ -59,6 +59,7 @@ describe("database", () => {
       nickname: "MusicBot",
       defaultChannel: "Music",
       channelPassword: "",
+      serverPassword: "",
       autoStart: true,
     };
 
@@ -85,6 +86,7 @@ describe("database", () => {
       nickname: "MusicBot",
       defaultChannel: "Music",
       channelPassword: "",
+      serverPassword: "",
       autoStart: false,
     });
 
