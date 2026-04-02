@@ -10,7 +10,6 @@ import {
   type Identity,
   type TextMessage,
   type ClientInfo,
-  type CommandMiddleware,
 } from "@honeybbq/teamspeak-client";
 import type { Logger } from "../logger.js";
 import { escapeValue } from "./commands.js";
@@ -80,21 +79,6 @@ export class TS3Client extends EventEmitter {
       this.logger.warn(msg);
     };
 
-    // Build command middleware to inject server password into clientinit
-    const commandMiddleware: CommandMiddleware[] = [];
-    if (this.options.serverPassword) {
-      const escaped = escapeValue(this.options.serverPassword);
-      commandMiddleware.push((next) => (cmd) => {
-        if (cmd.startsWith("clientinit ")) {
-          cmd = cmd.replace(
-            "client_server_password=",
-            `client_server_password=${escaped}`
-          );
-        }
-        return next(cmd);
-      });
-    }
-
     this.client = new TS3FullClient(this.identity, addr, this.options.nickname, {
       logger: {
         debug: (msg) => this.logger.debug(msg),
@@ -102,8 +86,26 @@ export class TS3Client extends EventEmitter {
         warn: throttledWarn,
         error: (msg) => this.logger.error(msg),
       },
-      commandMiddleware,
     });
+
+    // Monkey-patch handler.sendPacket to inject server password into clientinit.
+    // The library sends clientinit directly via handler.sendPacket (bypassing
+    // command middleware), so we intercept at the packet level.
+    if (this.options.serverPassword) {
+      const escaped = escapeValue(this.options.serverPassword);
+      const origSendPacket = this.client.handler.sendPacket.bind(this.client.handler);
+      this.client.handler.sendPacket = (pType, data, flags) => {
+        const str = Buffer.from(data).toString("utf-8");
+        if (str.startsWith("clientinit ") && str.includes("client_server_password=")) {
+          const patched = str.replace(
+            "client_server_password=",
+            `client_server_password=${escaped}`
+          );
+          data = Buffer.from(patched);
+        }
+        origSendPacket(pType, data, flags);
+      };
+    }
 
     this.client.on("textMessage", (msg: TextMessage) => {
       const tsMsg: TS3TextMessage = {
