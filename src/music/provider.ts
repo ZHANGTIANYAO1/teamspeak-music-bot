@@ -5,7 +5,7 @@ export interface Song {
   album: string;
   duration: number; // seconds
   coverUrl: string;
-  platform: "netease" | "qq" | "bilibili";
+  platform: "netease" | "qq" | "bilibili" | "youtube";
 }
 
 export interface SongWithUrl extends Song {
@@ -17,7 +17,7 @@ export interface Playlist {
   name: string;
   coverUrl: string;
   songCount: number;
-  platform: "netease" | "qq" | "bilibili";
+  platform: "netease" | "qq" | "bilibili" | "youtube";
 }
 
 export interface Album {
@@ -26,7 +26,7 @@ export interface Album {
   artist: string;
   coverUrl: string;
   songCount: number;
-  platform: "netease" | "qq" | "bilibili";
+  platform: "netease" | "qq" | "bilibili" | "youtube";
 }
 
 export interface LyricLine {
@@ -54,7 +54,7 @@ export interface AuthStatus {
 }
 
 export interface MusicProvider {
-  readonly platform: "netease" | "qq" | "bilibili";
+  readonly platform: "netease" | "qq" | "bilibili" | "youtube";
 
   search(query: string, limit?: number): Promise<SearchResult>;
   getSongUrl(songId: string, quality?: string): Promise<string | null>;

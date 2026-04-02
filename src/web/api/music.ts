@@ -6,11 +6,13 @@ export function createMusicRouter(
   neteaseProvider: MusicProvider,
   qqProvider: MusicProvider,
   bilibiliProvider: MusicProvider,
+  youtubeProvider: MusicProvider,
   logger: Logger
 ): Router {
   const router = Router();
 
   function getProvider(platform?: string): MusicProvider {
+    if (platform === "youtube") return youtubeProvider;
     if (platform === "bilibili") return bilibiliProvider;
     return platform === "qq" ? qqProvider : neteaseProvider;
   }
@@ -42,10 +44,11 @@ export function createMusicRouter(
         return;
       }
       const parsedLimit = parseInt(limit as string) || 20;
-      const [neteaseResult, qqResult, bilibiliResult] = await Promise.allSettled([
+      const [neteaseResult, qqResult, bilibiliResult, youtubeResult] = await Promise.allSettled([
         neteaseProvider.search(q as string, parsedLimit),
         qqProvider.search(q as string, parsedLimit),
         bilibiliProvider.search(q as string, parsedLimit),
+        youtubeProvider.search(q as string, parsedLimit),
       ]);
 
       const songs = [
@@ -54,6 +57,7 @@ export function createMusicRouter(
           : []),
         ...(qqResult.status === "fulfilled" ? qqResult.value.songs : []),
         ...(bilibiliResult.status === "fulfilled" ? bilibiliResult.value.songs : []),
+        ...(youtubeResult.status === "fulfilled" ? youtubeResult.value.songs : []),
       ];
 
       res.json({ songs });
@@ -220,6 +224,7 @@ export function createMusicRouter(
       netease: neteaseProvider.getQuality(),
       qq: qqProvider.getQuality(),
       bilibili: bilibiliProvider.getQuality(),
+      youtube: youtubeProvider.getQuality(),
     });
   });
 
@@ -238,6 +243,9 @@ export function createMusicRouter(
     }
     if (!platform || platform === "bilibili") {
       bilibiliProvider.setQuality(quality);
+    }
+    if (!platform || platform === "youtube") {
+      youtubeProvider.setQuality(quality);
     }
     logger.info({ quality, platform }, "Audio quality changed");
     res.json({ success: true, quality });

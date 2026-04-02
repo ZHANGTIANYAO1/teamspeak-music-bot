@@ -24,6 +24,7 @@ export class BotManager {
   private neteaseProvider: MusicProvider;
   private qqProvider: MusicProvider;
   private bilibiliProvider: MusicProvider;
+  private youtubeProvider: MusicProvider;
   private database: BotDatabase;
   private config: BotConfig;
   private logger: Logger;
@@ -32,6 +33,7 @@ export class BotManager {
     neteaseProvider: MusicProvider,
     qqProvider: MusicProvider,
     bilibiliProvider: MusicProvider,
+    youtubeProvider: MusicProvider,
     database: BotDatabase,
     config: BotConfig,
     logger: Logger
@@ -39,6 +41,7 @@ export class BotManager {
     this.neteaseProvider = neteaseProvider;
     this.qqProvider = qqProvider;
     this.bilibiliProvider = bilibiliProvider;
+    this.youtubeProvider = youtubeProvider;
     this.database = database;
     this.config = config;
     this.logger = logger;
@@ -61,6 +64,7 @@ export class BotManager {
       neteaseProvider: this.neteaseProvider,
       qqProvider: this.qqProvider,
       bilibiliProvider: this.bilibiliProvider,
+      youtubeProvider: this.youtubeProvider,
       database: this.database,
       config: this.config,
       logger: this.logger,
@@ -156,6 +160,7 @@ export class BotManager {
         neteaseProvider: this.neteaseProvider,
         qqProvider: this.qqProvider,
         bilibiliProvider: this.bilibiliProvider,
+        youtubeProvider: this.youtubeProvider,
         database: this.database,
         config: this.config,
         logger: this.logger,

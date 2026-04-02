@@ -7,6 +7,7 @@ import { createApiServerManager } from "./music/api-server.js";
 import { NeteaseProvider } from "./music/netease.js";
 import { QQMusicProvider } from "./music/qq.js";
 import { BiliBiliProvider } from "./music/bilibili.js";
+import { YouTubeProvider } from "./music/youtube.js";
 import { createCookieStore } from "./music/auth.js";
 import { BotManager } from "./bot/manager.js";
 import { createWebServer } from "./web/server.js";
@@ -44,6 +45,7 @@ async function main() {
   const neteaseProvider = new NeteaseProvider(apiServer.getNeteaseBaseUrl());
   const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl());
   const bilibiliProvider = new BiliBiliProvider();
+  const youtubeProvider = new YouTubeProvider();
 
   const cookieStore = createCookieStore(COOKIE_DIR);
   const neteaseCookie = cookieStore.load("netease");
@@ -57,6 +59,7 @@ async function main() {
     neteaseProvider,
     qqProvider,
     bilibiliProvider,
+    youtubeProvider,
     db,
     config,
     logger
@@ -69,6 +72,7 @@ async function main() {
     neteaseProvider,
     qqProvider,
     bilibiliProvider,
+    youtubeProvider,
     database: db,
     config,
     logger,

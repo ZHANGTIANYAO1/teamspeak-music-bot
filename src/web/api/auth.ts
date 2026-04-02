@@ -7,12 +7,14 @@ export function createAuthRouter(
   neteaseProvider: MusicProvider,
   qqProvider: MusicProvider,
   bilibiliProvider: MusicProvider,
+  youtubeProvider: MusicProvider,
   logger: Logger,
   cookieStore?: CookieStore
 ): Router {
   const router = Router();
 
   function getProvider(platform?: string): MusicProvider {
+    if (platform === "youtube") return youtubeProvider;
     if (platform === "bilibili") return bilibiliProvider;
     return platform === "qq" ? qqProvider : neteaseProvider;
   }
