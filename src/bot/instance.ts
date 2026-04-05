@@ -23,6 +23,7 @@ export interface BotInstanceOptions {
   neteaseProvider: MusicProvider;
   qqProvider: MusicProvider;
   bilibiliProvider: MusicProvider;
+  youtubeProvider: MusicProvider;
   database: BotDatabase;
   config: BotConfig;
   logger: Logger;
@@ -51,6 +52,7 @@ export class BotInstance extends EventEmitter {
   private neteaseProvider: MusicProvider;
   private qqProvider: MusicProvider;
   private bilibiliProvider: MusicProvider;
+  private youtubeProvider: MusicProvider;
   private database: BotDatabase;
   private config: BotConfig;
   private logger: Logger;
@@ -65,6 +67,7 @@ export class BotInstance extends EventEmitter {
     this.neteaseProvider = options.neteaseProvider;
     this.qqProvider = options.qqProvider;
     this.bilibiliProvider = options.bilibiliProvider;
+    this.youtubeProvider = options.youtubeProvider;
     this.database = options.database;
     this.config = options.config;
     this.logger = options.logger.child({ botId: this.id });
@@ -217,12 +220,14 @@ export class BotInstance extends EventEmitter {
     }
   }
 
-  getProviderFor(platform: "netease" | "qq" | "bilibili"): MusicProvider {
+  getProviderFor(platform: "netease" | "qq" | "bilibili" | "youtube"): MusicProvider {
+    if (platform === "youtube") return this.youtubeProvider;
     if (platform === "bilibili") return this.bilibiliProvider;
     return platform === "qq" ? this.qqProvider : this.neteaseProvider;
   }
 
   private getProvider(flags: Set<string>): MusicProvider {
+    if (flags.has("y")) return this.youtubeProvider;
     if (flags.has("b")) return this.bilibiliProvider;
     if (flags.has("q")) return this.qqProvider;
     return this.neteaseProvider;
@@ -475,6 +480,7 @@ export class BotInstance extends EventEmitter {
       `${p}play <song>  — Search and play`,
       `${p}play -q <song> — Search from QQ Music`,
       `${p}play -b <song> — Search from BiliBili`,
+      `${p}play -y <song> — Search from YouTube`,
       `${p}add <song>   — Add to queue`,
       `${p}pause/resume — Pause/resume`,
       `${p}next/prev    — Next/previous`,

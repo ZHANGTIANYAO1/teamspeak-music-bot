@@ -6,7 +6,7 @@ export interface PlayHistoryEntry {
   songName: string;
   artist: string;
   album: string;
-  platform: "netease" | "qq" | "bilibili";
+  platform: "netease" | "qq" | "bilibili" | "youtube";
   coverUrl: string;
 }
 
