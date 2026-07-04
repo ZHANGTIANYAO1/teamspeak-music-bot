@@ -10,6 +10,7 @@ export interface PlayHistoryEntry {
   album: string;
   platform: "netease" | "qq" | "bilibili" | "youtube" | "local" | "kugou" | "spotify";
   coverUrl: string;
+  requestedBy?: string;
 }
 
 export interface PlayHistoryRecord extends PlayHistoryEntry {
@@ -124,6 +125,12 @@ function migrateSchema(db: Database.Database): void {
   if (!userColNames.includes("role")) {
     db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
   }
+
+  const historyColumns = db.prepare("PRAGMA table_info(play_history)").all() as Array<{ name: string }>;
+  const historyColNames = historyColumns.map((c) => c.name);
+  if (!historyColNames.includes("requestedBy")) {
+    db.exec("ALTER TABLE play_history ADD COLUMN requestedBy TEXT NOT NULL DEFAULT ''");
+  }
 }
 
 function initTables(db: Database.Database): void {
@@ -137,6 +144,7 @@ function initTables(db: Database.Database): void {
       album TEXT NOT NULL,
       platform TEXT NOT NULL,
       coverUrl TEXT NOT NULL,
+      requestedBy TEXT NOT NULL DEFAULT '',
       playedAt TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -265,8 +273,8 @@ export function createDatabase(dbPath: string): BotDatabase {
   ensureGuestUser(db);
 
   const insertHistory = db.prepare(`
-    INSERT INTO play_history (botId, songId, songName, artist, album, platform, coverUrl)
-    VALUES (@botId, @songId, @songName, @artist, @album, @platform, @coverUrl)
+    INSERT INTO play_history (botId, songId, songName, artist, album, platform, coverUrl, requestedBy)
+    VALUES (@botId, @songId, @songName, @artist, @album, @platform, @coverUrl, @requestedBy)
   `);
 
   const selectHistory = db.prepare(`
@@ -338,7 +346,7 @@ export function createDatabase(dbPath: string): BotDatabase {
     db,
 
     addPlayHistory(record) {
-      insertHistory.run(record);
+      insertHistory.run({ ...record, requestedBy: record.requestedBy ?? "" });
     },
 
     getPlayHistory(botId, limit) {

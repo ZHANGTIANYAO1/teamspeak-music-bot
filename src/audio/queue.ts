@@ -14,6 +14,7 @@ export interface QueuedSong {
   url?: string; // resolved lazily at play time
   coverUrl: string;
   duration: number; // seconds
+  requestedBy?: string;
 }
 
 export class PlayQueue {

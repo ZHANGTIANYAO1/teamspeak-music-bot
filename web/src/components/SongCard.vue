@@ -9,6 +9,11 @@
           class="platform-badge"
           :class="song.platform === 'bilibili' ? 'badge-bilibili' : song.platform === 'qq' ? 'badge-qq' : song.platform === 'youtube' ? 'badge-youtube' : song.platform === 'local' ? 'badge-local' : song.platform === 'kugou' ? 'badge-kugou' : song.platform === 'spotify' ? 'badge-spotify' : 'badge-netease'"
         >{{ song.platform === 'bilibili' ? 'B站' : song.platform === 'qq' ? 'QQ' : song.platform === 'youtube' ? 'YouTube' : song.platform === 'local' ? '本地' : song.platform === 'kugou' ? '酷狗' : song.platform === 'spotify' ? 'Spotify' : '网易云' }}</span>
+        <span
+          v-if="song.requestedBy"
+          class="requester-badge"
+          :class="{ 'requester-badge-guest': song.requestedBy === '游客' }"
+        >{{ song.requestedBy }}</span>
       </div>
       <div class="song-artist">{{ song.artist }}</div>
     </div>
@@ -113,6 +118,26 @@ function formatDuration(seconds: number): string {
   padding: 1px 5px;
   border-radius: var(--radius-xs);
   line-height: 1.4;
+}
+
+.requester-badge {
+  flex-shrink: 0;
+  max-width: 96px;
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-semi);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  line-height: 1.4;
+  background: var(--color-online-15);
+  color: var(--color-online);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.requester-badge-guest {
+  background: rgba(156, 163, 175, 0.18);
+  color: rgba(156, 163, 175, 0.95);
 }
 
 .badge-netease {

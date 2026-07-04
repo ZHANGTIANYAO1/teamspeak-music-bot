@@ -53,6 +53,11 @@ export function createPlayerRouter(
     res.status(403).json({ error: "本地音频播放已关闭" });
   }
 
+  function requesterName(req: any): string {
+    const name = req.user?.username;
+    return typeof name === "string" && name.trim() ? name.trim() : "游客";
+  }
+
   router.post("/:botId/play", authorize({ capability: "player.control" }), async (req, res) => {
     try {
       const bot = (req as any).bot;
@@ -66,7 +71,7 @@ export function createPlayerRouter(
         res.status(400).json({ error: "Invalid command" });
         return;
       }
-      const response = await bot.executeCommand(cmd);
+      const response = await bot.executeCommand(cmd, undefined, requesterName(req));
       res.json({ message: response });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -82,7 +87,7 @@ export function createPlayerRouter(
         res.status(400).json({ error: "Invalid command" });
         return;
       }
-      const response = await bot.executeCommand(cmd);
+      const response = await bot.executeCommand(cmd, undefined, requesterName(req));
       res.json({ message: response });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -120,7 +125,7 @@ export function createPlayerRouter(
           ? platform
           : "netease"
       );
-      const message = await bot.startFm(provider);
+      const message = await bot.startFm(provider, requesterName(req));
       res.json({
         ok:
           !message.startsWith("No FM songs") &&
@@ -271,7 +276,7 @@ export function createPlayerRouter(
         `!playlist ${platformFlag(platform)} ${playlistId}`.trim(),
         "!"
       )!;
-      const response = await bot.executeCommand(cmd);
+      const response = await bot.executeCommand(cmd, undefined, requesterName(req));
       res.json({ message: response });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -332,7 +337,7 @@ export function createPlayerRouter(
       const queue = bot.getQueueManager();
       queue.clear();
       for (const song of queueable) {
-        queue.add({ ...song, platform: provider.platform });
+        queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
       }
       // Sweep AFTER the queue is rebuilt: the previous queue's local uploads are
       // released and deleted, but an empty/failed playlist (early return above)
@@ -418,7 +423,7 @@ export function createPlayerRouter(
       const queue = bot.getQueueManager();
       queue.clear();
       for (const song of queueable) {
-        queue.add({ ...song, platform: provider.platform });
+        queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
       }
       // Sweep AFTER the queue is rebuilt (see play-playlist).
       bot.cleanupQueuedLocalSongs?.("queue_replaced");
@@ -468,7 +473,7 @@ export function createPlayerRouter(
       const queue = bot.getQueueManager();
       bot.getPlayer().stop();
       queue.clear();
-      queue.add(song);
+      queue.add({ ...song, requestedBy: requesterName(req) });
       queue.play();
 
       bot.getPlayer().resetFailures();
@@ -513,7 +518,7 @@ export function createPlayerRouter(
         // after natural track end without queue.clear()).
         const insertedAt =
           queue.getCurrentIndex() < 0 ? queue.size() : queue.getCurrentIndex() + 1;
-        queue.addNext(song);
+        queue.addNext({ ...song, requestedBy: requesterName(req) });
 
         if (wasIdle) {
           // Promote the just-added song to current and start it.
@@ -555,7 +560,7 @@ export function createPlayerRouter(
         const queue = bot.getQueueManager();
         const insertedAt =
           queue.getCurrentIndex() < 0 ? queue.size() : queue.getCurrentIndex() + 1;
-        queue.addNext(song);
+        queue.addNext({ ...song, requestedBy: requesterName(req) });
         queue.playAt(insertedAt);
         bot.getPlayer().resetFailures();
         const ok = await bot.resolveAndPlay(queue.current()!);
@@ -587,7 +592,7 @@ export function createPlayerRouter(
       const body = await bot.runExclusive(async () => {
         const queue = bot.getQueueManager();
         const wasIdle = bot.getPlayer().getState() === "idle";
-        queue.add(song);
+        queue.add({ ...song, requestedBy: requesterName(req) });
 
         // If nothing was playing, start this newly-added song immediately.
         if (wasIdle) {
@@ -627,7 +632,7 @@ export function createPlayerRouter(
       }
 
       const queue = bot.getQueueManager();
-      queue.add({ ...song, platform: provider.platform });
+      queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
 
       // If nothing is playing, start the first song
       if (bot.getPlayer().getState() === "idle") {
@@ -678,6 +683,7 @@ export function createPlayerRouter(
       coverUrl: r.coverUrl,
       platform: r.platform,
       playedAt: r.playedAt,
+      requestedBy: r.requestedBy,
     }));
     res.json({ history });
   });

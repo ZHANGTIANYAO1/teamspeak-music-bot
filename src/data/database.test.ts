@@ -60,6 +60,7 @@ describe("database", () => {
       album: "Test Album",
       platform: "netease",
       coverUrl: "https://example.com/cover.jpg",
+      requestedBy: "alice",
     });
 
     botDb.addPlayHistory({
@@ -76,6 +77,7 @@ describe("database", () => {
     expect(history).toHaveLength(2);
     expect(history[0].songName).toBe("Another Song");
     expect(history[1].songName).toBe("Test Song");
+    expect(history[1].requestedBy).toBe("alice");
   });
 
   it("saves and loads bot instances", () => {
