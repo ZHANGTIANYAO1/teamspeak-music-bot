@@ -3,6 +3,7 @@ import type { MusicProvider } from "../../music/provider.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { CookieStore } from "../../music/auth.js";
 import type { Logger } from "../../logger.js";
+import type { BotConfig, JellyfinConfig } from "../../data/config.js";
 import { requirePermission } from "../middleware/requirePermission.js";
 import { requireNotGuest } from "../middleware/requireNotGuest.js";
 
@@ -13,7 +14,9 @@ export function createAuthRouter(
   logger: Logger,
   cookieStore?: CookieStore,
   kugouProvider?: MusicProvider,
-  spotifyProvider?: MusicProvider
+  spotifyProvider?: MusicProvider,
+  jellyfinProvider?: MusicProvider,
+  config?: BotConfig
 ): Router {
   const router = Router();
   // YouTube is auth-less; we only use this instance so /auth/status can
@@ -25,6 +28,7 @@ export function createAuthRouter(
     if (platform === "youtube") return youtubeProvider;
     if (platform === "kugou" && kugouProvider) return kugouProvider;
     if (platform === "spotify" && spotifyProvider) return spotifyProvider;
+    if (platform === "jellyfin" && jellyfinProvider) return jellyfinProvider;
     return platform === "qq" ? qqProvider : neteaseProvider;
   }
 
@@ -84,6 +88,45 @@ export function createAuthRouter(
     }
   });
 
+  // Jellyfin has no QR/cookie flow — the connection is admin-configured. This
+  // round-trips /System/Info so Settings can verify form values BEFORE saving.
+  // Empty/missing credential fields fall back to the stored config, so a
+  // masked (not re-entered) password still tests the live setup.
+  router.post("/jellyfin/test", requirePermission("platform.auth"), async (req, res) => {
+    const testable = jellyfinProvider as
+      | (MusicProvider & {
+          testConnection?: (
+            candidate?: JellyfinConfig,
+          ) => Promise<{ ok: boolean; serverName?: string; version?: string; error?: string }>;
+        })
+      | undefined;
+    if (!testable?.testConnection) {
+      res.status(501).json({ error: "Jellyfin provider not available" });
+      return;
+    }
+    try {
+      const body = (req.body ?? {}) as Partial<JellyfinConfig>;
+      const stored = config?.jellyfin;
+      const str = (v: unknown, fallback: string) =>
+        typeof v === "string" && v.trim() !== "" ? v.trim() : fallback;
+      const candidate: JellyfinConfig = {
+        serverUrl: str(body.serverUrl, stored?.serverUrl ?? ""),
+        authMode:
+          body.authMode === "apikey" || body.authMode === "userpass"
+            ? body.authMode
+            : stored?.authMode ?? "userpass",
+        username: str(body.username, stored?.username ?? ""),
+        password: str(body.password, stored?.password ?? ""),
+        apiKey: str(body.apiKey, stored?.apiKey ?? ""),
+        userId: str(body.userId, stored?.userId ?? ""),
+      };
+      res.json(await testable.testConnection(candidate));
+    } catch (err) {
+      logger.error({ err }, "Jellyfin test connection failed");
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   router.post("/sms/send", requirePermission("platform.auth"), async (req, res) => {
     try {
       const { phone } = req.body;
@@ -137,6 +180,14 @@ export function createAuthRouter(
       res
         .status(400)
         .json({ error: "YouTube does not use cookies (uses yt-dlp binary)" });
+      return;
+    }
+    // Jellyfin auth is server-configured (Settings → connection card), not
+    // cookie-based; falling through would clobber the NetEase cookie entry.
+    if (platform === "jellyfin") {
+      res
+        .status(400)
+        .json({ error: "Jellyfin 通过 Settings 配置连接，不支持手动 Cookie" });
       return;
     }
     const provider = getProvider(platform);

@@ -79,6 +79,7 @@ export class BotManager extends EventEmitter {
   private localProvider: MusicProvider;
   private kugouProvider: MusicProvider;
   private spotifyProvider: MusicProvider;
+  private jellyfinProvider: MusicProvider;
   private spotifyDataDir: string;
   private readonly spotifyOAuth?: SpotifyOAuth;
   private database: BotDatabase;
@@ -102,7 +103,8 @@ export class BotManager extends EventEmitter {
     kugouProvider?: MusicProvider,
     spotifyProvider?: MusicProvider,
     spotifyDataDir?: string,
-    spotifyOAuth?: SpotifyOAuth
+    spotifyOAuth?: SpotifyOAuth,
+    jellyfinProvider?: MusicProvider
   ) {
     super();
     this.neteaseProvider = neteaseProvider;
@@ -112,6 +114,7 @@ export class BotManager extends EventEmitter {
     this.localProvider = localProvider ?? neteaseProvider;
     this.kugouProvider = kugouProvider ?? neteaseProvider;
     this.spotifyProvider = spotifyProvider ?? neteaseProvider;
+    this.jellyfinProvider = jellyfinProvider ?? neteaseProvider;
     this.spotifyDataDir = spotifyDataDir ?? path.join(process.cwd(), "data", "spotify");
     this.spotifyOAuth = spotifyOAuth;
     // Let the local provider see which uploads are still referenced by any
@@ -153,6 +156,7 @@ export class BotManager extends EventEmitter {
       localProvider: this.localProvider,
       kugouProvider: this.kugouProvider,
       spotifyProvider: this.spotifyProvider,
+      jellyfinProvider: this.jellyfinProvider,
       database: this.database,
       config: this.config,
       logger: this.logger,
@@ -296,6 +300,7 @@ export class BotManager extends EventEmitter {
         localProvider: this.localProvider,
         kugouProvider: this.kugouProvider,
         spotifyProvider: this.spotifyProvider,
+        jellyfinProvider: this.jellyfinProvider,
         database: this.database,
         config: this.config,
         logger: this.logger,
@@ -353,6 +358,7 @@ export class BotManager extends EventEmitter {
         localProvider: this.localProvider,
         kugouProvider: this.kugouProvider,
         spotifyProvider: this.spotifyProvider,
+        jellyfinProvider: this.jellyfinProvider,
         database: this.database,
         config: this.config,
         logger: this.logger,

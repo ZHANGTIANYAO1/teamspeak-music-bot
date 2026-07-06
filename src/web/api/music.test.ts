@@ -3,10 +3,12 @@ import express from "express";
 import request from "supertest";
 import pino from "pino";
 import type { MusicProvider, SearchResult } from "../../music/provider.js";
+import { getDefaultConfig, type BotConfig } from "../../data/config.js";
 import { createMusicRouter } from "./music.js";
 
+const empty: SearchResult = { songs: [], albums: [], playlists: [] };
+
 function fakeProvider(platform: MusicProvider["platform"]): MusicProvider {
-  const empty: SearchResult = { songs: [], albums: [], playlists: [] };
   return {
     platform,
     search: vi.fn().mockResolvedValue(empty),
@@ -45,5 +47,98 @@ describe("music router GET /search offset pagination", () => {
     const res = await request(app).get("/api/music/search?q=hello&limit=20&offset=-5");
     expect(res.status).toBe(200);
     expect(netease.search).toHaveBeenCalledWith("hello", 20, 0);
+  });
+});
+
+describe("music router provider gating (enabledProviders) + jellyfin endpoints", () => {
+  function jellyfinFake(): MusicProvider {
+    return {
+      platform: "jellyfin",
+      search: vi.fn().mockResolvedValue(empty),
+      getQuality: vi.fn().mockReturnValue("direct"),
+      getLatestAlbums: vi
+        .fn()
+        .mockResolvedValue([{ id: "a1", name: "Album", platform: "jellyfin" }]),
+      getFavoriteSongs: vi.fn().mockResolvedValue([]),
+    } as unknown as MusicProvider;
+  }
+
+  function mount(config: BotConfig) {
+    const netease = fakeProvider("netease");
+    const jellyfin = jellyfinFake();
+    const router = createMusicRouter(
+      netease,
+      fakeProvider("qq"),
+      fakeProvider("bilibili"),
+      pino({ level: "silent" }),
+      undefined,
+      config,
+      fakeProvider("kugou"),
+      fakeProvider("spotify"),
+      jellyfin,
+    );
+    const app = express();
+    app.use("/api/music", router);
+    return { app, netease, jellyfin };
+  }
+
+  it("routes a platform-less /search to the default platform (jellyfin)", async () => {
+    const { app, netease, jellyfin } = mount(getDefaultConfig());
+    const res = await request(app).get("/api/music/search?q=hello");
+    expect(res.status).toBe(200);
+    expect(jellyfin.search).toHaveBeenCalledWith("hello", 20, 0);
+    expect(netease.search).not.toHaveBeenCalled();
+  });
+
+  it("rejects a disabled platform with 400 without calling its provider", async () => {
+    // Default config enables jellyfin only.
+    const { app, netease } = mount(getDefaultConfig());
+    const res = await request(app).get("/api/music/search?q=hello&platform=netease");
+    expect(res.status).toBe(400);
+    expect(netease.search).not.toHaveBeenCalled();
+  });
+
+  it("allows an explicitly re-enabled legacy platform", async () => {
+    const config = getDefaultConfig();
+    config.enabledProviders = ["jellyfin", "netease"];
+    const { app, netease } = mount(config);
+    const res = await request(app).get("/api/music/search?q=hello&platform=netease");
+    expect(res.status).toBe(200);
+    expect(netease.search).toHaveBeenCalledWith("hello", 20, 0);
+  });
+
+  it("GET /providers reports enabled sources and the default platform", async () => {
+    const { app } = mount(getDefaultConfig());
+    const res = await request(app).get("/api/music/providers");
+    expect(res.status).toBe(200);
+    expect(res.body.default).toBe("jellyfin");
+    expect(res.body.enabled).toContain("jellyfin");
+    expect(res.body.enabled).toContain("local"); // localAudioEnabled defaults on
+    expect(res.body.enabled).not.toContain("netease");
+    expect(res.body.enabled).not.toContain("spotify"); // spotify.enabled defaults off
+  });
+
+  it("GET /jellyfin/latest-albums returns provider data", async () => {
+    const { app, jellyfin } = mount(getDefaultConfig());
+    const res = await request(app).get("/api/music/jellyfin/latest-albums?limit=5");
+    expect(res.status).toBe(200);
+    expect(
+      (jellyfin as unknown as { getLatestAlbums: ReturnType<typeof vi.fn> }).getLatestAlbums,
+    ).toHaveBeenCalledWith(5);
+    expect(res.body.albums).toHaveLength(1);
+  });
+
+  it("GET /jellyfin/latest-albums is 400 when jellyfin is disabled", async () => {
+    const config = getDefaultConfig();
+    config.enabledProviders = ["netease"];
+    const { app } = mount(config);
+    const res = await request(app).get("/api/music/jellyfin/latest-albums");
+    expect(res.status).toBe(400);
+  });
+
+  it("GET /jellyfin/favorites denies unauthenticated/guest access", async () => {
+    const { app } = mount(getDefaultConfig());
+    const res = await request(app).get("/api/music/jellyfin/favorites");
+    expect(res.status).toBe(401);
   });
 });

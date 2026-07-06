@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, saveConfig, migrateLegacyConfig } from "./data/config.js";
+import { loadConfig, saveConfig, migrateLegacyConfig, isProviderEnabled } from "./data/config.js";
 import { createDatabase } from "./data/database.js";
 import { createLogger } from "./logger.js";
 import { createApiServerManager } from "./music/api-server.js";
@@ -9,6 +9,7 @@ import { QQMusicProvider } from "./music/qq.js";
 import { BiliBiliProvider } from "./music/bilibili.js";
 import { LocalMusicProvider } from "./music/local.js";
 import { KugouProvider } from "./music/kugou.js";
+import { JellyfinProvider } from "./music/jellyfin.js";
 import { SpotifyProvider } from "./music/spotify/provider.js";
 import { SpotifyOAuth, createFileOAuthTokenStore } from "./music/spotify/spotify-oauth.js";
 import { createCookieStore } from "./music/auth.js";
@@ -52,7 +53,14 @@ async function main() {
   const db = createDatabase(DB_PATH);
 
   const apiServer = createApiServerManager(
-    { neteasePort: config.neteaseApiPort, qqMusicPort: config.qqMusicApiPort },
+    {
+      neteasePort: config.neteaseApiPort,
+      qqMusicPort: config.qqMusicApiPort,
+      // Provider gating: with the default (jellyfin-only) config, neither
+      // sidecar starts and ports 3001/3200 are never bound.
+      neteaseEnabled: isProviderEnabled(config, "netease"),
+      qqEnabled: isProviderEnabled(config, "qq"),
+    },
     logger
   );
   await apiServer.start();
@@ -81,6 +89,16 @@ async function main() {
   if (bilibiliCookie) bilibiliProvider.setCookie(bilibiliCookie);
   const kugouCookie = cookieStore.load("kugou");
   if (kugouCookie) kugouProvider.setCookie(kugouCookie);
+
+  // Jellyfin: admin-configured connection (no QR). The persisted blob carries
+  // AccessToken + User.Id + DeviceId and lives alongside the other platform
+  // cookies; a Jellyfin server that is unreachable at boot must not block
+  // startup — the provider authenticates lazily on first use.
+  const jellyfinProvider = new JellyfinProvider(logger);
+  jellyfinProvider.configure(config.jellyfin);
+  const jellyfinAuth = cookieStore.load("jellyfin");
+  if (jellyfinAuth) jellyfinProvider.setCookie(jellyfinAuth);
+  jellyfinProvider.setPersist((serialized) => cookieStore.save("jellyfin", serialized));
 
   const permissions = createPermissionStore(db.db);
 
@@ -114,7 +132,8 @@ async function main() {
     kugouProvider,
     spotifyProvider,
     SPOTIFY_DATA_DIR,
-    spotifyOAuth
+    spotifyOAuth,
+    jellyfinProvider
   );
   await botManager.loadSavedBots();
 
@@ -127,6 +146,7 @@ async function main() {
     localProvider,
     kugouProvider,
     spotifyProvider,
+    jellyfinProvider,
     database: db,
     avatarStore,
     config,

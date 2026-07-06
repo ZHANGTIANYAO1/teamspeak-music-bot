@@ -60,12 +60,49 @@
     </div>
 
     <div v-if="currentStep === 2" class="step-content">
-      <h2>登录音乐账号 (可选)</h2>
-      <p class="subtitle">登录后可播放 VIP/付费歌曲，跳过则只能播放免费歌曲</p>
+      <h2>连接 Jellyfin (可选)</h2>
+      <p class="subtitle">连接自建 Jellyfin 服务器作为主音源；也可稍后在「设置」中配置</p>
+      <div class="form-group">
+        <label>服务器地址</label>
+        <input v-model="jellyfin.serverUrl" placeholder="https://jellyfin.example.com" class="input" />
+      </div>
+      <div class="form-group">
+        <label>认证方式</label>
+        <select v-model="jellyfin.authMode" class="input">
+          <option value="userpass">账号密码</option>
+          <option value="apikey">API Key</option>
+        </select>
+      </div>
+      <template v-if="jellyfin.authMode === 'userpass'">
+        <div class="form-group">
+          <label>用户名</label>
+          <input v-model="jellyfin.username" placeholder="Jellyfin 用户名" class="input" />
+        </div>
+        <div class="form-group">
+          <label>密码</label>
+          <input v-model="jellyfin.password" type="password" placeholder="Jellyfin 密码" class="input" />
+        </div>
+      </template>
+      <template v-else>
+        <div class="form-group">
+          <label>API Key</label>
+          <input v-model="jellyfin.apiKey" type="password" placeholder="Jellyfin API Key" class="input" />
+        </div>
+        <div class="form-group">
+          <label>用户 ID</label>
+          <input v-model="jellyfin.userId" placeholder="该 Key 使用的用户 ID" class="input" />
+        </div>
+      </template>
+      <p v-if="jellyfinTestMessage" class="test-message" :class="{ ok: jellyfinTestOk }">{{ jellyfinTestMessage }}</p>
       <div class="btn-row">
         <button class="btn-secondary" @click="currentStep = 1">上一步</button>
         <button class="btn-secondary" @click="currentStep = 3">跳过</button>
-        <button class="btn-primary" @click="currentStep = 3">完成登录</button>
+        <button class="btn-secondary" :disabled="jellyfinTesting" @click="testJellyfin">
+          {{ jellyfinTesting ? '测试中…' : '测试连接' }}
+        </button>
+        <button class="btn-primary" :disabled="jellyfinSaving" @click="saveJellyfinAndNext">
+          {{ jellyfinSaving ? '保存中…' : '保存并继续' }}
+        </button>
       </div>
     </div>
 
@@ -78,11 +115,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, reactive } from 'vue';
 import axios from 'axios';
 
 const currentStep = ref(0);
-const stepLabels = ['欢迎', 'TS 服务器', '音乐账号', '完成'];
+const stepLabels = ['欢迎', 'TS 服务器', 'Jellyfin', '完成'];
 
 const adminPassword = ref('');
 const locale = ref('zh');
@@ -92,6 +129,21 @@ const serverPort = ref(9987);
 const nickname = ref('MusicBot');
 const defaultChannel = ref('');
 const channelId = ref('');
+
+// Jellyfin — the primary music source. Optional: skipping leaves it
+// configurable later in Settings.
+const jellyfin = reactive({
+  serverUrl: '',
+  authMode: 'userpass' as 'userpass' | 'apikey',
+  username: '',
+  password: '',
+  apiKey: '',
+  userId: '',
+});
+const jellyfinTesting = ref(false);
+const jellyfinSaving = ref(false);
+const jellyfinTestOk = ref(false);
+const jellyfinTestMessage = ref('');
 
 async function createBotAndNext() {
   try {
@@ -107,6 +159,36 @@ async function createBotAndNext() {
     currentStep.value = 2;
   } catch (err) {
     alert('Failed to create bot: ' + (err as Error).message);
+  }
+}
+
+async function testJellyfin() {
+  jellyfinTesting.value = true;
+  jellyfinTestMessage.value = '';
+  try {
+    const res = await axios.post('/api/auth/jellyfin/test', { ...jellyfin });
+    jellyfinTestOk.value = Boolean(res.data?.ok);
+    jellyfinTestMessage.value = res.data?.ok
+      ? `连接成功：${res.data.serverName ?? 'Jellyfin'} ${res.data.version ?? ''}`
+      : `连接失败：${res.data?.error ?? '未知错误'}`;
+  } catch {
+    jellyfinTestOk.value = false;
+    jellyfinTestMessage.value = '测试请求失败，请检查地址后重试';
+  } finally {
+    jellyfinTesting.value = false;
+  }
+}
+
+async function saveJellyfinAndNext() {
+  jellyfinSaving.value = true;
+  try {
+    await axios.post('/api/bot/settings', { jellyfin: { ...jellyfin } });
+    currentStep.value = 3;
+  } catch {
+    jellyfinTestOk.value = false;
+    jellyfinTestMessage.value = '保存失败，请稍后在「设置」中重试';
+  } finally {
+    jellyfinSaving.value = false;
   }
 }
 </script>
@@ -230,6 +312,14 @@ async function createBotAndNext() {
   display: flex;
   gap: 12px;
   margin-top: 32px;
+}
+
+.test-message {
+  font-size: 13px;
+  color: #e67e22;
+  margin-top: -6px;
+
+  &.ok { color: var(--color-online, #22c55e); }
 }
 
 .done-step {

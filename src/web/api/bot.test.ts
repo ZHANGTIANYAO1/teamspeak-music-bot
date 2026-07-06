@@ -13,7 +13,7 @@ import { createAvatarStore } from "../../data/avatars.js";
 import { createRequireAuth } from "../middleware/requireAuth.js";
 import { createPermissionStore } from "../../data/permissions.js";
 import { createBotRouter } from "./bot.js";
-import { getDefaultConfig, type BotConfig } from "../../data/config.js";
+import { getDefaultConfig, type BotConfig, type JellyfinConfig } from "../../data/config.js";
 import { SESSION_COOKIE_NAME } from "../auth/validateSession.js";
 import type { BotManager } from "../../bot/manager.js";
 
@@ -559,5 +559,91 @@ describe("bot router /settings guest-mode gating + persistence", () => {
     // Gate rejected before any mutation.
     expect(config.spotify.enabled).toBe(false);
     expect(config.spotify.clientId).toBe("");
+  });
+});
+
+describe("bot router /settings jellyfin block + enabledProviders", () => {
+  let tmpDir: string;
+  let configPath: string;
+  let config: BotConfig;
+  let botDb: BotDatabase;
+  let configureCalls: JellyfinConfig[];
+
+  beforeEach(() => {
+    botDb = createDatabase(":memory:");
+    tmpDir = mkdtempSync(join(tmpdir(), "botsettings-jf-"));
+    configPath = join(tmpDir, "config.json");
+    config = getDefaultConfig();
+    configureCalls = [];
+  });
+
+  afterEach(() => {
+    botDb.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function mountBot(): express.Express {
+    const fakeManager = { getAllBots: () => [] } as unknown as BotManager;
+    const avatarStore = createAvatarStore(tmpDir);
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as { user?: unknown }).user = { role: "admin" }; next(); });
+    app.use(
+      "/api/bot",
+      createBotRouter(
+        fakeManager, config, configPath, pino({ level: "silent" }), botDb, avatarStore,
+        undefined, undefined, undefined,
+        { configure: (cfg: JellyfinConfig) => configureCalls.push({ ...cfg }) },
+      ),
+    );
+    return app;
+  }
+
+  it("GET /settings exposes a masked jellyfin block (no password/apiKey echo)", async () => {
+    config.jellyfin.serverUrl = "https://jf.example.com";
+    config.jellyfin.password = "secret";
+    const res = await request(mountBot()).get("/api/bot/settings");
+    expect(res.status).toBe(200);
+    expect(res.body.jellyfin).toEqual({
+      serverUrl: "https://jf.example.com",
+      authMode: "userpass",
+      username: "",
+      userId: "",
+      hasPassword: true,
+      hasApiKey: false,
+    });
+    expect(res.body.enabledProviders).toEqual(["jellyfin"]);
+  });
+
+  it("POST /settings merges jellyfin, keeps stored secrets on blank, hot-configures", async () => {
+    config.jellyfin.password = "stored-pw";
+    const app = mountBot();
+    const res = await request(app).post("/api/bot/settings").send({
+      jellyfin: { serverUrl: "https://jf.example.com///", username: "bob", password: "" },
+    });
+    expect(res.status).toBe(200);
+    // Trailing slashes normalized; blank password kept the stored one.
+    expect(config.jellyfin.serverUrl).toBe("https://jf.example.com");
+    expect(config.jellyfin.username).toBe("bob");
+    expect(config.jellyfin.password).toBe("stored-pw");
+    expect(res.body.jellyfin.hasPassword).toBe(true);
+    // Live provider re-configured with the post-merge values.
+    expect(configureCalls).toHaveLength(1);
+    expect(configureCalls[0].serverUrl).toBe("https://jf.example.com");
+    expect(configureCalls[0].password).toBe("stored-pw");
+    // Persisted to disk.
+    const onDisk = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(onDisk.jellyfin.username).toBe("bob");
+  });
+
+  it("POST /settings filters enabledProviders to known providers", async () => {
+    const res = await request(mountBot()).post("/api/bot/settings").send({
+      enabledProviders: ["jellyfin", "netease", "bogus", 42],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.enabledProviders).toEqual(["jellyfin", "netease"]);
+    expect(config.enabledProviders).toEqual(["jellyfin", "netease"]);
+    // No jellyfin block in the request → no reconfigure call.
+    expect(configureCalls).toHaveLength(0);
   });
 });

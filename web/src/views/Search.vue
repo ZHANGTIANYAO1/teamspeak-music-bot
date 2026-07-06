@@ -56,23 +56,35 @@
     <div v-if="loading" class="loading">搜索中...</div>
 
     <template v-else-if="allSongs.length || allAlbums.length || allPlaylists.length">
+      <!-- Only enabled sources are offered (enabledProviders gate); Jellyfin
+           — the primary source — comes first. -->
       <div class="source-bar">
         <button
+          v-if="sourceEnabled('jellyfin')"
+          class="source-btn"
+          :class="{ active: selectedSource === 'jellyfin' }"
+          @click="selectedSource = 'jellyfin'"
+        >Jellyfin</button>
+        <button
+          v-if="sourceEnabled('netease')"
           class="source-btn"
           :class="{ active: selectedSource === 'netease' }"
           @click="selectedSource = 'netease'"
         >网易云</button>
         <button
+          v-if="sourceEnabled('qq')"
           class="source-btn"
           :class="{ active: selectedSource === 'qq' }"
           @click="selectedSource = 'qq'"
         >QQ</button>
         <button
+          v-if="sourceEnabled('bilibili')"
           class="source-btn"
           :class="{ active: selectedSource === 'bilibili' }"
           @click="selectedSource = 'bilibili'"
         >B站</button>
         <button
+          v-if="sourceEnabled('kugou')"
           class="source-btn"
           :class="{ active: selectedSource === 'kugou' }"
           @click="selectedSource = 'kugou'"
@@ -197,14 +209,16 @@ const router = useRouter();
 
 const SOURCE_STORAGE_KEY = 'search-source';
 
-type SearchSource = 'netease' | 'qq' | 'bilibili' | 'local' | 'kugou';
+type SearchSource = 'jellyfin' | 'netease' | 'qq' | 'bilibili' | 'local' | 'kugou';
+
+const SEARCH_SOURCES: SearchSource[] = ['jellyfin', 'netease', 'qq', 'bilibili', 'local', 'kugou'];
 
 function loadSource(): SearchSource {
   try {
     const stored = localStorage.getItem(SOURCE_STORAGE_KEY);
-    if (stored === 'netease' || stored === 'qq' || stored === 'bilibili' || stored === 'local' || stored === 'kugou') return stored;
+    if (SEARCH_SOURCES.includes(stored as SearchSource)) return stored as SearchSource;
   } catch { /* localStorage blocked */ }
-  return 'netease';
+  return 'jellyfin';
 }
 
 type TabType = 'songs' | 'albums' | 'playlists';
@@ -244,6 +258,22 @@ const filteredPlaylists = computed(() =>
 );
 
 const hasLocalSongs = computed(() => localAudioEnabled.value && allSongs.value.some((s) => s.platform === 'local'));
+
+// Server-side source gate (enabledProviders). Until /providers loads, the
+// store list is empty — treat that as "everything shown" so a slow request
+// doesn't blank the bar.
+function sourceEnabled(p: string): boolean {
+  return store.enabledProviders.length === 0 || store.enabledProviders.includes(p);
+}
+
+/** Snap a disabled/stale selection to the configured default (or first enabled). */
+function fixupSelectedSource() {
+  if (selectedSource.value === 'local' || sourceEnabled(selectedSource.value)) return;
+  const def = store.defaultSource as SearchSource;
+  selectedSource.value = SEARCH_SOURCES.includes(def) && sourceEnabled(def)
+    ? def
+    : SEARCH_SOURCES.find((s) => s !== 'local' && sourceEnabled(s)) ?? 'jellyfin';
+}
 
 // ---- 分页 / 加载更多 ----
 function pageKey(type: TabType, source: string): string {
@@ -451,6 +481,7 @@ function badgeLabel(platform: string): string {
   if (platform === 'youtube') return 'YouTube';
   if (platform === 'local') return '本地';
   if (platform === 'kugou') return '酷狗';
+  if (platform === 'jellyfin') return 'Jellyfin';
   return '网易云';
 }
 
@@ -460,6 +491,7 @@ function badgeClass(platform: string): string {
   if (platform === 'youtube') return 'badge-youtube';
   if (platform === 'local') return 'badge-local';
   if (platform === 'kugou') return 'badge-kugou';
+  if (platform === 'jellyfin') return 'badge-jellyfin';
   return 'badge-netease';
 }
 
@@ -475,9 +507,11 @@ async function loadLocalAudioSetting() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadLocalAudioSetting();
   if (query.value) doSearch();
+  await store.fetchProviders();
+  fixupSelectedSource();
 });
 </script>
 
@@ -788,6 +822,11 @@ onMounted(() => {
 .badge-kugou {
   background: var(--brand-kugou-12);
   color: var(--brand-kugou);
+}
+
+.badge-jellyfin {
+  background: var(--brand-jellyfin-12);
+  color: var(--brand-jellyfin);
 }
 
 .fav-badge {

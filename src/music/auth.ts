@@ -1,9 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/** Platforms with a persisted credential blob. For jellyfin the "cookie" is a
+ *  JSON string carrying the access token / userId / deviceId (see jellyfin.ts). */
+type CookiePlatform = "netease" | "qq" | "bilibili" | "kugou" | "jellyfin";
+
 export interface CookieStore {
-  save(platform: "netease" | "qq" | "bilibili" | "kugou", cookie: string): void;
-  load(platform: "netease" | "qq" | "bilibili" | "kugou"): string;
+  save(platform: CookiePlatform, cookie: string): void;
+  load(platform: CookiePlatform): string;
 }
 
 export function createCookieStore(cookieDir: string): CookieStore {
@@ -12,7 +16,7 @@ export function createCookieStore(cookieDir: string): CookieStore {
   }
 
   return {
-    save(platform: "netease" | "qq" | "bilibili" | "kugou", cookie: string): void {
+    save(platform: CookiePlatform, cookie: string): void {
       const filePath = path.join(cookieDir, `${platform}.json`);
       fs.writeFileSync(
         filePath,
@@ -21,7 +25,7 @@ export function createCookieStore(cookieDir: string): CookieStore {
       );
     },
 
-    load(platform: "netease" | "qq" | "bilibili" | "kugou"): string {
+    load(platform: CookiePlatform): string {
       const filePath = path.join(cookieDir, `${platform}.json`);
       if (!fs.existsSync(filePath)) return "";
       try {

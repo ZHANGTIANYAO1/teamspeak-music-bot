@@ -5,6 +5,10 @@ import type { Server } from "node:http";
 export interface ApiServerOptions {
   neteasePort: number;
   qqMusicPort: number;
+  /** Provider gating (#enabledProviders): when false, the corresponding
+   *  embedded sidecar API server is never started and its port never bound. */
+  neteaseEnabled?: boolean;
+  qqEnabled?: boolean;
 }
 
 export interface ApiServerManager {
@@ -65,34 +69,43 @@ export function createApiServerManager(
 
   return {
     async start(): Promise<void> {
+      // Provider gating: with the jellyfin-only default config neither legacy
+      // sidecar starts, so ports 3001/3200 are never opened.
+      if (options.neteaseEnabled === false && options.qqEnabled === false) {
+        logger.info("NetEase/QQ providers disabled — embedded music API servers not started");
+        return;
+      }
       logger.info("Starting embedded music API servers...");
 
       // Start NetEase Cloud Music API
-      try {
-        const portFree = await isPortFree(options.neteasePort);
-        if (!portFree) {
-          logger.info(
-            { port: options.neteasePort },
-            "NetEase API port already in use — reusing existing instance"
-          );
-        } else {
-          const ncmModule = await import("NeteaseCloudMusicApi") as any;
-          const serverObj = ncmModule.server ?? ncmModule.default?.server;
-          const app = await serverObj.serveNcmApi({ port: options.neteasePort });
-          neteaseServer = app;
-          logger.info(
-            { port: options.neteasePort },
-            "NetEase Cloud Music API started"
-          );
+      if (options.neteaseEnabled !== false) {
+        try {
+          const portFree = await isPortFree(options.neteasePort);
+          if (!portFree) {
+            logger.info(
+              { port: options.neteasePort },
+              "NetEase API port already in use — reusing existing instance"
+            );
+          } else {
+            const ncmModule = await import("NeteaseCloudMusicApi") as any;
+            const serverObj = ncmModule.server ?? ncmModule.default?.server;
+            const app = await serverObj.serveNcmApi({ port: options.neteasePort });
+            neteaseServer = app;
+            logger.info(
+              { port: options.neteasePort },
+              "NetEase Cloud Music API started"
+            );
+          }
+        } catch (err) {
+          logger.error({ err }, "Failed to start NetEase Cloud Music API");
         }
-      } catch (err) {
-        logger.error({ err }, "Failed to start NetEase Cloud Music API");
       }
 
       // Start QQ Music API. Older versions auto-started on import; the
       // current fork (2.2.11+) only listens when run as `require.main`,
       // so we explicitly call .listen() on the imported Koa app and keep
       // the server handle for clean shutdown.
+      if (options.qqEnabled === false) return;
       try {
         const portFree = await isPortFree(options.qqMusicPort);
         if (!portFree) {

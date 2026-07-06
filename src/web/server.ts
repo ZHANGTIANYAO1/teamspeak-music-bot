@@ -22,6 +22,7 @@ import { createFavoritesRouter } from "./api/favorites.js";
 import { createSpotifyRouter } from "./api/spotify.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 import type { SpotifyProvider } from "../music/spotify/provider.js";
+import type { JellyfinProvider } from "../music/jellyfin.js";
 import { resolveSpotifyBackendKind } from "../music/spotify/backend-select.js";
 import {
   isGoLibrespotPresent,
@@ -49,6 +50,7 @@ export interface WebServerOptions {
   localProvider: MusicProvider;
   kugouProvider: MusicProvider;
   spotifyProvider: MusicProvider;
+  jellyfinProvider: MusicProvider;
   database: BotDatabase;
   config: BotConfig;
   configPath: string;
@@ -141,11 +143,15 @@ export function createWebServer(options: WebServerOptions): WebServer {
       // runtime object is a SpotifyProvider (see index.ts); WebServerOptions types
       // it as the wider MusicProvider, so narrow it here for the setCreds contract.
       options.spotifyProvider as SpotifyProvider,
+      // Same live-reconfigure contract for Jellyfin: a Settings save re-points
+      // the connection without a restart. Runtime object is a JellyfinProvider
+      // (see index.ts); WebServerOptions types it as the wider MusicProvider.
+      options.jellyfinProvider as JellyfinProvider,
     )
   );
   app.use(
     "/api/music",
-    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.localProvider, options.config, options.kugouProvider, options.spotifyProvider)
+    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.localProvider, options.config, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider)
   );
   app.use("/api/player", createPlayerRouter(
     options.botManager, logger, options.database,
@@ -153,7 +159,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
   ));
   app.use(
     "/api/auth",
-    createAuthRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.cookieStore, options.kugouProvider, options.spotifyProvider)
+    createAuthRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.cookieStore, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider, options.config)
   );
   if (options.spotifyOAuth) {
     app.use(
