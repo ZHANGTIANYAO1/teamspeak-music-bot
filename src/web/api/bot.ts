@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { BotManager } from "../../bot/manager.js";
-import type { BotConfig, GuestModeConfig, SpotifyConfig } from "../../data/config.js";
-import { saveConfig } from "../../data/config.js";
+import type { BotConfig, GuestModeConfig, SpotifyConfig, JellyfinConfig, GateableProvider } from "../../data/config.js";
+import { saveConfig, GATEABLE_PROVIDERS } from "../../data/config.js";
 import type { Logger } from "../../logger.js";
 import type { BotDatabase } from "../../data/database.js";
 import type { AvatarStore } from "../../data/avatars.js";
@@ -25,6 +25,11 @@ export function createBotRouter(
   // Settings must push creds here too, or search stays empty until a restart.
   // Structural type = SpotifyProvider.setCreds.
   spotifyProvider?: { setCreds(clientId: string, clientSecret: string): void },
+  // The live JellyfinProvider, so a Settings save re-points the connection
+  // without a restart (configure() drops the cached token only when
+  // credential-relevant fields actually changed). Structural type =
+  // JellyfinProvider.configure.
+  jellyfinProvider?: { configure(cfg: JellyfinConfig): void },
 ): Router {
   const router = Router();
 
@@ -37,6 +42,17 @@ export function createBotRouter(
     deviceName: config.spotify.deviceName,
     bitrate: config.spotify.bitrate,
     hasClientSecret: config.spotify.clientSecret.length > 0,
+  });
+
+  // Masked jellyfin view: password and apiKey are write-only — only their
+  // presence is reported (mirrors maskedSpotify's clientSecret handling).
+  const maskedJellyfin = () => ({
+    serverUrl: config.jellyfin.serverUrl,
+    authMode: config.jellyfin.authMode,
+    username: config.jellyfin.username,
+    userId: config.jellyfin.userId,
+    hasPassword: config.jellyfin.password.length > 0,
+    hasApiKey: config.jellyfin.apiKey.length > 0,
   });
 
   router.get("/", (req, res) => {
@@ -59,6 +75,8 @@ export function createBotRouter(
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
       spotify: maskedSpotify(),
+      jellyfin: maskedJellyfin(),
+      enabledProviders: config.enabledProviders,
     });
   });
 
@@ -130,7 +148,40 @@ export function createBotRouter(
       }
     }
 
+    // Partial-merge the jellyfin block (same contract as spotify): invalid
+    // sub-fields are ignored; password/apiKey are write-only and only stored
+    // when non-empty so a blank (masked) field never wipes them.
+    const jf = req.body?.jellyfin;
+    if (jf && typeof jf === "object") {
+      const t = config.jellyfin;
+      if (typeof jf.serverUrl === "string") {
+        t.serverUrl = jf.serverUrl.trim().replace(/\/+$/, "");
+      }
+      if (jf.authMode === "userpass" || jf.authMode === "apikey") t.authMode = jf.authMode;
+      if (typeof jf.username === "string") t.username = jf.username;
+      if (typeof jf.password === "string" && jf.password.length > 0) t.password = jf.password;
+      if (typeof jf.apiKey === "string" && jf.apiKey.length > 0) t.apiKey = jf.apiKey;
+      if (typeof jf.userId === "string") t.userId = jf.userId;
+    }
+
+    // enabledProviders: full replace, known providers only (mirrors loadConfig).
+    // An empty array is a valid "all gateable sources off". NOTE: the NetEase/QQ
+    // sidecar API servers are only started at boot, so newly enabling those two
+    // still needs a restart; jellyfin and the rest take effect immediately.
+    const ep = req.body?.enabledProviders;
+    if (Array.isArray(ep)) {
+      config.enabledProviders = ep.filter((p: unknown): p is GateableProvider =>
+        (GATEABLE_PROVIDERS as readonly string[]).includes(p as string),
+      );
+    }
+
     saveConfig(configPath, config);
+
+    // Hot-apply the (possibly re-pointed) Jellyfin connection to the live
+    // provider — a Settings save must work without a restart.
+    if (jf && typeof jf === "object") {
+      jellyfinProvider?.configure(config.jellyfin);
+    }
 
     // I2: only when the spotify block was present, push the (possibly UI-entered)
     // Client ID into the live process-wide OAuth so Connect works without a
@@ -166,6 +217,8 @@ export function createBotRouter(
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
       spotify: maskedSpotify(),
+      jellyfin: maskedJellyfin(),
+      enabledProviders: config.enabledProviders,
     });
   });
 

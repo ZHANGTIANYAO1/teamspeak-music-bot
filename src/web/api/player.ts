@@ -40,6 +40,10 @@ export function createPlayerRouter(
     if (platform === "qq") return "-q";
     if (platform === "youtube") return "-y";
     if (platform === "kugou") return "-k";
+    if (platform === "jellyfin") return "-j";
+    // The flag-less default is now the configured default platform (jellyfin
+    // unless disabled), so netease needs an explicit flag.
+    if (platform === "netease") return "-n";
     return "";
   };
 
@@ -121,7 +125,7 @@ export function createPlayerRouter(
         return;
       }
       const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou"
+        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
           ? platform
           : "netease"
       );
@@ -296,7 +300,7 @@ export function createPlayerRouter(
       // Use the bot's own provider lookup — it already knows about youtube,
       // which the router's constructor params did not.
       const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou"
+        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
           ? platform
           : "netease"
       );
@@ -389,7 +393,7 @@ export function createPlayerRouter(
         return;
       }
       const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou"
+        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
           ? platform
           : "netease"
       );
@@ -620,7 +624,7 @@ export function createPlayerRouter(
         return;
       }
       const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou"
+        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
           ? platform
           : "netease"
       );

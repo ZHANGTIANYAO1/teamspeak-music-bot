@@ -26,6 +26,54 @@ export interface SpotifyConfig {
   bitrate: number;
 }
 
+export interface JellyfinConfig {
+  /** Base URL of the Jellyfin server, e.g. "https://jellyfin.example.com". */
+  serverUrl: string;
+  authMode: "userpass" | "apikey";
+  // userpass mode
+  username: string;
+  password: string;
+  // apikey mode: admin API key + the user whose library/favorites/playlists are used
+  apiKey: string;
+  userId: string;
+}
+
+/**
+ * Providers gated by `enabledProviders`. Not listed here:
+ *  - "local"   → governed by the existing `localAudioEnabled` flag
+ *  - "spotify" → governed by the existing `spotify.enabled` flag
+ */
+export const GATEABLE_PROVIDERS = [
+  "jellyfin",
+  "netease",
+  "qq",
+  "bilibili",
+  "youtube",
+  "kugou",
+] as const;
+export type GateableProvider = (typeof GATEABLE_PROVIDERS)[number];
+
+/** Whether a platform may be used for search/playback under the current config. */
+export function isProviderEnabled(config: BotConfig, platform: string): boolean {
+  if (platform === "local") return config.localAudioEnabled !== false;
+  if (platform === "spotify") return config.spotify.enabled;
+  return config.enabledProviders.includes(platform as GateableProvider);
+}
+
+/**
+ * The default platform for !play/!add/!playlist/!album and all REST/WebUI calls:
+ * jellyfin when enabled, otherwise the first enabled provider in a fixed
+ * priority order. Falls back to "netease" when nothing is enabled so callers
+ * always get a provider — the enabled-gate then produces the friendly error.
+ */
+export function defaultPlatform(config: BotConfig): GateableProvider {
+  if (config.enabledProviders.includes("jellyfin")) return "jellyfin";
+  for (const p of ["netease", "qq", "kugou", "bilibili", "youtube"] as const) {
+    if (config.enabledProviders.includes(p)) return p;
+  }
+  return "netease";
+}
+
 export interface BotConfig {
   webPort: number;
   locale: "zh" | "en";
@@ -51,6 +99,14 @@ export interface BotConfig {
   trustProxy: boolean;
   guestMode: GuestModeConfig;
   spotify: SpotifyConfig;
+  jellyfin: JellyfinConfig;
+  /**
+   * Which gateable providers are active (see GATEABLE_PROVIDERS). Default is
+   * jellyfin-only: the legacy NetEase/QQ/Bilibili/YouTube/Kugou sources keep
+   * compiling but stay disabled — their embedded sidecar API servers must not
+   * start (or bind ports 3001/3200) unless listed here.
+   */
+  enabledProviders: GateableProvider[];
 }
 
 export function getDefaultConfig(): BotConfig {
@@ -95,6 +151,15 @@ export function getDefaultConfig(): BotConfig {
       deviceName: "TSMusicBot",
       bitrate: 320,
     },
+    jellyfin: {
+      serverUrl: "",
+      authMode: "userpass",
+      username: "",
+      password: "",
+      apiKey: "",
+      userId: "",
+    },
+    enabledProviders: ["jellyfin"],
   };
 }
 
@@ -221,12 +286,42 @@ export function loadConfig(path: string): BotConfig {
         : defaults.spotify.bitrate,
     };
 
+    // Sanitize the jellyfin block on load, mirroring the spotify handling: a
+    // hand-edited/legacy config.json must never smuggle wrong shapes past the
+    // gate. Unknown/invalid sub-fields fall back to defaults.
+    const partialJf = (partial.jellyfin ?? {}) as Partial<JellyfinConfig>;
+    const jellyfin: JellyfinConfig = {
+      serverUrl:
+        typeof partialJf.serverUrl === "string"
+          ? partialJf.serverUrl.trim().replace(/\/+$/, "")
+          : defaults.jellyfin.serverUrl,
+      authMode:
+        partialJf.authMode === "apikey" ? "apikey" : defaults.jellyfin.authMode,
+      username:
+        typeof partialJf.username === "string" ? partialJf.username : defaults.jellyfin.username,
+      password:
+        typeof partialJf.password === "string" ? partialJf.password : defaults.jellyfin.password,
+      apiKey: typeof partialJf.apiKey === "string" ? partialJf.apiKey : defaults.jellyfin.apiKey,
+      userId: typeof partialJf.userId === "string" ? partialJf.userId : defaults.jellyfin.userId,
+    };
+
+    // enabledProviders → known providers only; a non-array falls back to the
+    // default (["jellyfin"]). An explicitly-empty array is respected (operator
+    // chose to disable every gateable source).
+    const enabledProviders = Array.isArray(partial.enabledProviders)
+      ? partial.enabledProviders.filter((p): p is GateableProvider =>
+          (GATEABLE_PROVIDERS as readonly string[]).includes(p as string),
+        )
+      : defaults.enabledProviders;
+
     return {
       ...defaults,
       ...partial,
       adminGroups,
       guestMode: gm,
       spotify,
+      jellyfin,
+      enabledProviders,
     };
   }
 }

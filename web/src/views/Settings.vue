@@ -165,12 +165,106 @@
       </div>
     </section>
 
-    <!-- Music Account - QR Code Login (platform auth) requires platform.auth -->
-    <section v-if="can('platform.auth')" class="settings-section">
+    <!-- Jellyfin — the primary music source. Admin-configured connection
+         (server URL + credentials), no QR flow. -->
+    <section v-if="can('platform.auth') && providerOn('jellyfin')" class="settings-section">
+      <h2 class="section-title">Jellyfin 音乐库</h2>
+
+      <div class="account-card">
+        <div class="account-header">
+          <Icon icon="mdi:jellyfish" class="account-icon jellyfin-icon" />
+          <div class="account-info">
+            <div class="account-name">Jellyfin</div>
+            <div class="account-status" :class="{ logged: jellyfinAuth.loggedIn }">
+              {{ jellyfinAuth.loggedIn ? `已连接: ${jellyfinAuth.nickname}` : '未连接' }}
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>服务器地址</label>
+          <input v-model="jellyfinForm.serverUrl" class="input" autocomplete="off" placeholder="https://jellyfin.example.com" />
+        </div>
+
+        <div class="setting-row spotify-row">
+          <div class="setting-label">认证方式</div>
+          <div class="spotify-btn-group">
+            <button
+              class="spotify-choice"
+              :class="{ active: jellyfinForm.authMode === 'userpass' }"
+              @click="jellyfinForm.authMode = 'userpass'"
+            >账号密码</button>
+            <button
+              class="spotify-choice"
+              :class="{ active: jellyfinForm.authMode === 'apikey' }"
+              @click="jellyfinForm.authMode = 'apikey'"
+            >API Key</button>
+          </div>
+        </div>
+
+        <template v-if="jellyfinForm.authMode === 'userpass'">
+          <div class="form-group">
+            <label>用户名</label>
+            <input v-model="jellyfinForm.username" class="input" autocomplete="off" placeholder="Jellyfin 用户名" />
+          </div>
+          <div class="form-group">
+            <label>
+              密码
+              <span class="spotify-secret-hint" :class="{ set: jellyfinHasPassword }">
+                {{ jellyfinHasPassword ? '已设置' : '未设置' }}
+              </span>
+            </label>
+            <input
+              v-model="jellyfinForm.password"
+              class="input"
+              type="password"
+              autocomplete="off"
+              placeholder="留空表示不修改已保存的密码"
+            />
+          </div>
+        </template>
+        <template v-else>
+          <div class="form-group">
+            <label>
+              API Key
+              <span class="spotify-secret-hint" :class="{ set: jellyfinHasApiKey }">
+                {{ jellyfinHasApiKey ? '已设置' : '未设置' }}
+              </span>
+            </label>
+            <input
+              v-model="jellyfinForm.apiKey"
+              class="input"
+              type="password"
+              autocomplete="off"
+              placeholder="留空表示不修改已保存的 API Key"
+            />
+          </div>
+          <div class="form-group">
+            <label>用户 ID</label>
+            <input v-model="jellyfinForm.userId" class="input" autocomplete="off" placeholder="该 Key 对应使用的 Jellyfin 用户 ID" />
+          </div>
+        </template>
+
+        <div class="spotify-actions">
+          <button class="btn-secondary" :disabled="jellyfinTesting" @click="testJellyfin">
+            {{ jellyfinTesting ? '测试中…' : '测试连接' }}
+          </button>
+          <button class="btn-primary" :disabled="jellyfinSaving" @click="saveJellyfin">
+            {{ jellyfinSaving ? '保存中…' : '保存' }}
+          </button>
+        </div>
+
+        <p v-if="jellyfinMessage" class="spotify-message" :class="`tone-${jellyfinMessageTone}`">{{ jellyfinMessage }}</p>
+      </div>
+    </section>
+
+    <!-- Music Account - QR Code Login (platform auth) requires platform.auth.
+         Cards for sources disabled via enabledProviders are hidden. -->
+    <section v-if="can('platform.auth') && (providerOn('netease') || providerOn('qq') || providerOn('bilibili') || providerOn('kugou'))" class="settings-section">
       <h2 class="section-title">音乐账号</h2>
 
       <!-- NetEase -->
-      <div class="account-card">
+      <div v-if="providerOn('netease')" class="account-card">
         <div class="account-header">
           <Icon icon="mdi:cloud-outline" class="account-icon" />
           <div class="account-info">
@@ -240,7 +334,7 @@
       </div>
 
       <!-- QQ Music -->
-      <div class="account-card">
+      <div v-if="providerOn('qq')" class="account-card">
         <div class="account-header">
           <Icon icon="mdi:music-circle-outline" class="account-icon" />
           <div class="account-info">
@@ -309,7 +403,7 @@
         </div>
       </div>
       <!-- BiliBili -->
-      <div class="account-card">
+      <div v-if="providerOn('bilibili')" class="account-card">
         <div class="account-header">
           <Icon icon="mdi:video-outline" class="account-icon bilibili-icon" />
           <div class="account-info">
@@ -379,7 +473,7 @@
       </div>
 
       <!-- Kugou -->
-      <div class="account-card">
+      <div v-if="providerOn('kugou')" class="account-card">
         <div class="account-header">
           <Icon icon="mdi:music-circle-outline" class="account-icon kugou-icon" />
           <div class="account-info">
@@ -552,7 +646,25 @@
     <!-- Audio Quality requires quality -->
     <section v-if="can('quality')" class="settings-section">
       <h2 class="section-title">音质设置</h2>
-      <div class="setting-row">
+      <div v-if="providerOn('jellyfin')" class="setting-row">
+        <div class="setting-label">
+          <Icon icon="mdi:jellyfish" class="setting-icon" />
+          Jellyfin 音质
+        </div>
+        <div class="quality-options">
+          <button
+            v-for="q in jellyfinQualityLevels"
+            :key="q.value"
+            class="quality-btn"
+            :class="{ active: jellyfinQuality === q.value }"
+            @click="setJellyfinQuality(q.value)"
+          >
+            <div class="quality-name">{{ q.label }}</div>
+            <div class="quality-desc">{{ q.desc }}</div>
+          </button>
+        </div>
+      </div>
+      <div v-if="providerOn('netease') || providerOn('qq') || providerOn('kugou') || providerOn('bilibili')" class="setting-row">
         <div class="setting-label">
           <Icon icon="mdi:music-note-eighth" class="setting-icon" />
           音源质量
@@ -984,10 +1096,21 @@ const qualityLevels = [
   { value: 'jymaster', label: '超清母带', desc: '最高质量' },
 ];
 
+// Jellyfin quality tiers (direct = untranscoded original; the rest are
+// server-side transcodes for low-bandwidth Jellyfin links).
+const jellyfinQuality = ref('direct');
+const jellyfinQualityLevels = [
+  { value: 'direct', label: '原始直传', desc: 'Direct（无转码）' },
+  { value: '320', label: '320kbps', desc: '服务器转码' },
+  { value: '192', label: '192kbps', desc: '服务器转码' },
+  { value: '128', label: '128kbps', desc: '服务器转码' },
+];
+
 async function loadQuality() {
   try {
     const res = await axios.get('/api/music/quality');
     currentQuality.value = res.data.netease || 'exhigh';
+    jellyfinQuality.value = res.data.jellyfin || 'direct';
   } catch { /* ignore */ }
 }
 
@@ -995,6 +1118,13 @@ async function setQuality(q: string) {
   currentQuality.value = q;
   try {
     await axios.post('/api/music/quality', { quality: q });
+  } catch { /* ignore */ }
+}
+
+async function setJellyfinQuality(q: string) {
+  jellyfinQuality.value = q;
+  try {
+    await axios.post('/api/music/quality', { quality: q, platform: 'jellyfin' });
   } catch { /* ignore */ }
 }
 
@@ -1009,6 +1139,88 @@ const neteaseAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const qqAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const bilibiliAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const kugouAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
+const jellyfinAuth = reactive({ loggedIn: false, nickname: '' });
+
+// Server-side source gate (enabledProviders): cards for disabled sources are
+// hidden. Empty until GET /api/bot/settings responds — treat as all-on so a
+// slow load doesn't blank the page.
+const enabledProviders = ref<string[]>([]);
+function providerOn(p: string): boolean {
+  return enabledProviders.value.length === 0 || enabledProviders.value.includes(p);
+}
+
+// --- Jellyfin connection (admin-configured; password/apiKey are write-only) ---
+const jellyfinForm = reactive({
+  serverUrl: '',
+  authMode: 'userpass' as 'userpass' | 'apikey',
+  username: '',
+  password: '',
+  apiKey: '',
+  userId: '',
+});
+const jellyfinHasPassword = ref(false);
+const jellyfinHasApiKey = ref(false);
+const jellyfinSaving = ref(false);
+const jellyfinTesting = ref(false);
+const jellyfinMessage = ref('');
+const jellyfinMessageTone = ref<'ok' | 'warn'>('ok');
+
+// Populate from the masked GET /api/bot/settings response — secrets never
+// round-trip, only hasPassword/hasApiKey.
+function applyJellyfinConfig(jf: any) {
+  if (!jf || typeof jf !== 'object') return;
+  jellyfinForm.serverUrl = typeof jf.serverUrl === 'string' ? jf.serverUrl : '';
+  if (jf.authMode === 'userpass' || jf.authMode === 'apikey') jellyfinForm.authMode = jf.authMode;
+  jellyfinForm.username = typeof jf.username === 'string' ? jf.username : '';
+  jellyfinForm.userId = typeof jf.userId === 'string' ? jf.userId : '';
+  jellyfinForm.password = ''; // blank on load; blank on save = unchanged
+  jellyfinForm.apiKey = '';
+  jellyfinHasPassword.value = Boolean(jf.hasPassword);
+  jellyfinHasApiKey.value = Boolean(jf.hasApiKey);
+}
+
+async function saveJellyfin() {
+  jellyfinSaving.value = true;
+  jellyfinMessage.value = '';
+  try {
+    const res = await axios.post('/api/bot/settings', { jellyfin: { ...jellyfinForm } });
+    applyJellyfinConfig(res.data?.jellyfin);
+    jellyfinMessageTone.value = 'ok';
+    jellyfinMessage.value = '已保存';
+    await checkAuthStatus();
+  } catch (err: any) {
+    jellyfinMessageTone.value = 'warn';
+    jellyfinMessage.value = err?.response?.status === 403
+      ? '没有权限修改设置（需要 bot.manage）'
+      : '保存失败，请稍后重试';
+  } finally {
+    jellyfinSaving.value = false;
+  }
+}
+
+// Round-trips /System/Info with the CURRENT form values (empty secret fields
+// fall back to the stored ones server-side), without touching saved config.
+async function testJellyfin() {
+  jellyfinTesting.value = true;
+  jellyfinMessage.value = '';
+  try {
+    const res = await axios.post('/api/auth/jellyfin/test', { ...jellyfinForm });
+    if (res.data?.ok) {
+      jellyfinMessageTone.value = 'ok';
+      jellyfinMessage.value = `连接成功：${res.data.serverName ?? 'Jellyfin'} ${res.data.version ?? ''}`;
+    } else {
+      jellyfinMessageTone.value = 'warn';
+      jellyfinMessage.value = `连接失败：${res.data?.error ?? '未知错误'}`;
+    }
+  } catch (err: any) {
+    jellyfinMessageTone.value = 'warn';
+    jellyfinMessage.value = err?.response?.status === 403
+      ? '没有权限执行平台登录（需要 platform.auth）'
+      : '测试请求失败，请稍后重试';
+  } finally {
+    jellyfinTesting.value = false;
+  }
+}
 
 // QR state
 interface QrState {
@@ -1039,19 +1251,22 @@ function getQrState(platform: string): QrState {
 }
 
 async function checkAuthStatus() {
-  try {
-    const [nRes, qRes, bRes, kRes] = await Promise.all([
-      axios.get('/api/auth/status', { params: { platform: 'netease' } }),
-      axios.get('/api/auth/status', { params: { platform: 'qq' } }),
-      axios.get('/api/auth/status', { params: { platform: 'bilibili' } }),
-      axios.get('/api/auth/status', { params: { platform: 'kugou' } }),
-    ]);
-    Object.assign(neteaseAuth, nRes.data);
-    Object.assign(qqAuth, qRes.data);
-    Object.assign(bilibiliAuth, bRes.data);
-    Object.assign(kugouAuth, kRes.data);
-  } catch {
-    // API not ready
+  // allSettled: one slow/unconfigured platform must not hide the others'
+  // status (jellyfin probes its server with a real HTTP round-trip).
+  const [nRes, qRes, bRes, kRes, jRes] = await Promise.allSettled([
+    axios.get('/api/auth/status', { params: { platform: 'netease' } }),
+    axios.get('/api/auth/status', { params: { platform: 'qq' } }),
+    axios.get('/api/auth/status', { params: { platform: 'bilibili' } }),
+    axios.get('/api/auth/status', { params: { platform: 'kugou' } }),
+    axios.get('/api/auth/status', { params: { platform: 'jellyfin' } }),
+  ]);
+  if (nRes.status === 'fulfilled') Object.assign(neteaseAuth, nRes.value.data);
+  if (qRes.status === 'fulfilled') Object.assign(qqAuth, qRes.value.data);
+  if (bRes.status === 'fulfilled') Object.assign(bilibiliAuth, bRes.value.data);
+  if (kRes.status === 'fulfilled') Object.assign(kugouAuth, kRes.value.data);
+  if (jRes.status === 'fulfilled') {
+    jellyfinAuth.loggedIn = Boolean(jRes.value.data?.loggedIn);
+    jellyfinAuth.nickname = jRes.value.data?.nickname ?? '';
   }
 }
 
@@ -1253,6 +1468,10 @@ async function loadIdleTimeout() {
     applyGuestModeFromServer(res.data.guestMode);
     applyAdminGroupsFromServer(res.data.adminGroups);
     applySpotifyConfig(res.data.spotify);
+    applyJellyfinConfig(res.data.jellyfin);
+    if (Array.isArray(res.data.enabledProviders)) {
+      enabledProviders.value = res.data.enabledProviders;
+    }
   } catch { /* ignore */ }
 }
 
@@ -1988,6 +2207,10 @@ onUnmounted(() => {
 
   &.kugou-icon {
     color: var(--brand-kugou);
+  }
+
+  &.jellyfin-icon {
+    color: var(--brand-jellyfin);
   }
 }
 

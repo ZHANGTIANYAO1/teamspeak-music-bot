@@ -6,7 +6,7 @@ import {
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
-import type { MusicProvider, Song } from "../music/provider.js";
+import type { MusicProvider, Platform, Song } from "../music/provider.js";
 import {
   parseCommand,
   canRunCommand,
@@ -16,7 +16,13 @@ import { parseSongRef, parseSelectionIndex } from "./song-ref.js";
 import { splitTextIntoChunks } from "./text-chunk.js";
 import type { Logger } from "../logger.js";
 import type { BotDatabase, ProfileConfig } from "../data/database.js";
-import type { BotConfig, SpotifyConfig } from "../data/config.js";
+import {
+  isProviderEnabled,
+  defaultPlatform,
+  type BotConfig,
+  type SpotifyConfig,
+} from "../data/config.js";
+import type { JellyfinPlaybackReporter } from "../music/jellyfin.js";
 import { BotProfileManager } from "./profile.js";
 import type { AvatarStore } from "../data/avatars.js";
 import {
@@ -80,6 +86,7 @@ export interface BotInstanceOptions {
   localProvider?: MusicProvider;
   kugouProvider?: MusicProvider;
   spotifyProvider?: MusicProvider;
+  jellyfinProvider?: MusicProvider;
   database: BotDatabase;
   config: BotConfig;
   logger: Logger;
@@ -132,6 +139,7 @@ export class BotInstance extends EventEmitter {
   private localProvider: MusicProvider;
   private kugouProvider: MusicProvider;
   private spotifyProvider: MusicProvider;
+  private jellyfinProvider: MusicProvider;
   private database: BotDatabase;
   private config: BotConfig;
   private logger: Logger;
@@ -155,6 +163,9 @@ export class BotInstance extends EventEmitter {
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
   private playGate: Promise<unknown> = Promise.resolve();
+  /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
+   *  null when the wired provider has no reporting capability. */
+  private jellyfinReporter: JellyfinPlaybackReporter | null = null;
 
   constructor(options: BotInstanceOptions) {
     super();
@@ -167,6 +178,7 @@ export class BotInstance extends EventEmitter {
     this.localProvider = options.localProvider ?? options.neteaseProvider;
     this.kugouProvider = options.kugouProvider ?? options.neteaseProvider;
     this.spotifyProvider = options.spotifyProvider ?? options.neteaseProvider;
+    this.jellyfinProvider = options.jellyfinProvider ?? options.neteaseProvider;
     this.database = options.database;
     this.config = options.config;
     this.logger = options.logger.child({ botId: this.id });
@@ -175,6 +187,14 @@ export class BotInstance extends EventEmitter {
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
     this.queue = new PlayQueue();
+
+    // Structural typing (like localProvider.sweepUnreferenced): only the real
+    // JellyfinProvider exposes createPlaybackReporter, so the netease fallback
+    // provider simply leaves reporting off.
+    const jfReportable = this.jellyfinProvider as MusicProvider & {
+      createPlaybackReporter?: () => JellyfinPlaybackReporter;
+    };
+    this.jellyfinReporter = jfReportable.createPlaybackReporter?.() ?? null;
 
     // One long-lived Spotify sidecar controller per bot. Construction is
     // cheap and side-effect-free — nothing spawns until ensureStarted().
@@ -312,6 +332,7 @@ export class BotInstance extends EventEmitter {
       this.spotifyController.stop();
       this.currentSourceIsSpotify = false;
       this.player.stop();
+      this.jellyfinReporter?.onStop();
       this.queue.clear();
       this.sweepLocalAudio("disconnected");
       // A lifecycle change must not leave a stale auto-resume armed.
@@ -327,6 +348,7 @@ export class BotInstance extends EventEmitter {
       // Fresh connection — clear any stale auto-pause flag from a prior session.
       this.autoPaused = false;
       this._startIdlePoller();
+      this._startJellyfinReportPoller();
     });
 
     // React near-instantly to channel membership changes. The 30s idle
@@ -397,6 +419,7 @@ export class BotInstance extends EventEmitter {
     this.spotifyController.stop();
     this.currentSourceIsSpotify = false;
     this.player.stop();
+    this.jellyfinReporter?.onStop();
     this.queue.clear();
     this.sweepLocalAudio("disconnected");
     this.connected = false;
@@ -473,6 +496,29 @@ export class BotInstance extends EventEmitter {
       this.autoPaused = false;
       this.emit("stateChange");
     }
+  }
+
+  /**
+   * ~10s Jellyfin progress reporting, following the _startIdlePoller pattern:
+   * a self-rescheduling timeout guarded by this.connected, so it needs no
+   * explicit teardown. When the current track is not (or no longer) a jellyfin
+   * item, onStop() idempotently closes any open report session.
+   */
+  private _startJellyfinReportPoller(): void {
+    if (!this.jellyfinReporter) return;
+    const tick = () => {
+      if (!this.connected) return;
+      const reporter = this.jellyfinReporter!;
+      const current = this.queue.current();
+      const state = this.player.getState();
+      if (current?.platform === "jellyfin" && (state === "playing" || state === "paused")) {
+        reporter.onTick(current.id, this.player.getElapsed(), state === "paused");
+      } else {
+        reporter.onStop();
+      }
+      setTimeout(tick, 10_000);
+    };
+    setTimeout(tick, 10_000);
   }
 
   private _scheduleIdleCheck(): void {
@@ -659,13 +705,23 @@ export class BotInstance extends EventEmitter {
     }
   }
 
-  getProviderFor(platform: "netease" | "qq" | "bilibili" | "youtube" | "local" | "kugou" | "spotify"): MusicProvider {
+  getProviderFor(platform: Platform): MusicProvider {
     if (platform === "bilibili") return this.bilibiliProvider;
     if (platform === "youtube") return this.youtubeProvider;
     if (platform === "local") return this.localProvider;
     if (platform === "kugou") return this.kugouProvider;
     if (platform === "spotify") return this.spotifyProvider;
+    if (platform === "jellyfin") return this.jellyfinProvider;
     return platform === "qq" ? this.qqProvider : this.neteaseProvider;
+  }
+
+  /** Friendly gate for user-selected platforms (flags / URLs / REST params). */
+  assertProviderEnabled(platform: Platform): void {
+    if (!isProviderEnabled(this.config, platform)) {
+      throw new Error(
+        `音源未启用：${platform}（provider disabled — 需在配置 enabledProviders 中开启）`,
+      );
+    }
   }
 
   private disableFmMode(): void {
@@ -674,13 +730,29 @@ export class BotInstance extends EventEmitter {
     this.fmRequesterName = undefined;
   }
 
+  /** Chat-command source flags. No flag → the configured default platform
+   *  (jellyfin unless disabled). Netease is no longer the implicit default,
+   *  so it gets an explicit -n flag. */
+  private static readonly FLAG_PLATFORMS: ReadonlyArray<[string, Platform]> = [
+    ["b", "bilibili"],
+    ["q", "qq"],
+    ["y", "youtube"],
+    ["k", "kugou"],
+    ["s", "spotify"],
+    ["n", "netease"],
+    ["j", "jellyfin"],
+  ];
+
   private getProvider(flags: Set<string>): MusicProvider {
-    if (flags.has("b")) return this.bilibiliProvider;
-    if (flags.has("q")) return this.qqProvider;
-    if (flags.has("y")) return this.youtubeProvider;
-    if (flags.has("k")) return this.kugouProvider;
-    if (flags.has("s")) return this.spotifyProvider;
-    return this.neteaseProvider;
+    for (const [flag, platform] of BotInstance.FLAG_PLATFORMS) {
+      if (flags.has(flag)) {
+        this.assertProviderEnabled(platform);
+        return this.getProviderFor(platform);
+      }
+    }
+    const def = defaultPlatform(this.config);
+    this.assertProviderEnabled(def);
+    return this.getProviderFor(def);
   }
 
   private requesterNameFromMessage(msg?: TS3TextMessage): string | undefined {
@@ -793,6 +865,7 @@ export class BotInstance extends EventEmitter {
           this.player.resume();
         }
         this.currentSourceIsSpotify = true;
+        this.jellyfinReporter?.onStop();
         song.url = result.url;
         // No trial clip for Spotify — full-track duration only (the near-end
         // stall watchdog is disabled for the external stream anyway).
@@ -823,6 +896,11 @@ export class BotInstance extends EventEmitter {
       // 试听片段用试听时长（让 player nearEnd 正确触发自动切歌）；完整曲回退 song.duration
       this.effectiveDuration = result.trialDuration ?? song.duration;
       this.player.play(result.url, 0, this.effectiveDuration);
+      // Jellyfin playback reporting: open a session for jellyfin tracks (the
+      // reporter closes the previous one itself); close any open session when
+      // playback moves to another source. Fire-and-forget — never blocks play.
+      if (song.platform === "jellyfin") this.jellyfinReporter?.onTrackStart(song.id);
+      else this.jellyfinReporter?.onStop();
       // Fresh playback (re)start — clear auto-pause so a later occupancy
       // change won't try to "resume" a track the user already restarted.
       this.autoPaused = false;
@@ -878,6 +956,7 @@ export class BotInstance extends EventEmitter {
     // 2) id:/URL — fetch that exact song.
     const ref = parseSongRef(args);
     if (ref) {
+      if (ref.platform) this.assertProviderEnabled(ref.platform);
       const provider = ref.platform ? this.getProviderFor(ref.platform) : this.getProvider(cmd.flags);
       const song = await provider.getSongDetail(ref.id);
       if (!song) return { error: `No song found for ${ref.platform ?? provider.platform} id: ${ref.id}` };
@@ -1019,6 +1098,7 @@ export class BotInstance extends EventEmitter {
     }
     this.currentSourceIsSpotify = false;
     this.player.stop();
+    this.jellyfinReporter?.onStop();
     this.autoPaused = false;
     this.queue.clear();
     this.sweepLocalAudio("stopped");
@@ -1081,6 +1161,7 @@ export class BotInstance extends EventEmitter {
     this.spotifyController.stop();
     this.currentSourceIsSpotify = false;
     this.player.stop();
+    this.jellyfinReporter?.onStop();
     this.queue.clear();
     this.sweepLocalAudio("queue_cleared");
     this.disableFmMode();
@@ -1141,14 +1222,14 @@ export class BotInstance extends EventEmitter {
     if (!cmd.args) return "Usage: !playlist <playlist name or ID>";
     const provider = this.getProvider(cmd.flags);
 
-    // Determine if input is a numeric ID or a name search
+    // Determine if input is a direct ID (numeric / Jellyfin GUID) or a name search
     const id = this.extractId(cmd.args);
-    const isNumericId = /^\d+$/.test(cmd.args.trim());
+    const isDirectId = this.looksLikeCollectionId(cmd.args);
 
     let playlistId: string;
 
-    if (isNumericId || id !== cmd.args) {
-      // Input is a numeric ID or URL containing an ID — use existing logic
+    if (isDirectId || id !== cmd.args) {
+      // Input is a direct ID or URL containing an ID — use existing logic
       playlistId = id;
     } else {
       // Name-based search
@@ -1196,12 +1277,12 @@ export class BotInstance extends EventEmitter {
     const provider = this.getProvider(cmd.flags);
 
     const id = this.extractId(cmd.args);
-    const isNumericId = /^\d+$/.test(cmd.args.trim());
+    const isDirectId = this.looksLikeCollectionId(cmd.args);
 
     let albumId: string;
 
-    if (isNumericId || id !== cmd.args) {
-      // Input is a numeric ID or URL containing an ID — use directly
+    if (isDirectId || id !== cmd.args) {
+      // Input is a direct ID (numeric / Jellyfin GUID) or URL containing an ID — use directly
       albumId = id;
     } else {
       // Name-based search
@@ -1360,15 +1441,21 @@ export class BotInstance extends EventEmitter {
 
   private cmdHelp(): string {
     const p = this.config.commandPrefix;
+    const def = defaultPlatform(this.config);
+    // Only advertise source flags whose provider is actually enabled.
+    const flagHelp = BotInstance.FLAG_PLATFORMS.filter(([, platform]) =>
+      isProviderEnabled(this.config, platform),
+    )
+      .map(([flag, platform]) => `-${flag}=${platform}`)
+      .join(" ");
     return [
       "TSMusicBot Commands:",
-      `${p}play <song>  — Search and play (most popular match)`,
-      `${p}play -q <song> — Search from QQ Music`,
-      `${p}play -b <song> — Search from BiliBili`,
-      `${p}play -y <song> — Search from YouTube (yt-dlp)`,
+      `${p}play <song>  — Search and play (default source: ${def})`,
+      `${p}play -j <song> — Search from Jellyfin`,
+      ...(flagHelp ? [`  Source flags: ${flagHelp}`] : []),
       `${p}search <name> — List top matches to pick a specific (same-name) song`,
       `${p}play #N       — Play the Nth result of the last ${p}search`,
-      `${p}play id:<id>  — Play an exact song by id / URL (NetEase·QQ·BiliBili)`,
+      `${p}play id:<id>  — Play an exact song by id / URL`,
       `${p}add <song>   — Add to queue (also accepts #N / id: / URL)`,
       `${p}playnext <song> — Insert as next song (alias: ${p}pn)`,
       `${p}pause/resume — Pause/resume`,
@@ -1379,11 +1466,9 @@ export class BotInstance extends EventEmitter {
       `${p}remove <pos> — Remove song at position (see ${p}queue)`,
       `${p}mode <seq|loop|random|rloop> — Play mode`,
       `${p}playlist <name or id> — Load playlist by name or ID`,
-      `${p}playlist -q <name or id> — Load playlist from QQ Music`,
-      `${p}album <id>   — Load album`,
-      `${p}fm           — Personal FM (NetEase)`,
+      `${p}album <name or id> — Load album`,
+      `${p}fm           — Personal FM (Jellyfin: 收藏电台 Instant Mix)`,
       `${p}artist <name> — Play songs by artist (loop)`,
-      `${p}artist -q <name> — Artist loop from QQ Music`,
       `${p}vote         — Vote to skip`,
       `${p}lyrics       — Show lyrics`,
       `${p}now          — Current song info`,
@@ -1469,6 +1554,17 @@ export class BotInstance extends EventEmitter {
     const pathMatch = input.match(/\/(\d+)/);
     if (pathMatch) return pathMatch[1];
     return input;
+  }
+
+  /** Direct collection ids: numeric (NetEase/QQ) or Jellyfin GUID ItemIds
+   *  (32 hex chars, optionally dashed) — never treat those as name searches. */
+  private looksLikeCollectionId(raw: string): boolean {
+    const t = raw.trim();
+    return (
+      /^\d+$/.test(t) ||
+      /^[0-9a-fA-F]{32}$/.test(t) ||
+      /^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/.test(t)
+    );
   }
 
   /** Serialize queue-mutation + play sequences so concurrent requests can't
