@@ -15,8 +15,6 @@
       "mcp__scheduled-tasks__*"
     ],
     "deny": [
-      "Bash(git push * main)",
-      "Bash(git push * master)",
       "Bash(git push --force *)",
       "Bash(rm -rf /)"
     ]
