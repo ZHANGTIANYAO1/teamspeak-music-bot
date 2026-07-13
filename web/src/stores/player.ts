@@ -113,14 +113,14 @@ export const usePlayerStore = defineStore('player', {
     // Which sources the server has enabled (GET /api/music/providers) and the
     // configured default. Empty until fetched — sections stay hidden briefly.
     enabledProviders: [] as string[],
-    defaultSource: 'jellyfin' as string,
+    defaultSource: 'netease' as string,
 
     // Home page cache, split by source
     recommendPlaylists: { netease: [] as PlaylistItem[], qq: [] as PlaylistItem[], kugou: [] as PlaylistItem[], spotify: [] as PlaylistItem[] },
     dailySongs:         { netease: [] as Song[],         qq: [] as Song[],         kugou: [] as Song[], spotify: [] as Song[] },
     userPlaylists:      { jellyfin: [] as PlaylistItem[], netease: [] as PlaylistItem[], qq: [] as PlaylistItem[], kugou: [] as PlaylistItem[], spotify: [] as PlaylistItem[] },
     bilibiliPopular: [] as Song[],
-    // Jellyfin home sections (primary source)
+    // Jellyfin home sections (shown only when the optional source is enabled)
     jellyfinLatestAlbums: [] as AlbumItem[],
     jellyfinMostPlayed: [] as Song[],
     jellyfinFavorites: [] as Song[],
@@ -173,7 +173,7 @@ export const usePlayerStore = defineStore('player', {
       const maxDuration = this.activeBot.currentSong.duration || Infinity;
       return interpolateElapsed(timing, this.isPaused, maxDuration);
     },
-    /** Sources that are currently logged in. Jellyfin (the primary source) leads. */
+    /** Sources that are currently logged in. Jellyfin (when enabled) leads. */
     availableSources(): Source[] {
       const s: Source[] = [];
       if (this.authStatus.jellyfin) s.push('jellyfin');

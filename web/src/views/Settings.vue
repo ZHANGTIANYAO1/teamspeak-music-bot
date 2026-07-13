@@ -165,10 +165,13 @@
       </div>
     </section>
 
-    <!-- Jellyfin — the primary music source. Admin-configured connection
-         (server URL + credentials), no QR flow. -->
-    <section v-if="can('platform.auth') && providerOn('jellyfin')" class="settings-section">
-      <h2 class="section-title">Jellyfin 音乐库</h2>
+    <!-- Jellyfin — optional self-hosted music source. Admin-configured
+         connection (server URL + credentials), no QR flow. The card stays
+         visible even while the source is disabled: the enable toggle below is
+         the only UI that flips its enabledProviders membership, so hiding the
+         card would leave no way to turn Jellyfin on. -->
+    <section v-if="can('platform.auth')" class="settings-section">
+      <h2 class="section-title">Jellyfin 音乐库（可选）</h2>
 
       <div class="account-card">
         <div class="account-header">
@@ -180,6 +183,15 @@
             </div>
           </div>
         </div>
+
+        <!-- Enable (opt-in source: presence in enabledProviders) -->
+        <label class="profile-toggle behavior-toggle spotify-toggle">
+          <div class="profile-toggle-text">
+            <div class="profile-toggle-label">启用 Jellyfin 音源</div>
+            <div class="profile-toggle-hint">开启后 Jellyfin 出现在搜索、首页与聊天命令（!play -j）的音源列表中。默认关闭，点击下方「保存」后生效。</div>
+          </div>
+          <input v-model="jellyfinEnabledForm" type="checkbox" class="profile-toggle-switch" />
+        </label>
 
         <div class="form-group">
           <label>服务器地址</label>
@@ -1164,6 +1176,12 @@ const jellyfinSaving = ref(false);
 const jellyfinTesting = ref(false);
 const jellyfinMessage = ref('');
 const jellyfinMessageTone = ref<'ok' | 'warn'>('ok');
+// Jellyfin is opt-in: its "enabled" bit is membership in enabledProviders
+// (unlike Spotify's dedicated spotify.enabled flag). Only trust the toggle
+// once the real list has loaded, so an early save can't clobber the other
+// providers with the empty placeholder list.
+const jellyfinEnabledForm = ref(false);
+const enabledProvidersLoaded = ref(false);
 
 // Populate from the masked GET /api/bot/settings response — secrets never
 // round-trip, only hasPassword/hasApiKey.
@@ -1183,8 +1201,22 @@ async function saveJellyfin() {
   jellyfinSaving.value = true;
   jellyfinMessage.value = '';
   try {
-    const res = await axios.post('/api/bot/settings', { jellyfin: { ...jellyfinForm } });
+    // enabledProviders is a full-replace field, so only send it when the
+    // current list is known — otherwise we'd wipe the other sources.
+    const payload: Record<string, unknown> = { jellyfin: { ...jellyfinForm } };
+    if (enabledProvidersLoaded.value) {
+      const others = enabledProviders.value.filter((p) => p !== 'jellyfin');
+      payload.enabledProviders = jellyfinEnabledForm.value ? [...others, 'jellyfin'] : others;
+    }
+    const res = await axios.post('/api/bot/settings', payload);
     applyJellyfinConfig(res.data?.jellyfin);
+    if (Array.isArray(res.data?.enabledProviders)) {
+      enabledProviders.value = res.data.enabledProviders;
+      jellyfinEnabledForm.value = res.data.enabledProviders.includes('jellyfin');
+      enabledProvidersLoaded.value = true;
+      // Search bar / home sections / FM cards react without a reload.
+      store.fetchProviders();
+    }
     jellyfinMessageTone.value = 'ok';
     jellyfinMessage.value = '已保存';
     await checkAuthStatus();
@@ -1471,6 +1503,8 @@ async function loadIdleTimeout() {
     applyJellyfinConfig(res.data.jellyfin);
     if (Array.isArray(res.data.enabledProviders)) {
       enabledProviders.value = res.data.enabledProviders;
+      jellyfinEnabledForm.value = res.data.enabledProviders.includes('jellyfin');
+      enabledProvidersLoaded.value = true;
     }
   } catch { /* ignore */ }
 }

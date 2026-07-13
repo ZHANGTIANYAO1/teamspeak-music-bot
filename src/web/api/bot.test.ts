@@ -612,7 +612,8 @@ describe("bot router /settings jellyfin block + enabledProviders", () => {
       hasPassword: true,
       hasApiKey: false,
     });
-    expect(res.body.enabledProviders).toEqual(["jellyfin"]);
+    // Default: online sources on, jellyfin opt-in (not listed).
+    expect(res.body.enabledProviders).toEqual(["netease", "qq", "bilibili", "youtube", "kugou"]);
   });
 
   it("POST /settings merges jellyfin, keeps stored secrets on blank, hot-configures", async () => {

@@ -57,7 +57,7 @@
 
     <template v-else-if="allSongs.length || allAlbums.length || allPlaylists.length">
       <!-- Only enabled sources are offered (enabledProviders gate); Jellyfin
-           — the primary source — comes first. -->
+           (opt-in) comes first when enabled. -->
       <div class="source-bar">
         <button
           v-if="sourceEnabled('jellyfin')"
@@ -218,7 +218,7 @@ function loadSource(): SearchSource {
     const stored = localStorage.getItem(SOURCE_STORAGE_KEY);
     if (SEARCH_SOURCES.includes(stored as SearchSource)) return stored as SearchSource;
   } catch { /* localStorage blocked */ }
-  return 'jellyfin';
+  return 'netease';
 }
 
 type TabType = 'songs' | 'albums' | 'playlists';
@@ -272,7 +272,7 @@ function fixupSelectedSource() {
   const def = store.defaultSource as SearchSource;
   selectedSource.value = SEARCH_SOURCES.includes(def) && sourceEnabled(def)
     ? def
-    : SEARCH_SOURCES.find((s) => s !== 'local' && sourceEnabled(s)) ?? 'jellyfin';
+    : SEARCH_SOURCES.find((s) => s !== 'local' && sourceEnabled(s)) ?? 'netease';
 }
 
 // ---- 分页 / 加载更多 ----

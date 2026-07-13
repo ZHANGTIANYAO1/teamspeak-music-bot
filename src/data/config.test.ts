@@ -10,7 +10,7 @@ import {
   renameSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { getDefaultConfig, loadConfig, saveConfig, migrateLegacyConfig } from "./config.js";
+import { getDefaultConfig, loadConfig, saveConfig, migrateLegacyConfig, defaultPlatform } from "./config.js";
 
 // Wrap the fs functions config.ts uses in call-through spies so the atomic-write
 // and transient-read-error paths can be observed/forced. Everything else (mkdtemp,
@@ -46,6 +46,50 @@ describe("config", () => {
   it("returns default config when file does not exist", () => {
     const config = loadConfig("/nonexistent/path/config.json");
     expect(config).toEqual(getDefaultConfig());
+  });
+
+  it("defaults to the online sources with jellyfin as opt-in (disabled)", () => {
+    const config = getDefaultConfig();
+    expect(config.enabledProviders).toEqual(["netease", "qq", "bilibili", "youtube", "kugou"]);
+    expect(config.enabledProviders).not.toContain("jellyfin");
+  });
+
+  it("keeps pre-gating behavior for legacy configs without enabledProviders", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    // A config written before enabledProviders existed: no such field.
+    writeFileSync(path, JSON.stringify({ webPort: 4000 }));
+    const config = loadConfig(path);
+    expect(config.enabledProviders).toEqual(["netease", "qq", "bilibili", "youtube", "kugou"]);
+    expect(defaultPlatform(config)).toBe("netease");
+  });
+
+  it("defaultPlatform follows the fixed priority order", () => {
+    const config = getDefaultConfig();
+    expect(defaultPlatform(config)).toBe("netease");
+
+    // Jellyfin ranks after the online music platforms…
+    config.enabledProviders = ["netease", "jellyfin"];
+    expect(defaultPlatform(config)).toBe("netease");
+    // …but ahead of the video sites…
+    config.enabledProviders = ["bilibili", "jellyfin", "youtube"];
+    expect(defaultPlatform(config)).toBe("jellyfin");
+    // …and is the default when it is the only enabled source.
+    config.enabledProviders = ["jellyfin"];
+    expect(defaultPlatform(config)).toBe("jellyfin");
+    // Nothing enabled → netease fallback (the gate then reports it disabled).
+    config.enabledProviders = [];
+    expect(defaultPlatform(config)).toBe("netease");
+  });
+
+  it("respects an explicit jellyfin-only enabledProviders from disk", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    // e.g. a config persisted by the short-lived jellyfin-by-default builds.
+    writeFileSync(path, JSON.stringify({ enabledProviders: ["jellyfin"] }));
+    const config = loadConfig(path);
+    expect(config.enabledProviders).toEqual(["jellyfin"]);
+    expect(defaultPlatform(config)).toBe("jellyfin");
   });
 
   it("creates config file on save", () => {

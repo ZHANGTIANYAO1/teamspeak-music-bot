@@ -5,7 +5,7 @@
 <h1 align="center">TSMusicBot</h1>
 
 <p align="center">
-  <strong>TeamSpeak 音乐机器人</strong> — 网易云音乐 + QQ 音乐 + 酷狗音乐 + 哔哩哔哩 + YouTube（可选），YesPlayMusic 风格 WebUI 控制面板
+  <strong>TeamSpeak 音乐机器人</strong> — 网易云音乐 + QQ 音乐 + 酷狗音乐 + 哔哩哔哩 + YouTube（可选），Jellyfin / Spotify 可选启用，YesPlayMusic 风格 WebUI 控制面板
 </p>
 
 <p align="center">
@@ -17,11 +17,14 @@
   <img src="https://img.shields.io/badge/Docker-支持-2496ED?logo=docker&logoColor=white" />
   <img src="https://img.shields.io/badge/酷狗音乐-支持-2ca2f9" />
   <img src="https://img.shields.io/badge/BiliBili-支持-00a1d6?logo=bilibili&logoColor=white" />
+  <img src="https://img.shields.io/badge/Jellyfin-可选-aa5cc3?logo=jellyfin&logoColor=white" />
   <img src="https://img.shields.io/badge/YouTube-可选-FF0000?logo=youtube&logoColor=white" />
   <img src="https://img.shields.io/badge/Spotify-可选-1DB954?logo=spotify&logoColor=white" />
   <img src="https://img.shields.io/badge/TS3-支持-2580C3?logo=teamspeak&logoColor=white" />
   <img src="https://img.shields.io/badge/TS6-支持-2580C3?logo=teamspeak&logoColor=white" />
 </p>
+
+> v1.10.0 新增**可选**的 [Jellyfin](https://jellyfin.org/) 音源（由 [@ItsEricRao](https://github.com/ItsEricRao) 在 [PR #123](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/123) 中贡献）：连接自建 Jellyfin 服务器直接播放你自己的音乐库。默认关闭，在 **设置 → Jellyfin 音乐库** 一键开启；原有在线音源保持默认启用，行为不变。
 
 ## 功能特性
 
@@ -31,7 +34,8 @@
 - **本地音频上传播放** — 在搜索页拖拽或选择本地音频上传，上传后可直接播放 / 下一首播放 / 加入队列；管理员可在 设置 → 行为设置 开关此功能，播放结束或停止/清空/替换队列时会清理服务端接收的本地文件
 - **专属链接（单机器人锁定）** — 通过 `/bot/<id>` 专属链接打开 WebUI 时锁定到单个机器人，刷新后保持，适合把某台机器人的控制页分享给特定用户
 - **频道无人时自动暂停** — 机器人所在频道没有其他人时自动暂停播放，有人加入后自动恢复（**默认关闭**，可在设置中开启）
-- **多平台音源** — 网易云音乐 + QQ 音乐 + 酷狗音乐 + 哔哩哔哩（默认内置），YouTube 可选启用（通过 yt-dlp），**Spotify（实验性）** 可选启用（需 Premium + 自建开发者应用，默认关闭，详见 [Spotify 音源（实验性）](#spotify-音源实验性)），统一搜索（歌曲 / 歌单 / 专辑均支持翻页「加载更多」），结果标注来源
+- **Jellyfin 音源（可选）** — 连接自建 [Jellyfin](https://jellyfin.org/) 服务器作为额外音源：搜索（歌曲 / 专辑 / 歌单）、懒解析直传播放、同步歌词、收藏 Instant Mix 电台（`!fm -j`）、首页「最近添加 / 播放最多 / 收藏 / 流派」，并把播放进度回报给 Jellyfin（PlayCount / 播放状态）。**默认关闭**，在 设置 → Jellyfin 音乐库 一键开启。详见 [可选：Jellyfin 音源](#可选jellyfin-音源)
+- **多平台音源（enabledProviders 门控）** — 网易云音乐 / QQ 音乐 / 酷狗音乐 / 哔哩哔哩 / YouTube（yt-dlp，需安装）**默认启用**，可在 `config.json` 的 `enabledProviders` 中逐个停用；Jellyfin 为可选音源（见上），**Spotify（实验性）** 由独立开关控制（需 Premium + 自建开发者应用，默认关闭，详见 [Spotify 音源（实验性）](#spotify-音源实验性)）。统一搜索（歌曲 / 歌单 / 专辑均支持翻页「加载更多」），结果标注来源，禁用音源不出现在搜索栏
 - **真实客户端协议 (TS3/TS6 双协议)** — 机器人在 TeamSpeak 中可见（非 ServerQuery 隐身模式），自动检测并适配 TS3 和 TS6 服务器，支持 TS6 HTTP Query API
 - **YesPlayMusic 风格 WebUI** — 精美界面，支持深色/浅色主题切换
 - **完整播放控制** — 播放/暂停/上一首/下一首/进度跳转/音量调节
@@ -162,6 +166,16 @@ sudo ./scripts/install.sh
 > - ⚠️ 清空身份后，TS 服务器会把机器人识别为**全新的客户端**。之前手动赋予机器人的**服务器组需要用新 UID 重新授予一次**，之后每次重启都会自动保留
 >
 > **如何判断是否需要迁移**：如果你是全新安装，或者你的机器人数据库中 `identity` 字段已经是空的，则**无需任何操作**。完成上述步骤后，按下面对应的系统升级步骤执行即可。
+
+### 关于 enabledProviders 音源开关（v1.10.0 起）
+
+v1.10.0（[PR #123](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/123)）引入 `enabledProviders` 音源开关与可选的 Jellyfin 音源。当前默认值为 `["netease", "qq", "bilibili", "youtube", "kugou"]`——**与旧版行为一致**，从更早版本升级**无需任何操作**，在线音源照常可用；Jellyfin 需要手动开启（详见 [可选：Jellyfin 音源](#可选jellyfin-音源)）。
+
+> ⚠️ **仅影响短暂运行过 v1.10.0 初版的用户**：该版本曾把默认音源设为 Jellyfin-only。如果你在那段时间保存过设置，`data/config.json` 中可能被写入了 `"enabledProviders": ["jellyfin"]`，升级后在线音源会保持停用。修复方法：把在线音源加回列表（或直接删除该字段以使用默认值），重启机器人（网易云 / QQ 的内嵌 API 服务需要重启才会启动）：
+>
+> ```json
+> "enabledProviders": ["netease", "qq", "bilibili", "youtube", "kugou", "jellyfin"]
+> ```
 
 ### 从 WebUI 无鉴权版本升级（重要）
 
@@ -303,14 +317,15 @@ sudo systemctl start tsmusicbot
    - 机器人昵称
    - 可选：服务器密码、默认频道
 3. 在 **设置 → 音乐账号** 扫码登录网易云 / QQ 音乐 / 酷狗音乐 / B 站账号（可选，登录后可播放 VIP 歌曲、获取每日推荐 / 我的歌单等）
-4. 在 **设置 → 用户管理**（仅管理员可见）按需添加成员。成员默认可控制播放但无法管理其他用户；管理员还可为每个成员单独配置**能力**（播放控制 / 队列 / 机器人管理 / 平台登录 / 音质）和**可操作的机器人白名单**，未授权的机器人对该成员不可见、不可控
+4. （可选）在 **设置 → Jellyfin 音乐库** 连接自建 Jellyfin 服务器并打开「启用 Jellyfin 音源」（安装向导第 3 步保存连接时会自动启用；详见 [可选：Jellyfin 音源](#可选jellyfin-音源)）
+5. 在 **设置 → 用户管理**（仅管理员可见）按需添加成员。成员默认可控制播放但无法管理其他用户；管理员还可为每个成员单独配置**能力**（播放控制 / 队列 / 机器人管理 / 平台登录 / 音质）和**可操作的机器人白名单**，未授权的机器人对该成员不可见、不可控
 
 ### WebUI 页面说明
 
 | 页面 | 功能 |
 |------|------|
-| **首页** | 推荐歌单、每日推荐、私人FM（网易云 / QQ 雷达 / 酷狗电台）、我的歌单、收藏的歌单（各源带标签切换） |
-| **搜索** | 四平台统一搜索，结果标注网易云/QQ/酷狗/B站来源，可一键收藏歌单 |
+| **首页** | 推荐歌单、每日推荐、私人FM（网易云 / QQ 雷达 / 酷狗电台）、我的歌单、收藏的歌单（各源带标签切换）；启用 Jellyfin 后另有「Jellyfin 电台 / 最近添加 / 播放最多 / 收藏 / 流派」区块 |
+| **搜索** | 跨音源统一搜索（仅显示已启用的音源；启用 Jellyfin 后其结果排最前），结果标注来源，可一键收藏歌单 |
 | **歌单** | 查看歌单详情，播放全部（根据当前播放模式选择首歌），一键收藏 |
 | **歌词** | 全屏歌词页，实时同步滚动，模糊专辑封面背景 |
 | **历史** | 播放历史记录 |
@@ -322,14 +337,16 @@ sudo systemctl start tsmusicbot
 
 | 命令 | 说明 |
 |------|------|
-| `!play <歌名>` | 搜索并播放（取最热门的匹配项） |
+| `!play <歌名>` | 搜索并播放（取最热门的匹配项；默认音源为网易云） |
+| `!play -n <歌名>` | 显式从网易云音乐搜索（默认音源即网易云，通常可省略） |
+| `!play -j <歌名>` | 从 Jellyfin 搜索（需先启用 Jellyfin 音源） |
 | `!play -q <歌名>` | 从 QQ 音乐搜索 |
 | `!play -k <歌名>` | 从酷狗音乐搜索 |
 | `!play -b <关键词>` | 从哔哩哔哩搜索视频并播放音频 |
 | `!play -y <关键词>` | 从 YouTube 搜索并播放（需要安装 [yt-dlp](#可选youtube-音源)）|
-| `!search <歌名> [-q\|-k\|-b\|-y]` | 列出前若干个匹配结果（含序号与 id），用于挑选同名歌曲；可加平台标志切换音源 |
+| `!search <歌名> [-j\|-n\|-q\|-k\|-b\|-y]` | 列出前若干个匹配结果（含序号与 id），用于挑选同名歌曲；可加平台标志切换音源 |
 | `!play #<序号>` | 播放上一次 `!search` 结果中的第 N 项（区分同名歌曲） |
-| `!play id:<id>` | 按歌曲 id 播放精确的某首歌（也支持直接粘贴网易云 / QQ / B站 歌曲链接） |
+| `!play id:<id>` | 按歌曲 id 播放精确的某首歌（也支持直接粘贴网易云 / QQ / B站 歌曲链接；Jellyfin 曲目用 GUID ItemId） |
 | `!add <歌名>` | 添加到播放队列（同样支持 `#序号` / `id:<id>` / 链接） |
 | `!pause` / `!resume` | 暂停 / 恢复播放 |
 | `!next` / `!prev` | 下一首 / 上一首 |
@@ -338,11 +355,12 @@ sudo systemctl start tsmusicbot
 | `!queue` | 查看播放队列 |
 | `!remove <位置>` | 从队列中删除指定位置的歌曲（位置从 1 开始，见 `!queue`） |
 | `!mode <seq\|loop\|random\|rloop>` | 切换播放模式 |
-| `!playlist <歌单名或ID>` | 加载歌单（支持名称模糊搜索和 ID） |
+| `!playlist <歌单名或ID>` | 加载歌单（支持名称模糊搜索和 ID；Jellyfin 歌单 GUID 也可直接粘贴） |
 | `!playlist -q <歌单名>` | 从 QQ 音乐搜索并加载歌单 |
-| `!album <ID>` | 加载专辑 |
-| `!artist <歌手名>` | 按歌手循环播放（支持 `-q`/`-k`/`-b`/`-y`） |
-| `!fm` | 私人 FM（网易云，自动续播） |
+| `!album <专辑名或ID>` | 加载专辑（支持名称搜索 / 数字 ID / Jellyfin GUID） |
+| `!artist <歌手名>` | 按歌手循环播放（支持 `-j`/`-n`/`-q`/`-k`/`-b`/`-y`） |
+| `!fm` | 私人 FM（默认网易云，自动续播） |
+| `!fm -j` | Jellyfin 电台：从收藏出发的 Instant Mix（需启用 Jellyfin，自动续播） |
 | `!fm -q` | QQ 音乐雷达 / 猜你喜欢 FM（自动续播） |
 | `!fm -k` | 酷狗私人电台 / 个性化推荐 FM（自动续播） |
 | `!lyrics` | 显示当前完整歌词（自动分多条消息发送，不再只显示开头几行） |
@@ -376,6 +394,8 @@ sudo systemctl start tsmusicbot
 
 ### 音质等级
 
+**在线音源（网易云等）**
+
 | 等级 | 码率 | 格式 | 说明 |
 |------|------|------|------|
 | 标准 | 128kbps | MP3 | 免费可用 |
@@ -384,6 +404,13 @@ sudo systemctl start tsmusicbot
 | 无损 | ~900kbps | FLAC | 需要 VIP |
 | Hi-Res | ~1500kbps | FLAC | 需要 VIP |
 | 超清母带 | ~4000kbps | FLAC | 需要黑胶 VIP |
+
+**Jellyfin（启用后）**
+
+| 等级 | 说明 |
+|------|------|
+| **原始直传（direct）** | **默认**：原始文件不转码直传（机器人本地统一转 Opus，此档即最高音质） |
+| 320kbps / 192kbps / 128kbps | 由 Jellyfin 服务器转码后传输，适合公网带宽有限的自建服务器 |
 
 在设置页面选择音质，立即生效（影响后续播放的歌曲）。
 
@@ -408,6 +435,7 @@ teamspeak-music-bot/
 │   │   └── database.ts         # SQLite 数据库（播放历史、实例、收藏、权限持久化）
 │   ├── music/                  # 音源服务
 │   │   ├── provider.ts         # 统一 MusicProvider 接口
+│   │   ├── jellyfin.ts         # Jellyfin 适配器（可选音源，直连 REST API）
 │   │   ├── netease.ts          # 网易云音乐适配器
 │   │   ├── qq.ts               # QQ 音乐适配器
 │   │   ├── bilibili.ts         # 哔哩哔哩适配器（视频音频提取）
@@ -461,6 +489,7 @@ teamspeak-music-bot/
 | **数据库** | better-sqlite3 (SQLite) |
 | **音频处理** | FFmpeg (ffmpeg-static 内置), @discordjs/opus |
 | **TS 协议** | @honeybbq/teamspeak-client（完整客户端协议）+ 自研 TS6 协议适配层 |
+| **Jellyfin** | Jellyfin REST API（可选音源，直连，无额外 npm 依赖） |
 | **网易云 API** | NeteaseCloudMusicApi |
 | **QQ 音乐 API** | @sansenjian/qq-music-api（锁定 `~2.4.0`，需 Node ≥ 20.17） |
 | **哔哩哔哩** | BiliBili Web API（搜索、DASH 音频流、QR 登录） |
@@ -469,6 +498,63 @@ teamspeak-music-bot/
 | **界面样式** | SCSS（YesPlayMusic 设计风格） |
 | **图标** | @iconify/vue |
 | **日志** | pino |
+
+## 可选：Jellyfin 音源
+
+本项目可将自建 [Jellyfin](https://jellyfin.org/) 媒体服务器作为**额外音源**：机器人直接播放你自己音乐库里的文件，不依赖任何在线平台的可用性 / 版权 / 登录状态。该音源**默认关闭**，需要手动启用。
+
+### 启用与连接配置
+
+三种方式任选：
+
+1. **首次安装向导** — 第 3 步即 Jellyfin 连接卡（可跳过，稍后配置）；填写并「保存并继续」会**自动启用**该音源。
+2. **WebUI** — 设置 → Jellyfin 音乐库（可选）：打开「**启用 Jellyfin 音源**」开关，填写服务器地址、选择认证方式、「测试连接」验证后保存，**保存即时生效，无需重启**。
+3. **config.json** — 手动编辑 `jellyfin` 配置块，并把 `"jellyfin"` 加入 `enabledProviders`，然后重启。
+
+两种认证方式：
+
+| 模式 | 填写内容 | 说明 |
+|------|---------|------|
+| **账号密码**（默认） | `username` + `password` | 以该用户身份登录（`AuthenticateByName`），token 自动持久化、失效自动重登 |
+| **API Key** | `apiKey` + `userId` | 使用管理后台生成的 API Key；`userId` 决定使用谁的音乐库 / 收藏 / 歌单 |
+
+```jsonc
+// config.json 片段
+{
+  "jellyfin": {
+    "serverUrl": "https://jellyfin.example.com",
+    "authMode": "userpass",     // 或 "apikey"
+    "username": "music",
+    "password": "······",
+    "apiKey": "",               // apikey 模式填写
+    "userId": ""                // apikey 模式填写
+  },
+  "enabledProviders": ["netease", "qq", "bilibili", "youtube", "kugou", "jellyfin"]
+}
+```
+
+> 密码 / API Key 在 WebUI 中**只写不回显**；表单留空表示保持已保存的值不变。
+
+### 功能
+
+- **搜索** — 歌曲 / 专辑 / 歌单，支持翻页「加载更多」；WebUI 统一搜索中 Jellyfin 结果排最前
+- **播放** — 懒解析播放地址；默认**原始直传**（不经 Jellyfin 转码），也可选 320/192/128kbps 服务器转码档（设置 → 音质设置）
+- **歌词** — 读取 Jellyfin 的歌词接口（内嵌或 .lrc），时间轴同步滚动，`!lyrics` 可用
+- **电台 / FM**（`!fm -j` 或首页「Jellyfin 电台」卡片）— 随机取一首**收藏**做种子生成 Instant Mix 歌曲流；没有收藏则回退到最近播放、再回退随机曲目
+- **首页区块** — 最近添加（专辑）/ 播放最多 / Jellyfin 收藏 / 我的歌单 / 流派（点流派芯片即播放该流派）
+- **播放上报** — 播放开始 / 进度（约 10s 一次）/ 停止会回报给 Jellyfin（`Sessions/Playing` 系列接口），你的 Jellyfin 播放统计（PlayCount、最近播放）保持准确；上报失败不影响播放
+- **聊天命令** — 启用后用 `-j` 标志：`!play -j <歌名>`、`!fm -j`、`!artist -j <歌手>`；`!playlist` / `!album` / `!play id:` 可直接粘贴 Jellyfin GUID。若把在线音源全部停用、只保留 Jellyfin，不带标志的命令会自动以 Jellyfin 为默认音源
+
+### enabledProviders：音源开关
+
+`config.json` 的 `enabledProviders` 数组决定哪些音源可用（默认 `["netease", "qq", "bilibili", "youtube", "kugou"]`，即在线音源全开、Jellyfin 关闭）：
+
+- 可选值：`jellyfin`、`netease`、`qq`、`bilibili`、`youtube`、`kugou`（`local` 由 `localAudioEnabled` 控制，`spotify` 由 `spotify.enabled` 控制）
+- 未列出的音源：聊天命令返回「音源未启用」、REST 返回 400、WebUI 搜索栏 / 登录卡 / FM 卡片自动隐藏
+- 不带平台标志的命令走**固定优先级中第一个已启用的音源**：网易云 → QQ → 酷狗 → Jellyfin → B站 → YouTube（默认配置下即网易云）
+- 网易云 / QQ 停用时，其内嵌 API 服务（端口 3001 / 3200）**不会启动**
+- 示例（Jellyfin 为主、只留网易云备用）：`"enabledProviders": ["jellyfin", "netease"]`（此时默认音源仍为网易云，点歌用 `-j` 或停用网易云）；示例（纯 Jellyfin）：`"enabledProviders": ["jellyfin"]`
+- 注意：重新启用网易云 / QQ 的内嵌 API 服务需要重启机器人；其余音源改动即时生效（WebUI 的 Jellyfin 开关即改此列表）
 
 ## 可选：YouTube 音源
 
@@ -765,7 +851,17 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本
+### 最新版本 — Jellyfin 可选音源
+
+**Jellyfin 集成（[PR #123](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/123)，由 [@ItsEricRao](https://github.com/ItsEricRao) 贡献；随后调整为可选音源）**
+
+- **Jellyfin 音源（可选，默认关闭）**：连接自建 [Jellyfin](https://jellyfin.org/) 服务器作为额外音源——搜索（歌曲 / 专辑 / 歌单，支持翻页）、懒解析直传播放、同步歌词、收藏 Instant Mix 电台（`!fm -j`）、首页「最近添加 / 播放最多 / 收藏 / 流派」区块、播放进度回报（PlayCount / 播放状态）。账号密码或 API Key 两种认证，在 设置 → Jellyfin 音乐库 打开「启用 Jellyfin 音源」即可，保存即时生效。详见 [可选：Jellyfin 音源](#可选jellyfin-音源)。
+- **enabledProviders 音源开关**：`config.json` 新增 `enabledProviders` 字段，默认 `["netease", "qq", "bilibili", "youtube", "kugou"]`——在线音源保持默认启用，**从旧版本升级无行为变化**；列表外的音源在聊天命令 / REST / WebUI 中一律不可用，网易云 / QQ 停用时其内嵌 API 服务（端口 3001 / 3200）不再启动。
+- **新增 `-j`（Jellyfin）与 `-n`（网易云）平台标志**；不带标志的 `!play` / `!search` / `!fm` 等走固定优先级中第一个已启用的音源（默认配置下即网易云，行为与旧版一致）。
+- ⚠️ **v1.10.0 初版曾短暂把默认音源设为 Jellyfin-only，现已回退**。若你在该版本保存过设置导致 `config.json` 中为 `"enabledProviders": ["jellyfin"]`，请手动把在线音源加回（详见 [更新升级](#关于-enabledproviders-音源开关v1100-起)）。
+- **QQ 按 ID 播放空歌名修复**（[PR #124](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/124)，感谢 [@Slldyd2077](https://github.com/Slldyd2077)）：按 ID 播放 QQ 歌曲时回填歌曲元数据，TS 端不再显示空歌名。
+
+### v1.9.0 及更早
 
 **功能增强：Spotify 音源（实验性）/ 搜索结果翻页 / 细粒度权限 / 本地收藏 / 本地音频上传 / 专属链接 / 自动暂停 / QQ 雷达 FM**
 
@@ -876,6 +972,8 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 | 项目 | 说明 |
 |------|------|
+| [Jellyfin](https://github.com/jellyfin/jellyfin) | 自由软件媒体服务器（本项目的可选自建音源） |
+| [ItsEricRao](https://github.com/ItsEricRao) | Jellyfin 音源集成贡献者（[PR #123](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/123)） |
 | [yichen11818/NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) | TS6 协议兼容参考（vendored tsproto 补丁） |
 | [Splamy/TS3AudioBot](https://github.com/Splamy/TS3AudioBot) | 优秀的 TeamSpeak 音频机器人框架 |
 | [TS3AudioBot-BiliBiliPlugin](https://github.com/xxmod/TS3AudioBot-BiliBiliPlugin) | 提供插件开发参考 |

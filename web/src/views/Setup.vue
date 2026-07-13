@@ -61,7 +61,7 @@
 
     <div v-if="currentStep === 2" class="step-content">
       <h2>连接 Jellyfin (可选)</h2>
-      <p class="subtitle">连接自建 Jellyfin 服务器作为主音源；也可稍后在「设置」中配置</p>
+      <p class="subtitle">连接自建 Jellyfin 服务器作为额外音源；保存后自动启用，也可稍后在「设置」中配置</p>
       <div class="form-group">
         <label>服务器地址</label>
         <input v-model="jellyfin.serverUrl" placeholder="https://jellyfin.example.com" class="input" />
@@ -130,8 +130,8 @@ const nickname = ref('MusicBot');
 const defaultChannel = ref('');
 const channelId = ref('');
 
-// Jellyfin — the primary music source. Optional: skipping leaves it
-// configurable later in Settings.
+// Jellyfin — optional self-hosted music source. Skipping leaves it
+// configurable later in Settings; saving here also enables it.
 const jellyfin = reactive({
   serverUrl: '',
   authMode: 'userpass' as 'userpass' | 'apikey',
@@ -182,7 +182,19 @@ async function testJellyfin() {
 async function saveJellyfinAndNext() {
   jellyfinSaving.value = true;
   try {
-    await axios.post('/api/bot/settings', { jellyfin: { ...jellyfin } });
+    // Jellyfin is opt-in (not in the default enabledProviders), so completing
+    // this step also enables the source — a configured-but-dark Jellyfin would
+    // be baffling. enabledProviders is full-replace: fetch the current list
+    // and append. Only do this when a server URL was actually entered.
+    const payload: Record<string, unknown> = { jellyfin: { ...jellyfin } };
+    if (jellyfin.serverUrl.trim()) {
+      const cur = await axios.get('/api/bot/settings');
+      const ep: unknown = cur.data?.enabledProviders;
+      if (Array.isArray(ep) && !ep.includes('jellyfin')) {
+        payload.enabledProviders = [...ep, 'jellyfin'];
+      }
+    }
+    await axios.post('/api/bot/settings', payload);
     currentStep.value = 3;
   } catch {
     jellyfinTestOk.value = false;

@@ -731,8 +731,8 @@ export class BotInstance extends EventEmitter {
   }
 
   /** Chat-command source flags. No flag → the configured default platform
-   *  (jellyfin unless disabled). Netease is no longer the implicit default,
-   *  so it gets an explicit -n flag. */
+   *  (netease in the default config; otherwise the first enabled source by
+   *  fixed priority — see defaultPlatform()). */
   private static readonly FLAG_PLATFORMS: ReadonlyArray<[string, Platform]> = [
     ["b", "bilibili"],
     ["q", "qq"],
@@ -1451,7 +1451,6 @@ export class BotInstance extends EventEmitter {
     return [
       "TSMusicBot Commands:",
       `${p}play <song>  — Search and play (default source: ${def})`,
-      `${p}play -j <song> — Search from Jellyfin`,
       ...(flagHelp ? [`  Source flags: ${flagHelp}`] : []),
       `${p}search <name> — List top matches to pick a specific (same-name) song`,
       `${p}play #N       — Play the Nth result of the last ${p}search`,
@@ -1467,7 +1466,7 @@ export class BotInstance extends EventEmitter {
       `${p}mode <seq|loop|random|rloop> — Play mode`,
       `${p}playlist <name or id> — Load playlist by name or ID`,
       `${p}album <name or id> — Load album`,
-      `${p}fm           — Personal FM (Jellyfin: 收藏电台 Instant Mix)`,
+      `${p}fm           — Personal FM (default source: ${def}; source flags work too)`,
       `${p}artist <name> — Play songs by artist (loop)`,
       `${p}vote         — Vote to skip`,
       `${p}lyrics       — Show lyrics`,

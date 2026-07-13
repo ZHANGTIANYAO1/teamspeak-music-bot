@@ -62,13 +62,15 @@ export function isProviderEnabled(config: BotConfig, platform: string): boolean 
 
 /**
  * The default platform for !play/!add/!playlist/!album and all REST/WebUI calls:
- * jellyfin when enabled, otherwise the first enabled provider in a fixed
- * priority order. Falls back to "netease" when nothing is enabled so callers
- * always get a provider — the enabled-gate then produces the friendly error.
+ * the first enabled provider in a fixed priority order (netease with the default
+ * config; jellyfin ranks after the online music platforms because it is an
+ * opt-in source, but ahead of the video sites for users who run it as their
+ * only music library). Falls back to "netease" when nothing is enabled so
+ * callers always get a provider — the enabled-gate then produces the friendly
+ * error.
  */
 export function defaultPlatform(config: BotConfig): GateableProvider {
-  if (config.enabledProviders.includes("jellyfin")) return "jellyfin";
-  for (const p of ["netease", "qq", "kugou", "bilibili", "youtube"] as const) {
+  for (const p of ["netease", "qq", "kugou", "jellyfin", "bilibili", "youtube"] as const) {
     if (config.enabledProviders.includes(p)) return p;
   }
   return "netease";
@@ -102,9 +104,10 @@ export interface BotConfig {
   jellyfin: JellyfinConfig;
   /**
    * Which gateable providers are active (see GATEABLE_PROVIDERS). Default is
-   * jellyfin-only: the legacy NetEase/QQ/Bilibili/YouTube/Kugou sources keep
-   * compiling but stay disabled — their embedded sidecar API servers must not
-   * start (or bind ports 3001/3200) unless listed here.
+   * the online sources (NetEase/QQ/Bilibili/YouTube/Kugou); jellyfin is an
+   * opt-in extra that must be listed here (Settings → Jellyfin 音乐库 toggles
+   * it). Sources not listed stay disabled — the NetEase/QQ embedded sidecar
+   * API servers must not start (or bind ports 3001/3200) unless enabled.
    */
   enabledProviders: GateableProvider[];
 }
@@ -159,7 +162,7 @@ export function getDefaultConfig(): BotConfig {
       apiKey: "",
       userId: "",
     },
-    enabledProviders: ["jellyfin"],
+    enabledProviders: ["netease", "qq", "bilibili", "youtube", "kugou"],
   };
 }
 
@@ -306,8 +309,8 @@ export function loadConfig(path: string): BotConfig {
     };
 
     // enabledProviders → known providers only; a non-array falls back to the
-    // default (["jellyfin"]). An explicitly-empty array is respected (operator
-    // chose to disable every gateable source).
+    // default (online sources, jellyfin off). An explicitly-empty array is
+    // respected (operator chose to disable every gateable source).
     const enabledProviders = Array.isArray(partial.enabledProviders)
       ? partial.enabledProviders.filter((p): p is GateableProvider =>
           (GATEABLE_PROVIDERS as readonly string[]).includes(p as string),

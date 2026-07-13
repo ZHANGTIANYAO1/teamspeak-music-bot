@@ -56,8 +56,8 @@ async function main() {
     {
       neteasePort: config.neteaseApiPort,
       qqMusicPort: config.qqMusicApiPort,
-      // Provider gating: with the default (jellyfin-only) config, neither
-      // sidecar starts and ports 3001/3200 are never bound.
+      // Provider gating: a sidecar only starts (and binds 3001/3200) when its
+      // source is listed in enabledProviders — both are on in the default config.
       neteaseEnabled: isProviderEnabled(config, "netease"),
       qqEnabled: isProviderEnabled(config, "qq"),
     },

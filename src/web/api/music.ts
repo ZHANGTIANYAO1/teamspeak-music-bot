@@ -37,9 +37,10 @@ export function createMusicRouter(
 
   /**
    * Provider gating for user-supplied platform params. No platform → the
-   * configured default (jellyfin unless disabled). A disabled platform gets a
-   * friendly 400 and null back — the handler must return immediately.
-   * Without a config (unit-test routers), everything stays enabled.
+   * configured default (see defaultPlatform(); netease in the default config).
+   * A disabled platform gets a friendly 400 and null back — the handler must
+   * return immediately. Without a config (unit-test routers), everything
+   * stays enabled.
    */
   function resolveProvider(platform: unknown, res: Response): MusicProvider | null {
     const requested = typeof platform === "string" && platform ? platform : undefined;
@@ -144,7 +145,8 @@ export function createMusicRouter(
       // view would only yield results that get skipped. Spotify search remains
       // available from its own tab via /search?platform=spotify.
       // Provider gating (#enabledProviders): disabled sources are skipped, not
-      // searched. Jellyfin — the primary source — leads the merged results.
+      // searched. Jellyfin (an opt-in source) leads the merged results when
+      // enabled — a self-hosted library match is almost always the wanted one.
       const enabled = (p: string) => !config || isProviderEnabled(config, p);
       const none = { songs: [], albums: [], playlists: [] };
       const [jellyfinResult, neteaseResult, qqResult, bilibiliResult, localResult, kugouResult] = await Promise.allSettled([
