@@ -364,8 +364,18 @@ export class QQMusicProvider implements MusicProvider {
         };
       }
     } catch {
-      // fall through to stub
+      // fall through to musicu.fcg fallback
     }
+
+    // Fallback: fetch metadata via u.y.qq.com/cgi-bin/musicu.fcg. The bundled
+    // library's /getSongInfo route is broken (upstream code 500001), so the
+    // primary try above almost always falls through here for QQ. Without this,
+    // play-by-id songs carry an empty name → the TS nickname / now-playing
+    // message renders as "♪ 正在播放:  -  []". This endpoint (same host/shape
+    // as search) reliably returns full track_info without requiring login.
+    const detail = await this.fetchSongDetailViaMusicu(songId);
+    if (detail) return detail;
+
     // Minimal stub — resolveAndPlay only needs id + platform to fetch a
     // play URL. Name/artist/album will be empty in play history, but the
     // song will actually play, which is the important part.
@@ -378,6 +388,42 @@ export class QQMusicProvider implements MusicProvider {
       coverUrl: "",
       platform: "qq",
     };
+  }
+
+  /** Fetch a single song's metadata via u.y.qq.com/cgi-bin/musicu.fcg
+   * (module music.pf_song_detail_svr / get_song_detail_yqq). This mirrors the
+   * search path's host + request shape and, unlike the library's /getSongInfo,
+   * actually works against QQ's current API. Returns null on any failure so the
+   * caller can fall back to the minimal stub. */
+  private async fetchSongDetailViaMusicu(songId: string): Promise<Song | null> {
+    try {
+      const reqData = JSON.stringify({
+        req_0: {
+          module: "music.pf_song_detail_svr",
+          method: "get_song_detail_yqq",
+          param: { song_mid: songId, song_type: 0 },
+        },
+      });
+      const res = await qqMusicuApi.get("/cgi-bin/musicu.fcg", {
+        params: { format: "json", data: reqData },
+      });
+      const t = res.data?.req_0?.data?.track_info;
+      if (!t) return null;
+      const albumMid = t.album?.mid ?? t.album?.pmid ?? "";
+      return {
+        id: String(t.mid ?? t.id ?? songId),
+        name: t.name ?? t.title ?? "",
+        artist: (t.singer ?? []).map((a: any) => a.name ?? a.title ?? "").filter(Boolean).join(" / "),
+        album: t.album?.name ?? t.album?.title ?? "",
+        duration: t.interval ?? 0,
+        coverUrl: albumMid
+          ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg`
+          : "",
+        platform: "qq",
+      };
+    } catch {
+      return null;
+    }
   }
 
   async getPlaylistSongs(playlistId: string): Promise<Song[]> {
