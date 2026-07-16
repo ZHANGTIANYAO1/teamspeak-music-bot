@@ -551,9 +551,10 @@ teamspeak-music-bot/
 
 - 可选值：`jellyfin`、`netease`、`qq`、`bilibili`、`youtube`、`kugou`（`local` 由 `localAudioEnabled` 控制，`spotify` 由 `spotify.enabled` 控制）
 - 未列出的音源：聊天命令返回「音源未启用」、REST 返回 400、WebUI 搜索栏 / 登录卡 / FM 卡片自动隐藏
-- 不带平台标志的命令走**固定优先级中第一个已启用的音源**：网易云 → QQ → 酷狗 → Jellyfin → B站 → YouTube（默认配置下即网易云）
+- 不带平台标志的命令默认走**固定优先级中第一个已启用的音源**：网易云 → QQ → 酷狗 → Jellyfin → B站 → YouTube（默认配置下即网易云）
+- **自定义默认音源（`defaultPlatform`）** — 想让不带标志的 `!play 歌名` 直接用某个音源（例如常听哔哩哔哩，免去每次加 `-b`），可在 设置 → 默认音源 里选择，或在 `config.json` 中设置 `"defaultPlatform": "bilibili"`。取值须是 `enabledProviders` 里已启用的音源，否则被忽略（回退到上面的固定优先级）；留空 / `null` / 删除该字段即恢复固定优先级。WebUI 保存后即时生效，无需重启
 - 网易云 / QQ 停用时，其内嵌 API 服务（端口 3001 / 3200）**不会启动**
-- 示例（Jellyfin 为主、只留网易云备用）：`"enabledProviders": ["jellyfin", "netease"]`（此时默认音源仍为网易云，点歌用 `-j` 或停用网易云）；示例（纯 Jellyfin）：`"enabledProviders": ["jellyfin"]`
+- 示例（Jellyfin 为主、只留网易云备用）：`"enabledProviders": ["jellyfin", "netease"]`（默认音源仍为网易云，点歌用 `-j`、停用网易云，或直接把 `defaultPlatform` 设为 `"jellyfin"`）；示例（纯 Jellyfin）：`"enabledProviders": ["jellyfin"]`
 - 注意：重新启用网易云 / QQ 的内嵌 API 服务需要重启机器人；其余音源改动即时生效（WebUI 的 Jellyfin 开关即改此列表）
 
 ## 可选：YouTube 音源

@@ -118,6 +118,25 @@ describe("music router provider gating (enabledProviders) + jellyfin endpoints",
     expect(res.body.enabled).not.toContain("spotify"); // spotify.enabled defaults off
   });
 
+  it("GET /providers reports a configured defaultPlatform override (#126)", async () => {
+    const config = getDefaultConfig();
+    config.defaultPlatform = "qq"; // operator prefers QQ over the priority order
+    const { app } = mount(config);
+    const res = await request(app).get("/api/music/providers");
+    expect(res.status).toBe(200);
+    expect(res.body.default).toBe("qq");
+  });
+
+  it("routes a platform-less /search to the configured defaultPlatform (#126)", async () => {
+    const config = getDefaultConfig();
+    config.defaultPlatform = "bilibili";
+    const { app, netease } = mount(config);
+    const res = await request(app).get("/api/music/search?q=hello");
+    expect(res.status).toBe(200);
+    // Default is now bilibili, so the netease provider must NOT be hit.
+    expect(netease.search).not.toHaveBeenCalled();
+  });
+
   /** Default config plus the opt-in jellyfin source enabled. */
   function configWithJellyfin() {
     const config = getDefaultConfig();
