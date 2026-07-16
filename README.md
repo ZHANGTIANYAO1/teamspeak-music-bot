@@ -891,6 +891,7 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 - **会话存储**：服务端 SQLite 表 `sessions`，存储 sha256(token)；浏览器只持有原始 token cookie。7 天 TTL，每小时滚动续期。同账号最多 10 个并发会话（超出剔除最旧）。
 - **登录限流**：每 IP 每分钟 5 次 `/login` + 3 次 `/setup`，命中返回 429 + `Retry-After`。
 - **CSRF & 安全头**：所有 mutating 请求强制 `Origin`/`Referer` 同源；响应携带 `X-Frame-Options: DENY` 和 `Content-Security-Policy: frame-ancestors 'none'`（防点击劫持）。
+- **搜索引擎隐身（防止实例被收录，issue #128）**：为避免部署实例的 WebUI 被搜索引擎收录、被陌生人搜到控制页，采用纵深防御——所有响应携带 `X-Robots-Tag: noindex, nofollow`，`/robots.txt` 返回 `User-agent: * / Disallow: /`，`index.html` 内置 `<meta name="robots" content="noindex, nofollow">`（专属链接 `/bot/<id>` 等所有页面同样覆盖）。这些只阻止「被索引」，不是访问控制——**请不要把自己的 WebUI 链接发到公开网页 / 论坛 / 聊天群**，真正的防护来自登录鉴权与反向代理。
 - **配置变更**：反向代理部署务必 `"trustProxy": true`（详见 [反向代理部署注意事项](#反向代理部署注意事项)）。`config.adminGroups` 现已启用，用于限制管理类聊天命令只能由指定 TeamSpeak 服务器组运行（为空 = 不限制，详见 [TeamSpeak 命令权限](#teamspeak-命令权限管理类命令限制)）；`config.adminPassword` 仍为旧版预留字段，保留以兼容旧 `config.json`，当前未使用。
 
 ### v0.x — Bot Profile 自动更新与协议层升级
