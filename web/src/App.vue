@@ -166,6 +166,9 @@ onMounted(async () => {
   // Search or Playlist render hearts correctly without first visiting Home.
   // (fire-and-forget; fetchFavorites swallows the 401 when not yet logged in.)
   playerStore.fetchFavorites();
+  // Non-critical: reads savedQueuesEnabled so the nav entry can show/hide.
+  // Guests get a 403 (swallowed) → the entry stays hidden for them.
+  if (!session.isGuest.value) playerStore.fetchBotSettings();
   syncTimer = setInterval(() => playerStore.syncElapsed(), 3000);
   mobileRaf = requestAnimationFrame(updateMobileProgress);
   // Reconcile the dedicated-link scope only after the bot list is known: the

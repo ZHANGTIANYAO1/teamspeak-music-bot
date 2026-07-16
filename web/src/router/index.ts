@@ -22,6 +22,7 @@ const router = createRouter({
     },
     { path: '/lyrics', name: 'lyrics', component: () => import('../views/Lyrics.vue') },
     { path: '/history', name: 'history', component: () => import('../views/History.vue') },
+    { path: '/saved-queues', name: 'saved-queues', component: () => import('../views/SavedQueues.vue') },
     { path: '/settings', name: 'settings', component: () => import('../views/Settings.vue') },
     { path: '/setup', name: 'setup', component: () => import('../views/Setup.vue') },
     { path: '/bot/:id', name: 'bot', component: () => import('../views/BotRedirect.vue') },

@@ -760,6 +760,32 @@
           @change="saveLocalAudioEnabled"
         />
       </label>
+
+      <label class="profile-toggle behavior-toggle">
+        <div class="profile-toggle-text">
+          <div class="profile-toggle-label">保存/加载播放清单（含重启后自动恢复队列）</div>
+          <div class="profile-toggle-hint">开启后可在网页与聊天命令（!save / !load / !queues）保存和加载播放清单，并在机器人重启后自动恢复并继续播放上次的队列。重启只能从当前曲目的开头恢复（不记忆进度）；Spotify 恢复为尽力而为。默认关闭。</div>
+        </div>
+        <input
+          v-model="savedQueuesEnabled"
+          type="checkbox"
+          class="profile-toggle-switch"
+          @change="saveSavedQueuesEnabled"
+        />
+      </label>
+
+      <label class="profile-toggle behavior-toggle">
+        <div class="profile-toggle-text">
+          <div class="profile-toggle-label">直接播放单曲时不清空队列</div>
+          <div class="profile-toggle-hint">开启后，直接播放单曲会插入到当前歌曲之后并立即播放，播完继续原队列，而不是清空整个队列。仅影响单曲的「直接播放」；歌单/专辑/电台仍会替换队列。默认关闭。</div>
+        </div>
+        <input
+          v-model="playKeepsQueue"
+          type="checkbox"
+          class="profile-toggle-switch"
+          @change="savePlayKeepsQueue"
+        />
+      </label>
     </section>
 
     <!-- Guest Mode (admin only) -->
@@ -1490,6 +1516,9 @@ const idleTimeout = ref(0);
 // Defaults OFF to match the backend default (config.ts getDefaultConfig).
 const autoPauseOnEmpty = ref(false);
 const localAudioEnabled = ref(true);
+// Saved-queues + play-keeps-queue toggles (#119), both default OFF.
+const savedQueuesEnabled = ref(false);
+const playKeepsQueue = ref(false);
 
 async function loadIdleTimeout() {
   try {
@@ -1497,6 +1526,9 @@ async function loadIdleTimeout() {
     idleTimeout.value = res.data.idleTimeoutMinutes ?? 0;
     autoPauseOnEmpty.value = res.data.autoPauseOnEmpty ?? false;
     localAudioEnabled.value = res.data.localAudioEnabled ?? true;
+    savedQueuesEnabled.value = res.data.savedQueuesEnabled ?? false;
+    playKeepsQueue.value = res.data.playKeepsQueue ?? false;
+    store.savedQueuesEnabled = savedQueuesEnabled.value;
     applyGuestModeFromServer(res.data.guestMode);
     applyAdminGroupsFromServer(res.data.adminGroups);
     applySpotifyConfig(res.data.spotify);
@@ -1525,6 +1557,22 @@ async function saveLocalAudioEnabled() {
   try {
     const res = await axios.post('/api/bot/settings', { localAudioEnabled: localAudioEnabled.value });
     localAudioEnabled.value = res.data.localAudioEnabled ?? localAudioEnabled.value;
+  } catch { /* ignore */ }
+}
+
+async function saveSavedQueuesEnabled() {
+  try {
+    const res = await axios.post('/api/bot/settings', { savedQueuesEnabled: savedQueuesEnabled.value });
+    savedQueuesEnabled.value = res.data.savedQueuesEnabled ?? savedQueuesEnabled.value;
+    // Keep the shared store flag (nav gate) in sync without a reload.
+    store.savedQueuesEnabled = savedQueuesEnabled.value;
+  } catch { /* ignore */ }
+}
+
+async function savePlayKeepsQueue() {
+  try {
+    const res = await axios.post('/api/bot/settings', { playKeepsQueue: playKeepsQueue.value });
+    playKeepsQueue.value = res.data.playKeepsQueue ?? playKeepsQueue.value;
   } catch { /* ignore */ }
 }
 

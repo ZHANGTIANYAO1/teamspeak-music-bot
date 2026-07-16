@@ -7,6 +7,12 @@
       <RouterLink to="/search" class="nav-link" active-class="active">搜索</RouterLink>
       <RouterLink to="/library" class="nav-link" active-class="active">音乐库</RouterLink>
       <RouterLink to="/history" class="nav-link" active-class="active">播放历史</RouterLink>
+      <RouterLink
+        v-if="store.savedQueuesEnabled && !session.isGuest.value"
+        to="/saved-queues"
+        class="nav-link"
+        active-class="active"
+      >已存队列</RouterLink>
     </div>
 
     <div class="nav-right">
