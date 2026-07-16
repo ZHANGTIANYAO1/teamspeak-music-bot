@@ -92,6 +92,60 @@ describe("config", () => {
     expect(defaultPlatform(config)).toBe("jellyfin");
   });
 
+  // ── audioQuality persistence (#125) ─────────────────────────────────────
+  it("defaults audioQuality to each provider's in-memory default", () => {
+    const config = getDefaultConfig();
+    expect(config.audioQuality).toEqual({
+      netease: "exhigh",
+      qq: "exhigh",
+      bilibili: "high",
+      kugou: "128",
+      jellyfin: "direct",
+    });
+  });
+
+  it("fills audioQuality defaults for a legacy config without the field", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ webPort: 4000 }));
+    const config = loadConfig(path);
+    expect(config.audioQuality).toEqual(getDefaultConfig().audioQuality);
+  });
+
+  it("round-trips a saved audioQuality through save/load", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    const config = getDefaultConfig();
+    config.audioQuality = {
+      netease: "lossless",
+      qq: "flac",
+      bilibili: "high",
+      kugou: "flac",
+      jellyfin: "320",
+    };
+    saveConfig(path, config);
+    const loaded = loadConfig(path);
+    expect(loaded.audioQuality).toEqual(config.audioQuality);
+  });
+
+  it("coerces missing / non-string audioQuality fields to defaults", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    // netease valid, qq blank, bilibili wrong type, kugou missing, jellyfin valid.
+    writeFileSync(
+      path,
+      JSON.stringify({ audioQuality: { netease: "lossless", qq: "  ", bilibili: 320, jellyfin: "192" } }),
+    );
+    const config = loadConfig(path);
+    expect(config.audioQuality).toEqual({
+      netease: "lossless",
+      qq: "exhigh", // blank → default
+      bilibili: "high", // non-string → default
+      kugou: "128", // missing → default
+      jellyfin: "192",
+    });
+  });
+
   it("creates config file on save", () => {
     const dir = makeTmpDir();
     const path = join(dir, "sub", "config.json");

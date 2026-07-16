@@ -55,6 +55,26 @@ export const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
   nowPlayingMsgEnabled: true,
 };
 
+/**
+ * Per-bot player settings persisted across restarts (#125): the playback volume
+ * and play mode. These reset to defaults on process restart when kept only in
+ * memory (AudioPlayer/PlayQueue), so they are stored on the bot_instances row —
+ * exactly like the per-bot profile flags — and restored when the bot is (re)built.
+ */
+export interface PlayerSettings {
+  /** 0-100. */
+  volume: number;
+  /** PlayMode string: "seq" | "loop" | "random" | "rloop". */
+  playMode: string;
+}
+
+const PLAY_MODES = new Set(["seq", "loop", "random", "rloop"]);
+
+export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
+  volume: 75,
+  playMode: "seq",
+};
+
 export interface FavoritePlaylist {
   id: number;
   userId: string;
@@ -75,6 +95,9 @@ export interface BotDatabase {
   deleteBotInstance(id: string): boolean;
   getProfileConfig(botId: string): ProfileConfig;
   saveProfileConfig(botId: string, config: ProfileConfig): void;
+  getPlayerSettings(botId: string): PlayerSettings;
+  saveVolume(botId: string, volume: number): void;
+  savePlayMode(botId: string, playMode: string): void;
   getCustomAvatarPath(botId: string): string | null;
   setCustomAvatarPath(botId: string, path: string | null): void;
   addFavorite(userId: string, playlist: { platform: string; playlistId: string; name: string; coverUrl: string; songCount: number }): void;
@@ -119,6 +142,15 @@ function migrateSchema(db: Database.Database): void {
   if (!names.includes("custom_avatar_path")) {
     db.exec("ALTER TABLE bot_instances ADD COLUMN custom_avatar_path TEXT");
   }
+  // Per-bot persisted player settings (#125): volume + play mode. Defaults match
+  // AudioPlayer/PlayQueue's in-memory defaults so pre-existing rows keep behaving
+  // exactly as before until the user changes them.
+  if (!names.includes("volume")) {
+    db.exec("ALTER TABLE bot_instances ADD COLUMN volume INTEGER NOT NULL DEFAULT 75");
+  }
+  if (!names.includes("play_mode")) {
+    db.exec("ALTER TABLE bot_instances ADD COLUMN play_mode TEXT NOT NULL DEFAULT 'seq'");
+  }
 
   const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
   const userColNames = userColumns.map((c) => c.name);
@@ -161,6 +193,8 @@ function initTables(db: Database.Database): void {
       serverProtocol TEXT NOT NULL DEFAULT '',
       ts6ApiKey TEXT NOT NULL DEFAULT '',
       serverPassword TEXT NOT NULL DEFAULT '',
+      volume INTEGER NOT NULL DEFAULT 75,
+      play_mode TEXT NOT NULL DEFAULT 'seq',
       identity TEXT
     );
 
@@ -321,6 +355,12 @@ export function createDatabase(dbPath: string): BotDatabase {
     WHERE id = @id
   `);
 
+  const selectPlayerSettings = db.prepare(
+    `SELECT volume, play_mode FROM bot_instances WHERE id = ?`,
+  );
+  const updateVolume = db.prepare(`UPDATE bot_instances SET volume = ? WHERE id = ?`);
+  const updatePlayMode = db.prepare(`UPDATE bot_instances SET play_mode = ? WHERE id = ?`);
+
   const selectCustomAvatar = db.prepare(`SELECT custom_avatar_path FROM bot_instances WHERE id = ?`);
   const updateCustomAvatar = db.prepare(`UPDATE bot_instances SET custom_avatar_path = ? WHERE id = ?`);
 
@@ -404,6 +444,36 @@ export function createDatabase(dbPath: string): BotDatabase {
         channelDesc: config.channelDescEnabled ? 1 : 0,
         nowPlaying: config.nowPlayingMsgEnabled ? 1 : 0,
       });
+    },
+
+    getPlayerSettings(botId) {
+      const row = selectPlayerSettings.get(botId) as
+        | { volume: number | null; play_mode: string | null }
+        | undefined;
+      if (!row) return { ...DEFAULT_PLAYER_SETTINGS };
+      // Coerce/validate: clamp volume to 0-100 and fall back to defaults for any
+      // NULL / out-of-range / unknown value (a hand-edited DB must never feed a
+      // bad value into AudioPlayer.setVolume / PlayQueue.setMode).
+      const rawVol = typeof row.volume === "number" ? row.volume : DEFAULT_PLAYER_SETTINGS.volume;
+      const volume = Number.isFinite(rawVol)
+        ? Math.max(0, Math.min(100, Math.round(rawVol)))
+        : DEFAULT_PLAYER_SETTINGS.volume;
+      const playMode =
+        typeof row.play_mode === "string" && PLAY_MODES.has(row.play_mode)
+          ? row.play_mode
+          : DEFAULT_PLAYER_SETTINGS.playMode;
+      return { volume, playMode };
+    },
+
+    saveVolume(botId, volume) {
+      const clamped = Math.max(0, Math.min(100, Math.round(volume)));
+      updateVolume.run(clamped, botId);
+    },
+
+    savePlayMode(botId, playMode) {
+      // Persist only recognized modes so a bad value can never poison the row.
+      if (!PLAY_MODES.has(playMode)) return;
+      updatePlayMode.run(playMode, botId);
     },
 
     getCustomAvatarPath(botId) {

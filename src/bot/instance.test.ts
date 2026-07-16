@@ -6,6 +6,7 @@ import type { SpotifyController } from "../music/spotify/controller.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 import type { MusicProvider } from "../music/provider.js";
 import type { BotDatabase } from "../data/database.js";
+import { createDatabase } from "../data/database.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { BotConfig } from "../data/config.js";
 
@@ -832,6 +833,9 @@ describe("BotInstance — spotifyOAuth threading to the controller factory (C3.1
     const database = {
       getProfileConfig: () => ({}),
       getCustomAvatarPath: () => null,
+      getPlayerSettings: () => ({ volume: 75, playMode: "seq" }),
+      saveVolume: () => {},
+      savePlayMode: () => {},
     } as unknown as BotDatabase;
     const options: BotInstanceOptions = {
       id: "bot-oauth-test",
@@ -909,6 +913,136 @@ describe("spotifyPortsForBotId — per-bot go-librespot ports (Fix 3)", () => {
       // Same offset within each range → the two never collide with each other.
       expect(callbackPort - apiPort).toBe(5000);
     }
+  });
+});
+
+// --- Persisting volume + play mode across restarts (#125) ------------------
+const cmdVol = (BotInstance.prototype as any).cmdVol as (this: unknown, cmd: any) => string;
+const cmdMode = (BotInstance.prototype as any).cmdMode as (this: unknown, cmd: any) => string;
+
+describe("BotInstance.cmdVol — persistence (#125)", () => {
+  function makeVolCtx() {
+    let stored = 75;
+    return {
+      id: "bot1",
+      player: {
+        setVolume: vi.fn((v: number) => { stored = v; }),
+        getVolume: vi.fn(() => stored),
+      },
+      database: { saveVolume: vi.fn() },
+      logger: { warn: vi.fn() },
+      emit: vi.fn(),
+      // The real private persist helper lives on the prototype; wire it so the
+      // test exercises the shipped persistence path end-to-end.
+      persistVolume: (BotInstance.prototype as any).persistVolume,
+    } as any;
+  }
+
+  it("saves the new volume via database.saveVolume (covers chat !vol AND the REST endpoint)", () => {
+    const ctx = makeVolCtx();
+    const res = cmdVol.call(ctx, { args: "40" });
+    expect(res).toBe("Volume set to 40%");
+    expect(ctx.player.setVolume).toHaveBeenCalledWith(40);
+    expect(ctx.database.saveVolume).toHaveBeenCalledWith("bot1", 40);
+    expect(ctx.emit).toHaveBeenCalledWith("stateChange");
+  });
+
+  it("does not persist an out-of-range volume", () => {
+    const ctx = makeVolCtx();
+    const res = cmdVol.call(ctx, { args: "999" });
+    expect(res).toBe("Usage: !vol <0-100>");
+    expect(ctx.player.setVolume).not.toHaveBeenCalled();
+    expect(ctx.database.saveVolume).not.toHaveBeenCalled();
+  });
+
+  it("swallows a database error so the volume change still succeeds", () => {
+    const ctx = makeVolCtx();
+    ctx.database.saveVolume = vi.fn(() => { throw new Error("disk full"); });
+    const res = cmdVol.call(ctx, { args: "50" });
+    expect(res).toBe("Volume set to 50%");
+    expect(ctx.player.setVolume).toHaveBeenCalledWith(50);
+    expect(ctx.logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe("BotInstance.cmdMode — persistence (#125)", () => {
+  function makeModeCtx() {
+    let mode = "seq";
+    return {
+      id: "bot1",
+      queue: {
+        setMode: vi.fn((m: string) => { mode = m; }),
+        getMode: vi.fn(() => mode),
+      },
+      database: { savePlayMode: vi.fn() },
+      logger: { warn: vi.fn() },
+      emit: vi.fn(),
+      persistPlayMode: (BotInstance.prototype as any).persistPlayMode,
+    } as any;
+  }
+
+  it("saves the new play mode via database.savePlayMode", () => {
+    const ctx = makeModeCtx();
+    const res = cmdMode.call(ctx, { args: "rloop" });
+    expect(res).toBe("Play mode set to: rloop");
+    expect(ctx.queue.setMode).toHaveBeenCalledWith("rloop");
+    expect(ctx.database.savePlayMode).toHaveBeenCalledWith("bot1", "rloop");
+    expect(ctx.emit).toHaveBeenCalledWith("stateChange");
+  });
+
+  it("does not persist an unknown mode", () => {
+    const ctx = makeModeCtx();
+    const res = cmdMode.call(ctx, { args: "bogus" });
+    expect(res).toBe("Usage: !mode <seq|loop|random|rloop>");
+    expect(ctx.queue.setMode).not.toHaveBeenCalled();
+    expect(ctx.database.savePlayMode).not.toHaveBeenCalled();
+  });
+});
+
+describe("BotInstance — restores persisted player settings on construction (#125)", () => {
+  const provider = { platform: "netease" } as unknown as MusicProvider;
+  function makeOptions(id: string, database: BotDatabase): BotInstanceOptions {
+    const logger: any = { info() {}, warn() {}, error() {}, debug() {}, child() { return logger; } };
+    return {
+      id,
+      name: "RestoreBot",
+      tsOptions: { host: "localhost", port: 9987, queryPort: 10011, nickname: "RestoreBot" } as any,
+      neteaseProvider: provider,
+      qqProvider: provider,
+      bilibiliProvider: provider,
+      youtubeProvider: provider,
+      database,
+      config: { spotify: {} } as unknown as BotConfig,
+      logger,
+      avatarStore: { read: () => null } as unknown as AvatarStore,
+      spotifyControllerFactory: () => ({ on: () => {} } as unknown as SpotifyController),
+    };
+  }
+
+  it("applies the saved volume + play mode from the database", () => {
+    const db = createDatabase(":memory:");
+    db.saveBotInstance({
+      id: "bot-restore", name: "B", serverAddress: "x", serverPort: 9987, nickname: "n",
+      defaultChannel: "", channelId: "", channelPassword: "", autoStart: false,
+      serverProtocol: "", ts6ApiKey: "", serverPassword: "",
+    });
+    db.saveVolume("bot-restore", 33);
+    db.savePlayMode("bot-restore", "loop");
+
+    const bot = new BotInstance(makeOptions("bot-restore", db));
+    const status = bot.getStatus();
+    expect(status.volume).toBe(33);
+    expect(status.playMode).toBe("loop");
+    db.close();
+  });
+
+  it("falls back to defaults for a bot with no saved settings", () => {
+    const db = createDatabase(":memory:");
+    const bot = new BotInstance(makeOptions("brand-new", db));
+    const status = bot.getStatus();
+    expect(status.volume).toBe(75);
+    expect(status.playMode).toBe("seq");
+    db.close();
   });
 });
 

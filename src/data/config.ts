@@ -39,6 +39,22 @@ export interface JellyfinConfig {
 }
 
 /**
+ * Per-provider audio quality (音质), persisted so a restart keeps the user's
+ * choice instead of resetting each provider to its in-memory default (#125).
+ * The values are the same strings the WebUI/REST `POST /api/music/quality`
+ * endpoint sends and each provider's setQuality() accepts; on startup they are
+ * replayed onto the (shared, process-wide) providers. Providers ignore/normalize
+ * unknown values, so a stale/hand-edited entry can never break playback.
+ */
+export interface AudioQualityConfig {
+  netease: string;
+  qq: string;
+  bilibili: string;
+  kugou: string;
+  jellyfin: string;
+}
+
+/**
  * Providers gated by `enabledProviders`. Not listed here:
  *  - "local"   → governed by the existing `localAudioEnabled` flag
  *  - "spotify" → governed by the existing `spotify.enabled` flag
@@ -102,6 +118,8 @@ export interface BotConfig {
   guestMode: GuestModeConfig;
   spotify: SpotifyConfig;
   jellyfin: JellyfinConfig;
+  /** Persisted per-provider audio quality (音质), restored on startup (#125). */
+  audioQuality: AudioQualityConfig;
   /**
    * Which gateable providers are active (see GATEABLE_PROVIDERS). Default is
    * the online sources (NetEase/QQ/Bilibili/YouTube/Kugou); jellyfin is an
@@ -161,6 +179,15 @@ export function getDefaultConfig(): BotConfig {
       password: "",
       apiKey: "",
       userId: "",
+    },
+    // Mirrors each provider's own in-memory default quality; overwritten on
+    // startup once the user has changed a quality (persisted via #125).
+    audioQuality: {
+      netease: "exhigh",
+      qq: "exhigh",
+      bilibili: "high",
+      kugou: "128",
+      jellyfin: "direct",
     },
     enabledProviders: ["netease", "qq", "bilibili", "youtube", "kugou"],
   };
@@ -317,6 +344,20 @@ export function loadConfig(path: string): BotConfig {
         )
       : defaults.enabledProviders;
 
+    // audioQuality → per-provider strings; each field falls back to its default
+    // when missing/blank/non-string (a hand-edited/legacy config must never smuggle
+    // a non-string past the gate — the value is fed straight to provider.setQuality).
+    const partialAq = (partial.audioQuality ?? {}) as Partial<AudioQualityConfig>;
+    const coerceQuality = (v: unknown, fallback: string): string =>
+      typeof v === "string" && v.trim() ? v : fallback;
+    const audioQuality: AudioQualityConfig = {
+      netease: coerceQuality(partialAq.netease, defaults.audioQuality.netease),
+      qq: coerceQuality(partialAq.qq, defaults.audioQuality.qq),
+      bilibili: coerceQuality(partialAq.bilibili, defaults.audioQuality.bilibili),
+      kugou: coerceQuality(partialAq.kugou, defaults.audioQuality.kugou),
+      jellyfin: coerceQuality(partialAq.jellyfin, defaults.audioQuality.jellyfin),
+    };
+
     return {
       ...defaults,
       ...partial,
@@ -324,6 +365,7 @@ export function loadConfig(path: string): BotConfig {
       guestMode: gm,
       spotify,
       jellyfin,
+      audioQuality,
       enabledProviders,
     };
   }
