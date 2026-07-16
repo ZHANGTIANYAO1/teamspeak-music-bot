@@ -325,6 +325,38 @@ describe("bot router /settings", () => {
     expect(res.status).toBe(200);
     expect(config.spotify).toEqual(before);
   });
+
+  it("GET /settings echoes savedQueuesEnabled + playKeepsQueue (default false)", async () => {
+    const res = await request(app).get("/api/bot/settings").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.savedQueuesEnabled).toBe(false);
+    expect(res.body.playKeepsQueue).toBe(false);
+  });
+
+  it("POST /settings persists savedQueuesEnabled and playKeepsQueue", async () => {
+    const res = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ savedQueuesEnabled: true, playKeepsQueue: true });
+    expect(res.status).toBe(200);
+    expect(res.body.savedQueuesEnabled).toBe(true);
+    expect(res.body.playKeepsQueue).toBe(true);
+    expect(config.savedQueuesEnabled).toBe(true);
+    expect(config.playKeepsQueue).toBe(true);
+
+    const get = await request(app).get("/api/bot/settings").set("Cookie", cookie);
+    expect(get.body.savedQueuesEnabled).toBe(true);
+    expect(get.body.playKeepsQueue).toBe(true);
+  });
+
+  it("POST /settings ignores non-boolean savedQueuesEnabled without 400", async () => {
+    const res = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ savedQueuesEnabled: "nope" });
+    expect(res.status).toBe(200);
+    expect(config.savedQueuesEnabled).toBe(false); // unchanged from default
+  });
 });
 
 // Whole-branch I2: saving a Client ID in Settings must re-configure the single

@@ -19,6 +19,7 @@ import { createUsersRouter } from "./api/users.js";
 import { createAuditStore } from "../data/audit.js";
 import { createAuditRouter } from "./api/audit.js";
 import { createFavoritesRouter } from "./api/favorites.js";
+import { createSavedQueuesRouter } from "./api/saved-queues.js";
 import { createSpotifyRouter } from "./api/spotify.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 import type { SpotifyProvider } from "../music/spotify/provider.js";
@@ -188,6 +189,18 @@ export function createWebServer(options: WebServerOptions): WebServer {
     );
   }
   app.use("/api/favorites", requireNotGuest, createFavoritesRouter(options.database, logger));
+  // Saved queues (Feature 1, #119). Members + admins only (requireNotGuest);
+  // the router itself 403s every route unless savedQueuesEnabled is on.
+  app.use(
+    "/api/saved-queues",
+    requireNotGuest,
+    createSavedQueuesRouter(
+      options.database,
+      options.botManager,
+      () => options.config.savedQueuesEnabled,
+      logger,
+    ),
+  );
 
   // admin-only routes
   app.use("/api/users", requireAdmin, createUsersRouter(users, sessions, audit, logger, permissions));

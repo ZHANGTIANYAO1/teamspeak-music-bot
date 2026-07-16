@@ -494,4 +494,28 @@ describe("loadConfig error handling", () => {
       expect(readFileSync(join(dir, backups[0]), "utf-8")).toBe(content);
     }
   });
+
+  it("defaults savedQueuesEnabled and playKeepsQueue to false", () => {
+    const c = getDefaultConfig();
+    expect(c.savedQueuesEnabled).toBe(false);
+    expect(c.playKeepsQueue).toBe(false);
+  });
+
+  it("coerces non-boolean savedQueues/playKeepsQueue values to false on load", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ savedQueuesEnabled: "yes", playKeepsQueue: 1 }));
+    const c = loadConfig(path);
+    expect(c.savedQueuesEnabled).toBe(false);
+    expect(c.playKeepsQueue).toBe(false);
+  });
+
+  it("preserves savedQueues/playKeepsQueue true when explicitly enabled", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ savedQueuesEnabled: true, playKeepsQueue: true }));
+    const c = loadConfig(path);
+    expect(c.savedQueuesEnabled).toBe(true);
+    expect(c.playKeepsQueue).toBe(true);
+  });
 });
