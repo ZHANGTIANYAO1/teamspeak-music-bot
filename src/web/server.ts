@@ -77,12 +77,19 @@ export function createWebServer(options: WebServerOptions): WebServer {
     app.set("trust proxy", true);
   }
 
-  // Security headers: prevent the WebUI from being embedded in a third-party
-  // iframe (clickjacking defence). CSP frame-ancestors is the modern equivalent
-  // of X-Frame-Options; both are set for compatibility across browsers.
+  // Security headers:
+  //  • X-Frame-Options / CSP frame-ancestors — prevent the WebUI from being
+  //    embedded in a third-party iframe (clickjacking defence). CSP
+  //    frame-ancestors is the modern equivalent of X-Frame-Options; both are
+  //    set for compatibility across browsers.
+  //  • X-Robots-Tag — keep deployed instances out of search-engine indexes
+  //    (issue #128: searching "TsmusicBot" surfaced strangers' WebUI URLs).
+  //    Set on EVERY response so JSON/API responses and the SPA shell are all
+  //    covered; complements /robots.txt and the <meta name="robots"> tag.
   app.use((_req, res, next) => {
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow");
     next();
   });
 
@@ -95,6 +102,13 @@ export function createWebServer(options: WebServerOptions): WebServer {
   const permissions = createPermissionStore(options.database.db);
 
   // ─── Public routes (no auth, no CSRF) ───────────────────────────────────
+  // Disallow every crawler (issue #128). Declared before the static SPA
+  // fallback so this wins over index.html for /robots.txt. Belt-and-braces
+  // with the X-Robots-Tag header above and the <meta name="robots"> tag.
+  app.get("/robots.txt", (_req, res) => {
+    res.type("text/plain").send("User-agent: *\nDisallow: /\n");
+  });
+
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", version: "0.1.0" });
   });
