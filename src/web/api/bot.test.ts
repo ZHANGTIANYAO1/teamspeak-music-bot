@@ -679,4 +679,54 @@ describe("bot router /settings jellyfin block + enabledProviders", () => {
     // No jellyfin block in the request → no reconfigure call.
     expect(configureCalls).toHaveLength(0);
   });
+
+  // --- #126: operator-chosen default source ---
+
+  it("GET /settings exposes defaultPlatform (null by default)", async () => {
+    const res = await request(mountBot()).get("/api/bot/settings");
+    expect(res.status).toBe(200);
+    expect(res.body.defaultPlatform).toBeNull();
+  });
+
+  it("POST /settings sets an enabled defaultPlatform and persists it", async () => {
+    const res = await request(mountBot()).post("/api/bot/settings").send({
+      defaultPlatform: "bilibili",
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.defaultPlatform).toBe("bilibili");
+    expect(config.defaultPlatform).toBe("bilibili");
+    const onDisk = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(onDisk.defaultPlatform).toBe("bilibili");
+  });
+
+  it("POST /settings ignores an unknown or disabled defaultPlatform", async () => {
+    const app = mountBot();
+    // jellyfin is opt-in and not enabled in the default config → rejected.
+    await request(app).post("/api/bot/settings").send({ defaultPlatform: "jellyfin" });
+    expect(config.defaultPlatform).toBeNull();
+    // Unknown value → rejected.
+    await request(app).post("/api/bot/settings").send({ defaultPlatform: "bogus" });
+    expect(config.defaultPlatform).toBeNull();
+  });
+
+  it("POST /settings clears defaultPlatform with null", async () => {
+    const app = mountBot();
+    await request(app).post("/api/bot/settings").send({ defaultPlatform: "qq" });
+    expect(config.defaultPlatform).toBe("qq");
+    const res = await request(app).post("/api/bot/settings").send({ defaultPlatform: null });
+    expect(res.body.defaultPlatform).toBeNull();
+    expect(config.defaultPlatform).toBeNull();
+  });
+
+  it("POST /settings drops a default whose source gets disabled in the same request", async () => {
+    const app = mountBot();
+    await request(app).post("/api/bot/settings").send({ defaultPlatform: "qq" });
+    expect(config.defaultPlatform).toBe("qq");
+    // Disabling qq via enabledProviders clears the now-invalid default.
+    const res = await request(app).post("/api/bot/settings").send({
+      enabledProviders: ["netease", "bilibili"],
+    });
+    expect(res.body.defaultPlatform).toBeNull();
+    expect(config.defaultPlatform).toBeNull();
+  });
 });

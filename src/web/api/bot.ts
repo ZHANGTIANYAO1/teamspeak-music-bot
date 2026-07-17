@@ -79,6 +79,7 @@ export function createBotRouter(
       spotify: maskedSpotify(),
       jellyfin: maskedJellyfin(),
       enabledProviders: config.enabledProviders,
+      defaultPlatform: config.defaultPlatform,
     });
   });
 
@@ -187,6 +188,29 @@ export function createBotRouter(
       );
     }
 
+    // defaultPlatform (issue #126): the operator-chosen default source for
+    // platform-less commands/REST/WebUI calls. Reconciled AFTER enabledProviders
+    // so both are validated against the same (possibly updated) enabled list:
+    //   1) Drop a stored default that the new enabledProviders no longer allows,
+    //      keeping the persisted config consistent with loadConfig's invariant.
+    //   2) Apply an explicit change — `null`/`""` clears it (back to priority
+    //      order); a known+enabled provider sets it; anything else is ignored.
+    if (config.defaultPlatform && !config.enabledProviders.includes(config.defaultPlatform)) {
+      config.defaultPlatform = null;
+    }
+    if ("defaultPlatform" in req.body) {
+      const dp = req.body.defaultPlatform;
+      if (dp === null || dp === "") {
+        config.defaultPlatform = null;
+      } else if (
+        typeof dp === "string" &&
+        (GATEABLE_PROVIDERS as readonly string[]).includes(dp) &&
+        config.enabledProviders.includes(dp as GateableProvider)
+      ) {
+        config.defaultPlatform = dp as GateableProvider;
+      }
+    }
+
     saveConfig(configPath, config);
 
     // Hot-apply the (possibly re-pointed) Jellyfin connection to the live
@@ -233,6 +257,7 @@ export function createBotRouter(
       spotify: maskedSpotify(),
       jellyfin: maskedJellyfin(),
       enabledProviders: config.enabledProviders,
+      defaultPlatform: config.defaultPlatform,
     });
   });
 

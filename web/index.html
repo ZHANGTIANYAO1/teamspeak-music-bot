@@ -3,6 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Keep deployed instances out of search-engine indexes (issue #128:
+       searching "TsmusicBot" surfaced strangers' WebUI URLs). Defence in depth
+       alongside the server's X-Robots-Tag header and /robots.txt. Applies to
+       the SPA shell and every in-app route (incl. /bot/<id> dedicated links),
+       since they all share this single index.html. -->
+  <meta name="robots" content="noindex, nofollow">
   <!-- Bilibili / NetEase / QQ image CDNs reject requests whose Referer is not on
        their whitelist, so we must not leak a Referer cross-origin. "same-origin"
        does exactly that: full Referer for our own requests, none for cross-origin

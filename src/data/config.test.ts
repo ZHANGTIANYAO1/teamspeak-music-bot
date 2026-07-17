@@ -82,6 +82,61 @@ describe("config", () => {
     expect(defaultPlatform(config)).toBe("netease");
   });
 
+  // --- #126: an explicit operator default source ---
+
+  it("defaultPlatform is null by default (follow the priority order)", () => {
+    expect(getDefaultConfig().defaultPlatform).toBeNull();
+  });
+
+  it("defaultPlatform() honors an explicit, enabled preference over the priority order", () => {
+    const config = getDefaultConfig();
+    // Priority would pick netease; a Bilibili-loving server sets B站 instead (#126).
+    config.defaultPlatform = "bilibili";
+    expect(defaultPlatform(config)).toBe("bilibili");
+  });
+
+  it("defaultPlatform() ignores a preference whose source is not enabled", () => {
+    const config = getDefaultConfig();
+    config.defaultPlatform = "jellyfin"; // opt-in, not enabled in the default config
+    // Falls back to the fixed priority order (netease)…
+    expect(defaultPlatform(config)).toBe("netease");
+    // …until the preferred source is actually enabled.
+    config.enabledProviders = [...config.enabledProviders, "jellyfin"];
+    expect(defaultPlatform(config)).toBe("jellyfin");
+  });
+
+  it("loadConfig keeps a valid, enabled defaultPlatform", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ defaultPlatform: "bilibili" }));
+    const config = loadConfig(path);
+    expect(config.defaultPlatform).toBe("bilibili");
+    expect(defaultPlatform(config)).toBe("bilibili");
+  });
+
+  it("loadConfig nulls a defaultPlatform that is unknown, disabled, or the wrong type", () => {
+    const dir = makeTmpDir();
+    // Unknown provider name.
+    const p1 = join(dir, "c1.json");
+    writeFileSync(p1, JSON.stringify({ defaultPlatform: "bogus" }));
+    expect(loadConfig(p1).defaultPlatform).toBeNull();
+    // Known provider, but not in enabledProviders.
+    const p2 = join(dir, "c2.json");
+    writeFileSync(p2, JSON.stringify({ enabledProviders: ["netease"], defaultPlatform: "bilibili" }));
+    expect(loadConfig(p2).defaultPlatform).toBeNull();
+    // Wrong type.
+    const p3 = join(dir, "c3.json");
+    writeFileSync(p3, JSON.stringify({ defaultPlatform: 42 }));
+    expect(loadConfig(p3).defaultPlatform).toBeNull();
+  });
+
+  it("round-trips defaultPlatform through save/load", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    saveConfig(path, { ...getDefaultConfig(), defaultPlatform: "qq" });
+    expect(loadConfig(path).defaultPlatform).toBe("qq");
+  });
+
   it("respects an explicit jellyfin-only enabledProviders from disk", () => {
     const dir = makeTmpDir();
     const path = join(dir, "config.json");
@@ -90,6 +145,60 @@ describe("config", () => {
     const config = loadConfig(path);
     expect(config.enabledProviders).toEqual(["jellyfin"]);
     expect(defaultPlatform(config)).toBe("jellyfin");
+  });
+
+  // ── audioQuality persistence (#125) ─────────────────────────────────────
+  it("defaults audioQuality to each provider's in-memory default", () => {
+    const config = getDefaultConfig();
+    expect(config.audioQuality).toEqual({
+      netease: "exhigh",
+      qq: "exhigh",
+      bilibili: "high",
+      kugou: "128",
+      jellyfin: "direct",
+    });
+  });
+
+  it("fills audioQuality defaults for a legacy config without the field", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ webPort: 4000 }));
+    const config = loadConfig(path);
+    expect(config.audioQuality).toEqual(getDefaultConfig().audioQuality);
+  });
+
+  it("round-trips a saved audioQuality through save/load", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    const config = getDefaultConfig();
+    config.audioQuality = {
+      netease: "lossless",
+      qq: "flac",
+      bilibili: "high",
+      kugou: "flac",
+      jellyfin: "320",
+    };
+    saveConfig(path, config);
+    const loaded = loadConfig(path);
+    expect(loaded.audioQuality).toEqual(config.audioQuality);
+  });
+
+  it("coerces missing / non-string audioQuality fields to defaults", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    // netease valid, qq blank, bilibili wrong type, kugou missing, jellyfin valid.
+    writeFileSync(
+      path,
+      JSON.stringify({ audioQuality: { netease: "lossless", qq: "  ", bilibili: 320, jellyfin: "192" } }),
+    );
+    const config = loadConfig(path);
+    expect(config.audioQuality).toEqual({
+      netease: "lossless",
+      qq: "exhigh", // blank → default
+      bilibili: "high", // non-string → default
+      kugou: "128", // missing → default
+      jellyfin: "192",
+    });
   });
 
   it("creates config file on save", () => {

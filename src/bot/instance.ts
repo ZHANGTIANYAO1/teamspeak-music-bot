@@ -39,6 +39,15 @@ import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 /** Reply sent when a non-admin invokes an admin-only chat command. */
 export const COMMAND_DENIED_MESSAGE = "⛔ 需要管理员权限（该命令仅限管理员服务器组）";
 
+/** Maps the persisted / command-line play-mode string to the PlayMode enum.
+ *  Shared by the !mode command and the restart-restore path (#125). */
+const PLAY_MODE_BY_VALUE: Record<string, PlayMode> = {
+  seq: PlayMode.Sequential,
+  loop: PlayMode.Loop,
+  random: PlayMode.Random,
+  rloop: PlayMode.RandomLoop,
+};
+
 /** Fallback message when Spotify audio can't be served (backend unavailable
  *  OR a per-track playTrack failure against a dead/failed sidecar). */
 const SPOTIFY_UNAVAILABLE_MESSAGE =
@@ -189,6 +198,19 @@ export class BotInstance extends EventEmitter {
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
     this.queue = new PlayQueue();
+
+    // Restore persisted per-bot player settings (#125): volume + play mode
+    // survive restarts. getPlayerSettings returns validated values (the in-memory
+    // defaults when the row/column is absent), so this is a harmless no-op for a
+    // brand-new bot and reproduces the saved state for an existing one.
+    try {
+      const settings = this.database.getPlayerSettings(this.id);
+      this.player.setVolume(settings.volume);
+      const restoredMode = PLAY_MODE_BY_VALUE[settings.playMode];
+      if (restoredMode) this.queue.setMode(restoredMode);
+    } catch (err) {
+      this.logger.warn({ err }, "Failed to restore player settings — using defaults");
+    }
 
     // Structural typing (like localProvider.sweepUnreferenced): only the real
     // JellyfinProvider exposes createPlaybackReporter, so the netease fallback
@@ -1239,8 +1261,34 @@ export class BotInstance extends EventEmitter {
     const vol = parseInt(cmd.args, 10);
     if (isNaN(vol) || vol < 0 || vol > 100) return "Usage: !vol <0-100>";
     this.player.setVolume(vol);
+    // Persist so the volume survives a restart (#125). Both the chat !vol command
+    // and the WebUI/REST volume endpoint funnel through here, so one write covers
+    // every entry point. Only volume is written — play mode is saved independently.
+    this.persistVolume();
     this.emit("stateChange");
     return `Volume set to ${vol}%`;
+  }
+
+  /** Persist the current volume (#125). Best-effort: a DB error must never break
+   *  the volume change itself. */
+  private persistVolume(): void {
+    try {
+      this.database.saveVolume(this.id, this.player.getVolume());
+    } catch (err) {
+      this.logger.warn({ err }, "Failed to persist volume");
+    }
+  }
+
+  /** Persist the current play mode (#125). Best-effort, mirrors persistVolume.
+   *  Called ONLY from the explicit !mode command — NOT from FM/artist mode, whose
+   *  Random/Loop switch is a transient side effect that must not overwrite the
+   *  user's saved preference. */
+  private persistPlayMode(): void {
+    try {
+      this.database.savePlayMode(this.id, this.queue.getMode());
+    } catch (err) {
+      this.logger.warn({ err }, "Failed to persist play mode");
+    }
   }
 
   private cmdNow(): string {
@@ -1308,15 +1356,12 @@ export class BotInstance extends EventEmitter {
   }
 
   private cmdMode(cmd: ParsedCommand): string {
-    const modeMap: Record<string, PlayMode> = {
-      seq: PlayMode.Sequential,
-      loop: PlayMode.Loop,
-      random: PlayMode.Random,
-      rloop: PlayMode.RandomLoop,
-    };
-    const mode = modeMap[cmd.args];
+    const mode = PLAY_MODE_BY_VALUE[cmd.args];
     if (mode === undefined) return "Usage: !mode <seq|loop|random|rloop>";
     this.queue.setMode(mode);
+    // Persist so the play mode survives a restart (#125). The chat !mode command
+    // and the WebUI/REST mode endpoint both funnel through here.
+    this.persistPlayMode();
     this.emit("stateChange");
     return `Play mode set to: ${cmd.args}`;
   }

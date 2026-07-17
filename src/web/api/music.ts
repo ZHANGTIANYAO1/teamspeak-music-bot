@@ -2,7 +2,7 @@ import express, { Router, type Response } from "express";
 import type { MusicProvider, Song, Album } from "../../music/provider.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { Logger } from "../../logger.js";
-import { isProviderEnabled, defaultPlatform, type BotConfig } from "../../data/config.js";
+import { isProviderEnabled, defaultPlatform, saveConfig, type BotConfig } from "../../data/config.js";
 import { requirePermission } from "../middleware/requirePermission.js";
 import { requireNotGuest } from "../middleware/requireNotGuest.js";
 import { authorize } from "../middleware/authorize.js";
@@ -16,7 +16,10 @@ export function createMusicRouter(
   config?: BotConfig,
   kugouProvider?: MusicProvider,
   spotifyProvider?: MusicProvider,
-  jellyfinProvider?: MusicProvider
+  jellyfinProvider?: MusicProvider,
+  // When set (alongside config), a quality change is persisted to config.json so
+  // it survives a restart (#125). Omitted by unit-test routers → no persistence.
+  configPath?: string,
 ): Router {
   const router = Router();
   const youtubeProvider: MusicProvider = new YouTubeProvider();
@@ -480,6 +483,26 @@ export function createMusicRouter(
     if ((!platform || platform === "jellyfin") && jellyfinProvider) {
       jellyfinProvider.setQuality(quality);
     }
+
+    // Persist the (post-apply) per-provider quality so it survives a restart
+    // (#125). Snapshotting each provider's getQuality() AFTER setQuality captures
+    // exactly what each one accepted (jellyfin ignores foreign tiers, kugou maps
+    // aliases), so replaying these on startup reproduces this state faithfully.
+    if (config && configPath) {
+      config.audioQuality = {
+        netease: neteaseProvider.getQuality(),
+        qq: qqProvider.getQuality(),
+        bilibili: bilibiliProvider.getQuality(),
+        kugou: kugouProvider?.getQuality() ?? config.audioQuality.kugou,
+        jellyfin: jellyfinProvider?.getQuality() ?? config.audioQuality.jellyfin,
+      };
+      try {
+        saveConfig(configPath, config);
+      } catch (err) {
+        logger.warn({ err }, "Failed to persist audio quality");
+      }
+    }
+
     logger.info({ quality, platform }, "Audio quality changed");
     res.json({ success: true, quality });
   });

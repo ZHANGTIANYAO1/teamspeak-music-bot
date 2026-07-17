@@ -555,6 +555,36 @@
       </div>
     </section>
 
+    <!-- Default music source (issue #126): the source used by chat commands
+         (!play/!add …) and the WebUI when no platform flag is given. Saving is a
+         global bot setting, so gate on bot.manage like the other behavior rows. -->
+    <section v-if="can('bot.manage')" class="settings-section">
+      <h2 class="section-title">默认音源</h2>
+      <p class="profile-section-hint">
+        设置不带音源参数时（如聊天里的 <code>!play 歌名</code> 或网页搜索）默认使用的音源。
+        例如把默认音源设为「哔哩哔哩」后，点播 B 站音乐就不用每次都加 <code>-b</code>。
+        选择「自动」则按内置优先级挑选第一个已启用的音源（网易云 → QQ → 酷狗 → Jellyfin → 哔哩哔哩 → YouTube）。
+      </p>
+      <div class="setting-row">
+        <div class="setting-label">
+          <Icon icon="mdi:music-box-multiple-outline" class="setting-icon" />
+          默认音源
+        </div>
+        <div class="prefix-input-wrap">
+          <select v-model="defaultPlatformForm" class="input input-sm default-source-select">
+            <option value="">自动（按优先级）</option>
+            <option v-for="opt in defaultSourceOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
+          <button class="btn-primary" :disabled="defaultSourceSaving" @click="saveDefaultSource">
+            {{ defaultSourceSaving ? '保存中…' : '保存' }}
+          </button>
+        </div>
+      </div>
+      <p v-if="defaultSourceMessage" class="spotify-message" :class="`tone-${defaultSourceMessageTone}`">{{ defaultSourceMessage }}</p>
+    </section>
+
     <!-- Spotify (Connect) playback via librespot — requires platform.auth -->
     <section v-if="can('platform.auth')" class="settings-section">
       <h2 class="section-title">Spotify 播放（实验性）</h2>
@@ -1187,6 +1217,51 @@ function providerOn(p: string): boolean {
   return enabledProviders.value.length === 0 || enabledProviders.value.includes(p);
 }
 
+// --- Default music source (issue #126) ---
+// Chinese labels for the gateable providers, shown in the default-source select.
+const PROVIDER_LABELS: Record<string, string> = {
+  netease: '网易云音乐',
+  qq: 'QQ音乐',
+  kugou: '酷狗音乐',
+  bilibili: '哔哩哔哩',
+  youtube: 'YouTube',
+  jellyfin: 'Jellyfin',
+};
+// Empty string = "auto" (follow the fixed priority order); persisted as null.
+const defaultPlatformForm = ref('');
+const defaultSourceSaving = ref(false);
+const defaultSourceMessage = ref('');
+const defaultSourceMessageTone = ref<'ok' | 'warn'>('ok');
+// Only currently-enabled sources can be picked as the default.
+const defaultSourceOptions = computed(() =>
+  enabledProviders.value
+    .filter((p) => p in PROVIDER_LABELS)
+    .map((p) => ({ value: p, label: PROVIDER_LABELS[p] })),
+);
+
+async function saveDefaultSource() {
+  defaultSourceSaving.value = true;
+  defaultSourceMessage.value = '';
+  try {
+    const res = await axios.post('/api/bot/settings', {
+      defaultPlatform: defaultPlatformForm.value || null,
+    });
+    defaultPlatformForm.value = res.data?.defaultPlatform ?? '';
+    // Push the new default across the app immediately (search bar / play calls
+    // read store.defaultSource, refreshed via GET /api/music/providers).
+    await store.fetchProviders();
+    defaultSourceMessageTone.value = 'ok';
+    defaultSourceMessage.value = '已保存';
+  } catch (err: any) {
+    defaultSourceMessageTone.value = 'warn';
+    defaultSourceMessage.value = err?.response?.status === 403
+      ? '没有权限修改设置（需要 bot.manage）'
+      : '保存失败，请稍后重试';
+  } finally {
+    defaultSourceSaving.value = false;
+  }
+}
+
 // --- Jellyfin connection (admin-configured; password/apiKey are write-only) ---
 const jellyfinForm = reactive({
   serverUrl: '',
@@ -1242,6 +1317,11 @@ async function saveJellyfin() {
       enabledProvidersLoaded.value = true;
       // Search bar / home sections / FM cards react without a reload.
       store.fetchProviders();
+    }
+    // Disabling a source can clear a default that pointed at it (backend
+    // reconciles enabledProviders → defaultPlatform); keep the select in sync.
+    if (res.data && 'defaultPlatform' in res.data) {
+      defaultPlatformForm.value = res.data.defaultPlatform ?? '';
     }
     jellyfinMessageTone.value = 'ok';
     jellyfinMessage.value = '已保存';
@@ -1538,6 +1618,8 @@ async function loadIdleTimeout() {
       jellyfinEnabledForm.value = res.data.enabledProviders.includes('jellyfin');
       enabledProvidersLoaded.value = true;
     }
+    // null (unset) → "" so the select shows "自动（按优先级）".
+    defaultPlatformForm.value = res.data.defaultPlatform ?? '';
   } catch { /* ignore */ }
 }
 
@@ -2495,6 +2577,13 @@ onUnmounted(() => {
 }
 
 .input-sm { max-width: 80px; }
+
+// The default-source picker holds full source names ("网易云音乐"), so it needs
+// more room than the 80px .input-sm cap.
+.default-source-select {
+  max-width: none;
+  flex: 0 0 160px;
+}
 
 .textarea {
   width: 100%;
