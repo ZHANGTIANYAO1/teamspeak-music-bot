@@ -15,7 +15,7 @@ import {
 import { parseSongRef, parseSelectionIndex } from "./song-ref.js";
 import { splitTextIntoChunks } from "./text-chunk.js";
 import type { Logger } from "../logger.js";
-import type { BotDatabase, ProfileConfig } from "../data/database.js";
+import { SHARED_QUEUE_OWNER, type BotDatabase, type ProfileConfig, type StoredSong } from "../data/database.js";
 import {
   isProviderEnabled,
   defaultPlatform,
@@ -175,6 +175,8 @@ export class BotInstance extends EventEmitter {
   /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
    *  null when the wired provider has no reporting capability. */
   private jellyfinReporter: JellyfinPlaybackReporter | null = null;
+  /** Debounce handle for the live-queue snapshot writer (Feature 2, #119). */
+  private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: BotInstanceOptions) {
     super();
@@ -268,6 +270,11 @@ export class BotInstance extends EventEmitter {
 
     this.setupPlayerEvents();
     this.setupTsEvents();
+
+    // Feature 2 (#119): persist a debounced snapshot of the live queue whenever
+    // it changes, so it can be restored + resumed after a restart. Inert unless
+    // config.savedQueuesEnabled is on (checked inside the scheduler).
+    this.on("stateChange", () => this.scheduleQueueSnapshot());
   }
 
   private setupPlayerEvents(): void {
@@ -351,6 +358,15 @@ export class BotInstance extends EventEmitter {
       // this.connected was never flipped to true. Previously this handler
       // short-circuited on !this.connected, leaving player stuck as "playing".
       this.connected = false;
+      // Cancel any pending live-queue snapshot BEFORE clearing the queue: a
+      // debounced snapshot firing after clear() would persist an empty queue
+      // (clearQueueState), wiping the state we want to restore on reconnect —
+      // and since a manual stop→start reuses the same botId, that would clobber
+      // the new instance's restored row (#119).
+      if (this.snapshotTimer) {
+        clearTimeout(this.snapshotTimer);
+        this.snapshotTimer = null;
+      }
       this.spotifyController.stop();
       this.currentSourceIsSpotify = false;
       this.player.stop();
@@ -434,10 +450,22 @@ export class BotInstance extends EventEmitter {
     this.connected = true;
     this.profileManager.onConnect();
     this.emit("connected");
+    // Feature 2 (#119): restore + resume the live queue persisted before the
+    // last shutdown. Best-effort and gated on savedQueuesEnabled; runs after
+    // the bot is fully connected so resolveAndPlay can actually push audio.
+    void this.restoreQueueFromSnapshot();
   }
 
   disconnect(): void {
     this._cancelIdleTimer();
+    // Cancel any pending live-queue snapshot before clearing so it can't fire
+    // afterwards and persist an empty queue over the state we keep for restore
+    // (#119). The disconnected handler cancels too, but do it here as well for
+    // the path where tsClient.disconnect() doesn't re-emit "disconnected".
+    if (this.snapshotTimer) {
+      clearTimeout(this.snapshotTimer);
+      this.snapshotTimer = null;
+    }
     this.spotifyController.stop();
     this.currentSourceIsSpotify = false;
     this.player.stop();
@@ -720,6 +748,12 @@ export class BotInstance extends EventEmitter {
         return this.cmdMove(cmd);
       case "follow":
         return this.cmdFollow(msg);
+      case "save":
+        return this.cmdSaveQueue(cmd);
+      case "load":
+        return this.cmdLoadQueue(cmd);
+      case "queues":
+        return this.cmdListQueues();
       case "help":
         return this.cmdHelp();
       default:
@@ -1013,24 +1047,93 @@ export class BotInstance extends EventEmitter {
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const song0 = song!;
+    const ok = await this.playSingleSong(song0, requesterName);
+    if (!ok) return `Cannot play: ${song0.name}`;
+    return `Now playing: ${song0.name} - ${song0.artist}`;
+  }
+
+  /**
+   * Play a single resolved song immediately, honoring config.playKeepsQueue:
+   *  - false (default): clear the queue and play only this song — today's
+   *    behavior. The prior track is stopped and released local uploads swept.
+   *  - true (and the queue is non-empty): insert the song after the current
+   *    track and jump to it (reusing addNext + playAt — no new queue logic), so
+   *    the rest of the queue survives and continues after it. FM auto-refill is
+   *    stopped (manual takeover), but existing queued songs are preserved.
+   *
+   * Shared by chat !play and the web /play-song route so the toggle decision
+   * lives in exactly one place (#119). Returns true if a track started playing.
+   */
+  async playSingleSong(song: QueuedSong, requesterName?: string): Promise<boolean> {
+    const s = this.withRequester(song, requesterName);
+    if (this.config.playKeepsQueue && !this.queue.isEmpty()) {
+      const insertedAt =
+        this.queue.getCurrentIndex() < 0
+          ? this.queue.size()
+          : this.queue.getCurrentIndex() + 1;
+      this.player.stop();
+      this.disableFmMode();
+      this.queue.addNext(s);
+      this.queue.playAt(insertedAt);
+      this.player.resetFailures();
+      // No sweep here: the queue is kept, so no local uploads were released.
+      return this.resolveAndPlay(this.queue.current()!);
+    }
+    // Legacy replace behavior (default).
     const previous = this.queue.current();
-    if (previous && !this.isSameSong(previous, song0)) {
+    if (previous && !this.isSameSong(previous, s)) {
       this.player.stop();
     }
     this.queue.clear();
     this.disableFmMode();
-    this.queue.add(this.withRequester(song0, requesterName));
+    this.queue.add(s);
     this.queue.play();
 
     // Reset failure counter on user-initiated play
     this.player.resetFailures();
     const ok = await this.resolveAndPlay(this.queue.current()!);
     // Sweep AFTER the new song is queued+resolved: the replaced songs are no
-    // longer referenced (and get deleted), but song0 — if it is the same local
-    // upload that was already playing — stays referenced and is preserved.
+    // longer referenced (and get deleted), but the song — if it is the same
+    // local upload that was already playing — stays referenced and is preserved.
     this.sweepLocalAudio("replaced");
-    if (!ok) return `Cannot play: ${song0.name}`;
-    return `Now playing: ${song0.name} - ${song0.artist}`;
+    return ok;
+  }
+
+  /**
+   * Load a saved song list into this bot's queue (#119). `replace` clears +
+   * plays from the first track (exits FM, like a fresh collection load);
+   * `append` adds to the end and only starts playing if the bot was idle
+   * (never interrupts a playing track). Loaded songs are re-tagged with the
+   * loader's name so play-history attribution stays correct.
+   */
+  async loadSavedQueue(
+    songs: StoredSong[],
+    mode: "replace" | "append",
+    requesterName?: string,
+  ): Promise<void> {
+    const tagged = songs.map((s) =>
+      this.withRequester({ ...(s as QueuedSong) }, requesterName),
+    );
+    if (mode === "replace") {
+      this.player.stop();
+      this.queue.clear();
+      this.disableFmMode();
+      for (const s of tagged) this.queue.add(s);
+      this.sweepLocalAudio("queue_replaced");
+      const first = this.queue.play();
+      this.player.resetFailures();
+      if (first) await this.resolveAndPlay(first);
+    } else {
+      const wasIdle = this.player.getState() === "idle";
+      const startAt = this.queue.size();
+      for (const s of tagged) this.queue.add(s);
+      if (wasIdle && this.queue.size() > startAt) {
+        this.queue.playAt(startAt);
+        this.player.resetFailures();
+        await this.resolveAndPlay(this.queue.current()!);
+      }
+    }
+    this.emit("stateChange");
   }
 
   private async cmdAdd(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1484,6 +1587,122 @@ export class BotInstance extends EventEmitter {
     return "Following you to your channel";
   }
 
+  // ─── Saved queues (chat side, #119) ──────────────────────────────────────
+  // TeamSpeak users have no WebUI account, so chat save/load always uses the
+  // reserved SHARED_QUEUE_OWNER bucket. All three commands are inert (reply
+  // "此功能未启用") unless the admin enabled savedQueuesEnabled.
+
+  private savedQueuesGuard(): string | null {
+    return this.config.savedQueuesEnabled ? null : "此功能未启用";
+  }
+
+  private cmdSaveQueue(cmd: ParsedCommand): string {
+    const off = this.savedQueuesGuard();
+    if (off) return off;
+    const name = cmd.args.trim();
+    if (!name) return `Usage: ${this.config.commandPrefix}save <名称>`;
+    const songs = this.queue.list();
+    if (songs.length === 0) return "队列为空，无法保存";
+    try {
+      const saved = this.database.saveQueue(SHARED_QUEUE_OWNER, name, songs);
+      return `已保存队列「${name}」（${saved.songCount} 首）`;
+    } catch (err) {
+      return `保存失败：${(err as Error).message}`;
+    }
+  }
+
+  private async cmdLoadQueue(cmd: ParsedCommand): Promise<string> {
+    const off = this.savedQueuesGuard();
+    if (off) return off;
+    const name = cmd.args.trim();
+    if (!name) return `Usage: ${this.config.commandPrefix}load [-a] <名称>`;
+    const meta = this.database
+      .listSavedQueues(SHARED_QUEUE_OWNER, false)
+      .find((q) => q.name === name);
+    const full = meta ? this.database.getSavedQueue(meta.id) : null;
+    if (!full) return `找不到已保存队列「${name}」`;
+    const mode = cmd.flags.has("a") ? "append" : "replace";
+    await this.loadSavedQueue(full.songs, mode);
+    return mode === "append"
+      ? `已追加「${name}」（${full.songs.length} 首）到队列`
+      : `已加载「${name}」（${full.songs.length} 首）`;
+  }
+
+  private cmdListQueues(): string {
+    const off = this.savedQueuesGuard();
+    if (off) return off;
+    const list = this.database.listSavedQueues(SHARED_QUEUE_OWNER, false);
+    if (list.length === 0) return "还没有已保存的队列";
+    return ["已保存队列：", ...list.map((q) => `• ${q.name}（${q.songCount} 首）`)].join("\n");
+  }
+
+  // ─── Live-queue persistence (Feature 2, #119) ────────────────────────────
+
+  /** Synchronous snapshot writer. Persists the live queue (or clears the row
+   *  when empty). Best-effort — a DB failure logs and never interrupts play. */
+  private persistQueueSnapshot(): void {
+    if (!this.config.savedQueuesEnabled) return;
+    try {
+      const snap = this.queue.snapshot();
+      if (snap.songs.length === 0) {
+        this.database.clearQueueState(this.id);
+        return;
+      }
+      this.database.saveQueueState({
+        botId: this.id,
+        songs: snap.songs,
+        currentIndex: snap.currentIndex,
+        mode: snap.mode,
+        isFmMode: this.isFmMode,
+        fmPlatform: this.isFmMode && this.fmProvider ? this.fmProvider.platform : "",
+      });
+    } catch (err) {
+      this.logger.warn({ err }, "queue snapshot persist failed");
+    }
+  }
+
+  /** Debounce the snapshot writer (~1s) off the stateChange firehose. */
+  private scheduleQueueSnapshot(): void {
+    if (!this.config.savedQueuesEnabled) return;
+    if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
+    this.snapshotTimer = setTimeout(() => this.persistQueueSnapshot(), 1000);
+    // Don't keep the event loop alive just for a pending snapshot.
+    this.snapshotTimer.unref?.();
+  }
+
+  /** Restore + resume the live queue after (re)connect. Best-effort: resumes
+   *  the current track from its START (URLs are re-resolved; no persisted
+   *  elapsed). Spotify resume depends on the sidecar being available. */
+  private async restoreQueueFromSnapshot(): Promise<void> {
+    if (!this.config.savedQueuesEnabled) return;
+    let st;
+    try {
+      st = this.database.getQueueState(this.id);
+    } catch (err) {
+      this.logger.warn({ err }, "queue snapshot restore failed to read state");
+      return;
+    }
+    if (!st || st.songs.length === 0) return;
+    this.queue.restore({
+      songs: st.songs,
+      currentIndex: st.currentIndex,
+      mode: st.mode as PlayMode,
+    });
+    if (st.isFmMode && st.fmPlatform) {
+      this.isFmMode = true;
+      this.fmProvider = this.getProviderFor(st.fmPlatform as Platform);
+    }
+    const current = this.queue.current();
+    if (current) {
+      this.player.resetFailures();
+      await this.resolveAndPlay(current);
+    }
+    this.logger.info(
+      { count: st.songs.length, index: st.currentIndex },
+      "Restored live queue from snapshot",
+    );
+  }
+
   private cmdHelp(): string {
     const p = this.config.commandPrefix;
     const def = defaultPlatform(this.config);
@@ -1513,6 +1732,13 @@ export class BotInstance extends EventEmitter {
       `${p}album <name or id> — Load album`,
       `${p}fm           — Personal FM (default source: ${def}; source flags work too)`,
       `${p}artist <name> — Play songs by artist (loop)`,
+      ...(this.config.savedQueuesEnabled
+        ? [
+            `${p}save <名称>  — Save current queue`,
+            `${p}load [-a] <名称> — Load a saved queue (-a appends)`,
+            `${p}queues       — List saved queues`,
+          ]
+        : []),
       `${p}vote         — Vote to skip`,
       `${p}lyrics       — Show lyrics`,
       `${p}now          — Current song info`,

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createDatabase, type BotDatabase, type BotInstance, type PlayHistoryEntry } from "./database.js";
+import { createDatabase, SHARED_QUEUE_OWNER, type BotDatabase, type BotInstance, type PlayHistoryEntry } from "./database.js";
 import { createUserStore, GUEST_USER_ID } from "./users.js";
 
 describe("database", () => {
@@ -238,6 +238,86 @@ describe("database", () => {
     expect(botDb.getCustomAvatarPath("bot-1")).toBe("avatars/bot-1.png");
     botDb.setCustomAvatarPath("bot-1", null);
     expect(botDb.getCustomAvatarPath("bot-1")).toBeNull();
+  });
+
+  const sq = (id: string) => ({
+    id,
+    name: id,
+    artist: "",
+    album: "",
+    platform: "netease" as const,
+    coverUrl: "",
+    duration: 1,
+  });
+
+  describe("saved_queues", () => {
+    it("upserts by (ownerId, name) and returns songs", () => {
+      botDb.saveQueue("u1", "night", [sq("a"), sq("b")]);
+      const again = botDb.saveQueue("u1", "night", [sq("c")]); // overwrite
+      expect(again.songCount).toBe(1);
+      expect(botDb.listSavedQueues("u1", false)).toHaveLength(1);
+      const full = botDb.getSavedQueue(again.id)!;
+      expect(full.songs.map((s) => s.id)).toEqual(["c"]);
+    });
+
+    it("strips url before persisting", () => {
+      const saved = botDb.saveQueue("u1", "x", [
+        { ...sq("a"), url: "http://example.com/a.mp3" } as never,
+      ]);
+      const full = botDb.getSavedQueue(saved.id)!;
+      expect((full.songs[0] as { url?: string }).url).toBeUndefined();
+    });
+
+    it("lists own + shared when includeShared, own-only otherwise", () => {
+      botDb.saveQueue("u1", "mine", [sq("a")]);
+      botDb.saveQueue(SHARED_QUEUE_OWNER, "party", [sq("b")]);
+      expect(botDb.listSavedQueues("u1", false).map((q) => q.name)).toEqual(["mine"]);
+      expect(
+        botDb.listSavedQueues("u1", true).map((q) => q.name).sort(),
+      ).toEqual(["mine", "party"]);
+    });
+
+    it("caps songs at 1000 and queues at 50", () => {
+      expect(() =>
+        botDb.saveQueue("u1", "big", Array.from({ length: 1001 }, (_, i) => sq("s" + i))),
+      ).toThrow(/1000/);
+      for (let i = 0; i < 50; i++) botDb.saveQueue("u1", "q" + i, [sq("a")]);
+      expect(() => botDb.saveQueue("u1", "q50", [sq("a")])).toThrow(/50/);
+      // Overwriting an existing name is always allowed despite the cap.
+      expect(() => botDb.saveQueue("u1", "q0", [sq("z")])).not.toThrow();
+    });
+
+    it("deletes and degrades a corrupt blob to empty", () => {
+      const q = botDb.saveQueue("u1", "x", [sq("a")]);
+      botDb.db.prepare("UPDATE saved_queues SET songs='not json' WHERE id=?").run(q.id);
+      expect(botDb.getSavedQueue(q.id)!.songs).toEqual([]);
+      expect(botDb.deleteSavedQueue(q.id)).toBe(true);
+      expect(botDb.getSavedQueue(q.id)).toBeNull();
+      expect(botDb.deleteSavedQueue(q.id)).toBe(false); // already gone
+    });
+  });
+
+  describe("queue_state", () => {
+    it("upserts, reads back, and clears per bot", () => {
+      botDb.saveQueueState({ botId: "b1", songs: [sq("a")], currentIndex: 0, mode: "loop", isFmMode: true, fmPlatform: "netease" });
+      botDb.saveQueueState({ botId: "b1", songs: [sq("a"), sq("b")], currentIndex: 1, mode: "seq", isFmMode: false, fmPlatform: "" });
+      const st = botDb.getQueueState("b1")!;
+      expect(st.songs.map((s) => s.id)).toEqual(["a", "b"]);
+      expect(st.currentIndex).toBe(1);
+      expect(st.mode).toBe("seq");
+      expect(st.isFmMode).toBe(false);
+      botDb.clearQueueState("b1");
+      expect(botDb.getQueueState("b1")).toBeNull();
+    });
+
+    it("round-trips FM flags and degrades a corrupt blob", () => {
+      botDb.saveQueueState({ botId: "b2", songs: [sq("a")], currentIndex: 0, mode: "random", isFmMode: true, fmPlatform: "qq" });
+      const st = botDb.getQueueState("b2")!;
+      expect(st.isFmMode).toBe(true);
+      expect(st.fmPlatform).toBe("qq");
+      botDb.db.prepare("UPDATE queue_state SET songs='{' WHERE botId=?").run("b2");
+      expect(botDb.getQueueState("b2")!.songs).toEqual([]);
+    });
   });
 });
 

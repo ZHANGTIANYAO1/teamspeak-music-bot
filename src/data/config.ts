@@ -116,6 +116,19 @@ export interface BotConfig {
   idleTimeoutMinutes: number;
   /** Enable uploading and playback of server-stored local audio files. */
   localAudioEnabled: boolean;
+  /**
+   * Enable named save/load of queues (chat + web) AND auto-restore of the live
+   * queue across a restart. Admin-controlled; default false so nothing is
+   * persisted/restored until an operator opts in.
+   */
+  savedQueuesEnabled: boolean;
+  /**
+   * When true, a single-song immediate !play (chat) / play-song (web) inserts
+   * after the current track and jumps to it instead of clearing the queue, so
+   * the rest of the queue survives and continues afterwards. Default false
+   * keeps today's clear-and-play behavior.
+   */
+  playKeepsQueue: boolean;
   // Public base URL used when generating share links (e.g. the bot专属链接).
   // Leave empty to use the browser's current origin. Example:
   //   "https://music.example.com" or "http://1.2.3.4:3000"
@@ -165,6 +178,8 @@ export function getDefaultConfig(): BotConfig {
     autoPauseOnEmpty: false,
     idleTimeoutMinutes: 0,
     localAudioEnabled: true,
+    savedQueuesEnabled: false,
+    playKeepsQueue: false,
     publicUrl: "",
     trustProxy: false,
     guestMode: {
@@ -362,6 +377,12 @@ export function loadConfig(path: string): BotConfig {
         )
       : defaults.enabledProviders;
 
+    // Strict-coerce the two feature flags exactly like spotify.enabled so a
+    // hand-edited / legacy / corrupt config.json can never silently enable
+    // them (`"yes"`, `1`, `null` → false; only a literal `true` enables).
+    const savedQueuesEnabled = partial.savedQueuesEnabled === true;
+    const playKeepsQueue = partial.playKeepsQueue === true;
+
     // defaultPlatform → an explicit operator default (issue #126). Keep it only
     // when it names a KNOWN gateable provider that is ALSO currently enabled;
     // anything else (unknown value, disabled source, wrong type, missing) becomes
@@ -397,6 +418,8 @@ export function loadConfig(path: string): BotConfig {
       jellyfin,
       audioQuality,
       enabledProviders,
+      savedQueuesEnabled,
+      playKeepsQueue,
       defaultPlatform: defaultPlatformPref,
     };
   }

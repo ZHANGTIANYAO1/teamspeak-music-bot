@@ -1,12 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { BotInstance, COMMAND_DENIED_MESSAGE, spotifyPortsForBotId } from "./instance.js";
 import type { BotInstanceOptions } from "./instance.js";
+import { PlayQueue, PlayMode } from "../audio/queue.js";
+import { createDatabase, SHARED_QUEUE_OWNER } from "../data/database.js";
+import { parseCommand } from "./commands.js";
 import type { TS3TextMessage } from "../ts-protocol/client.js";
 import type { SpotifyController } from "../music/spotify/controller.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 import type { MusicProvider } from "../music/provider.js";
 import type { BotDatabase } from "../data/database.js";
-import { createDatabase } from "../data/database.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { BotConfig } from "../data/config.js";
 
@@ -1104,5 +1106,284 @@ describe("BotInstance.cmdLyrics — full lyrics (#116)", () => {
       getProviderFor: () => ({ getLyrics: vi.fn(async () => []) }),
     };
     expect(await cmdLyrics.call(ctx)).toBe("No lyrics available");
+  });
+});
+
+// ─── Saved queues + live-queue persistence + playKeepsQueue (#119) ─────────
+// All exercise the ACTUAL shipped methods via their prototype, bound to a
+// minimal ctx — the same lightweight pattern as the cmd* tests above.
+const playSingleSong = BotInstance.prototype.playSingleSong as (
+  this: unknown,
+  song: unknown,
+  requesterName?: string,
+) => Promise<boolean>;
+const loadSavedQueue = BotInstance.prototype.loadSavedQueue as (
+  this: unknown,
+  songs: unknown[],
+  mode: "replace" | "append",
+  requesterName?: string,
+) => Promise<void>;
+const cmdSaveQueue = (BotInstance.prototype as any).cmdSaveQueue as (this: unknown, cmd: any) => string;
+const cmdLoadQueue = (BotInstance.prototype as any).cmdLoadQueue as (this: unknown, cmd: any) => Promise<string>;
+const cmdListQueues = (BotInstance.prototype as any).cmdListQueues as (this: unknown) => string;
+const persistQueueSnapshot = (BotInstance.prototype as any).persistQueueSnapshot as (this: unknown) => void;
+const scheduleQueueSnapshot = (BotInstance.prototype as any).scheduleQueueSnapshot as (this: unknown) => void;
+const restoreQueueFromSnapshot = (BotInstance.prototype as any).restoreQueueFromSnapshot as (this: unknown) => Promise<void>;
+
+const withRequester = (BotInstance.prototype as any).withRequester;
+const isSameSong = (BotInstance.prototype as any).isSameSong;
+const savedQueuesGuard = (BotInstance.prototype as any).savedQueuesGuard;
+
+function song119(id: string) {
+  return { id, name: id, artist: "", album: "", platform: "netease" as const, coverUrl: "", duration: 1 };
+}
+function makePlayer119() {
+  let state: "idle" | "playing" | "paused" = "idle";
+  return {
+    stop: vi.fn(() => { state = "idle"; }),
+    resetFailures: vi.fn(),
+    getState: vi.fn(() => state),
+    _play: () => { state = "playing"; },
+  };
+}
+
+describe("BotInstance.playSingleSong / playKeepsQueue (#119)", () => {
+  function makeCtx(playKeepsQueue: boolean) {
+    const queue = new PlayQueue();
+    return {
+      config: { playKeepsQueue },
+      queue,
+      player: makePlayer119(),
+      withRequester,
+      isSameSong,
+      disableFmMode: vi.fn(),
+      sweepLocalAudio: vi.fn(),
+      resolveAndPlay: vi.fn(async () => true),
+    } as any;
+  }
+
+  it("clears the queue when playKeepsQueue is false (default)", async () => {
+    const ctx = makeCtx(false);
+    ctx.queue.add(song119("a"));
+    ctx.queue.play();
+    const ok = await playSingleSong.call(ctx, song119("b"), "alice");
+    expect(ok).toBe(true);
+    expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["b"]);
+    expect(ctx.queue.current()?.id).toBe("b");
+    expect(ctx.sweepLocalAudio).toHaveBeenCalled();
+  });
+
+  it("inserts-after-current and keeps the queue when playKeepsQueue is true", async () => {
+    const ctx = makeCtx(true);
+    ctx.queue.add(song119("a"));
+    ctx.queue.add(song119("c"));
+    ctx.queue.play(); // current = a (index 0)
+    await playSingleSong.call(ctx, song119("b"), "alice");
+    expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["a", "b", "c"]);
+    expect(ctx.queue.current()?.id).toBe("b");
+    expect(ctx.queue.current()?.requestedBy).toBe("alice");
+    // Keep-queue mode must not sweep local uploads (nothing was released).
+    expect(ctx.sweepLocalAudio).not.toHaveBeenCalled();
+  });
+
+  it("falls back to clear-and-play when playKeepsQueue is true but the queue is empty", async () => {
+    const ctx = makeCtx(true);
+    await playSingleSong.call(ctx, song119("b"), "alice");
+    expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["b"]);
+    expect(ctx.queue.current()?.id).toBe("b");
+  });
+});
+
+describe("BotInstance.loadSavedQueue (#119)", () => {
+  function makeCtx() {
+    const player = makePlayer119();
+    return {
+      queue: new PlayQueue(),
+      player,
+      withRequester,
+      disableFmMode: vi.fn(),
+      sweepLocalAudio: vi.fn(),
+      resolveAndPlay: vi.fn(async () => { player._play(); return true; }),
+      emit: vi.fn(),
+    } as any;
+  }
+
+  it("replace clears + plays from the first track", async () => {
+    const ctx = makeCtx();
+    ctx.queue.add(song119("old"));
+    ctx.queue.play();
+    await loadSavedQueue.call(ctx, [song119("a"), song119("b")], "replace", "bob");
+    expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["a", "b"]);
+    expect(ctx.queue.current()?.id).toBe("a");
+    expect(ctx.queue.current()?.requestedBy).toBe("bob");
+    expect(ctx.disableFmMode).toHaveBeenCalled();
+    expect(ctx.resolveAndPlay).toHaveBeenCalled();
+    expect(ctx.emit).toHaveBeenCalledWith("stateChange");
+  });
+
+  it("append adds to the end and starts playing only when idle", async () => {
+    const ctx = makeCtx();
+    // Idle bot with an existing (not playing) queue entry.
+    ctx.queue.add(song119("x"));
+    await loadSavedQueue.call(ctx, [song119("a"), song119("b")], "append");
+    expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["x", "a", "b"]);
+    // wasIdle → start the first appended song (index 1).
+    expect(ctx.queue.current()?.id).toBe("a");
+    expect(ctx.resolveAndPlay).toHaveBeenCalledTimes(1);
+  });
+
+  it("append does not interrupt a playing track", async () => {
+    const ctx = makeCtx();
+    ctx.player._play(); // player is 'playing'
+    ctx.queue.add(song119("x"));
+    ctx.queue.play(); // current = x
+    await loadSavedQueue.call(ctx, [song119("a")], "append");
+    expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["x", "a"]);
+    expect(ctx.queue.current()?.id).toBe("x");
+    expect(ctx.resolveAndPlay).not.toHaveBeenCalled();
+  });
+});
+
+describe("BotInstance chat save/load/queues (#119)", () => {
+  function makeCtx(enabled: boolean, db = createDatabase(":memory:")) {
+    const queue = new PlayQueue();
+    return {
+      config: { savedQueuesEnabled: enabled, commandPrefix: "!" },
+      queue,
+      database: db,
+      savedQueuesGuard,
+      loadSavedQueue: vi.fn(async () => {}),
+    } as any;
+  }
+
+  it("replies 此功能未启用 when the feature is disabled", () => {
+    const ctx = makeCtx(false);
+    expect(cmdSaveQueue.call(ctx, parseCommand("!save night", "!")!)).toBe("此功能未启用");
+    expect(cmdListQueues.call(ctx)).toBe("此功能未启用");
+  });
+
+  it("refuses saving an empty queue", () => {
+    const ctx = makeCtx(true);
+    expect(cmdSaveQueue.call(ctx, parseCommand("!save night", "!")!)).toBe("队列为空，无法保存");
+  });
+
+  it("saves the current queue to the shared bucket and lists it", () => {
+    const ctx = makeCtx(true);
+    ctx.queue.add(song119("a"));
+    ctx.queue.add(song119("b"));
+    const reply = cmdSaveQueue.call(ctx, parseCommand("!save night", "!")!);
+    expect(reply).toContain("已保存队列");
+    expect(ctx.database.listSavedQueues(SHARED_QUEUE_OWNER, false).map((x: any) => x.name)).toContain("night");
+    expect(cmdListQueues.call(ctx)).toContain("night");
+  });
+
+  it("loads a saved queue by name (replace by default, -a appends)", async () => {
+    const db = createDatabase(":memory:");
+    const ctx = makeCtx(true, db);
+    db.saveQueue(SHARED_QUEUE_OWNER, "night", [song119("a")]);
+    const rep = await cmdLoadQueue.call(ctx, parseCommand("!load night", "!")!);
+    expect(rep).toContain("已加载");
+    expect(ctx.loadSavedQueue).toHaveBeenCalledWith(expect.any(Array), "replace");
+
+    const repA = await cmdLoadQueue.call(ctx, parseCommand("!load -a night", "!")!);
+    expect(repA).toContain("已追加");
+    expect(ctx.loadSavedQueue).toHaveBeenLastCalledWith(expect.any(Array), "append");
+  });
+
+  it("reports a missing saved queue", async () => {
+    const ctx = makeCtx(true);
+    expect(await cmdLoadQueue.call(ctx, parseCommand("!load nope", "!")!)).toContain("找不到");
+  });
+});
+
+describe("BotInstance live-queue persistence (#119)", () => {
+  function makeCtx(enabled: boolean, db = createDatabase(":memory:")) {
+    return {
+      id: "bot1",
+      config: { savedQueuesEnabled: enabled },
+      queue: new PlayQueue(),
+      database: db,
+      isFmMode: false,
+      fmProvider: null,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      player: makePlayer119(),
+      resolveAndPlay: vi.fn(async () => true),
+      getProviderFor: vi.fn(() => ({ platform: "netease" })),
+    } as any;
+  }
+
+  it("persists a snapshot when enabled", () => {
+    const ctx = makeCtx(true);
+    ctx.queue.add(song119("a"));
+    ctx.queue.play();
+    persistQueueSnapshot.call(ctx);
+    const st = ctx.database.getQueueState("bot1")!;
+    expect(st.songs.map((s: any) => s.id)).toEqual(["a"]);
+    expect(st.currentIndex).toBe(0);
+  });
+
+  it("does NOT persist when the feature is disabled", () => {
+    const ctx = makeCtx(false);
+    ctx.queue.add(song119("a"));
+    ctx.queue.play();
+    persistQueueSnapshot.call(ctx);
+    expect(ctx.database.getQueueState("bot1")).toBeNull();
+  });
+
+  it("clears the persisted row when the queue is empty", () => {
+    const db = createDatabase(":memory:");
+    db.saveQueueState({ botId: "bot1", songs: [song119("a")], currentIndex: 0, mode: "seq", isFmMode: false, fmPlatform: "" });
+    const ctx = makeCtx(true, db);
+    persistQueueSnapshot.call(ctx); // queue is empty
+    expect(db.getQueueState("bot1")).toBeNull();
+  });
+
+  it("restores and resumes the current track on restore", async () => {
+    const db = createDatabase(":memory:");
+    db.saveQueueState({ botId: "bot1", songs: [song119("a"), song119("b")], currentIndex: 1, mode: "loop", isFmMode: false, fmPlatform: "" });
+    const ctx = makeCtx(true, db);
+    await restoreQueueFromSnapshot.call(ctx);
+    expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["a", "b"]);
+    expect(ctx.queue.getCurrentIndex()).toBe(1);
+    expect(ctx.queue.getMode()).toBe(PlayMode.Loop);
+    expect(ctx.resolveAndPlay).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores FM mode + provider from the snapshot", async () => {
+    const db = createDatabase(":memory:");
+    db.saveQueueState({ botId: "bot1", songs: [song119("a")], currentIndex: 0, mode: "random", isFmMode: true, fmPlatform: "qq" });
+    const ctx = makeCtx(true, db);
+    await restoreQueueFromSnapshot.call(ctx);
+    expect(ctx.isFmMode).toBe(true);
+    expect(ctx.getProviderFor).toHaveBeenCalledWith("qq");
+  });
+
+  it("does nothing when the feature is disabled", async () => {
+    const db = createDatabase(":memory:");
+    db.saveQueueState({ botId: "bot1", songs: [song119("a")], currentIndex: 0, mode: "seq", isFmMode: false, fmPlatform: "" });
+    const ctx = makeCtx(false, db);
+    await restoreQueueFromSnapshot.call(ctx);
+    expect(ctx.queue.list()).toEqual([]);
+    expect(ctx.resolveAndPlay).not.toHaveBeenCalled();
+  });
+
+  it("a cancelled snapshot timer does not wipe persisted state (disconnect race)", () => {
+    vi.useFakeTimers();
+    try {
+      const db = createDatabase(":memory:");
+      db.saveQueueState({ botId: "bot1", songs: [song119("a")], currentIndex: 0, mode: "seq", isFmMode: false, fmPlatform: "" });
+      const ctx = makeCtx(true, db);
+      ctx.queue.add(song119("a"));
+      ctx.queue.play();
+      // Debounced snapshot scheduled, then a disconnect clears the queue and
+      // cancels the pending timer — the persisted row must survive for restore.
+      scheduleQueueSnapshot.call(ctx);
+      ctx.queue.clear();
+      if (ctx.snapshotTimer) clearTimeout(ctx.snapshotTimer);
+      vi.advanceTimersByTime(3000);
+      expect(db.getQueueState("bot1")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

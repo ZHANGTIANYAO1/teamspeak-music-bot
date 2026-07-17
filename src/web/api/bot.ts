@@ -72,6 +72,8 @@ export function createBotRouter(
       idleTimeoutMinutes: config.idleTimeoutMinutes ?? 0,
       autoPauseOnEmpty: config.autoPauseOnEmpty,
       localAudioEnabled: config.localAudioEnabled,
+      savedQueuesEnabled: config.savedQueuesEnabled,
+      playKeepsQueue: config.playKeepsQueue,
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
       spotify: maskedSpotify(),
@@ -98,6 +100,16 @@ export function createBotRouter(
     if (hasIdle) config.idleTimeoutMinutes = idleTimeoutMinutes;
     if (hasAutoPause) config.autoPauseOnEmpty = autoPauseOnEmpty;
     if (hasLocalAudioEnabled) config.localAudioEnabled = localAudioEnabled;
+
+    // Saved-queues + play-keeps-queue toggles (default off). Both read live from
+    // config by BotInstance / the saved-queues router, so no per-bot push needed;
+    // only a literal boolean mutates the stored value (junk is ignored).
+    if (typeof req.body.savedQueuesEnabled === "boolean") {
+      config.savedQueuesEnabled = req.body.savedQueuesEnabled;
+    }
+    if (typeof req.body.playKeepsQueue === "boolean") {
+      config.playKeepsQueue = req.body.playKeepsQueue;
+    }
 
     const hasGuestMode = guestMode !== undefined && guestMode !== null && typeof guestMode === "object";
     if (hasGuestMode) {
@@ -238,6 +250,8 @@ export function createBotRouter(
       idleTimeoutMinutes: config.idleTimeoutMinutes ?? 0,
       autoPauseOnEmpty: config.autoPauseOnEmpty,
       localAudioEnabled: config.localAudioEnabled,
+      savedQueuesEnabled: config.savedQueuesEnabled,
+      playKeepsQueue: config.playKeepsQueue,
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
       spotify: maskedSpotify(),

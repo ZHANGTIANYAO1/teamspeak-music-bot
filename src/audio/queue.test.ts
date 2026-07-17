@@ -564,4 +564,45 @@ describe("PlayQueue", () => {
       }
     });
   });
+
+  describe("snapshot / restore (#119)", () => {
+    it("round-trips songs, index, and mode; strips url", () => {
+      const q = new PlayQueue();
+      q.add(makeSong("A"));
+      q.add(makeSong("B"));
+      q.setMode(PlayMode.Loop);
+      q.play();
+      q.next(); // current = index 1
+      const snap = q.snapshot();
+      expect(snap.currentIndex).toBe(1);
+      expect(snap.mode).toBe(PlayMode.Loop);
+      expect((snap.songs[0] as QueuedSong).url).toBeUndefined();
+      expect(snap.songs.map((s) => s.id)).toEqual(["A", "B"]);
+
+      const q2 = new PlayQueue();
+      q2.restore(snap);
+      expect(q2.list().map((s) => s.id)).toEqual(["A", "B"]);
+      expect(q2.getCurrentIndex()).toBe(1);
+      expect(q2.getMode()).toBe(PlayMode.Loop);
+      expect(q2.current()?.id).toBe("B");
+    });
+
+    it("preserves requestedBy through a snapshot", () => {
+      const q = new PlayQueue();
+      q.add({ ...makeSong("A"), requestedBy: "alice" });
+      q.play();
+      const q2 = new PlayQueue();
+      q2.restore(q.snapshot());
+      expect(q2.current()?.requestedBy).toBe("alice");
+    });
+
+    it("degrades an out-of-range index to -1 (nothing current)", () => {
+      const q = new PlayQueue();
+      const { url: _url, ...noUrl } = makeSong("A");
+      q.restore({ songs: [noUrl], currentIndex: 5, mode: PlayMode.Sequential });
+      expect(q.getCurrentIndex()).toBe(-1);
+      expect(q.current()).toBeNull();
+      expect(q.list().map((s) => s.id)).toEqual(["A"]);
+    });
+  });
 });

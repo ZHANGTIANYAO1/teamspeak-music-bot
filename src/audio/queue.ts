@@ -17,6 +17,18 @@ export interface QueuedSong {
   requestedBy?: string;
 }
 
+/**
+ * A persistable view of a queue: its songs (minus the lazily-resolved `url`),
+ * the current index, and the play mode. Used to snapshot/restore the live queue
+ * across restarts (issue #119). Derived state (playedIndices/history/forward
+ * stack) is intentionally NOT captured — restore() rebuilds it consistently.
+ */
+export interface QueueSnapshot {
+  songs: Omit<QueuedSong, "url">[];
+  currentIndex: number;
+  mode: PlayMode;
+}
+
 export class PlayQueue {
   private songs: QueuedSong[] = [];
   private currentIndex = -1;
@@ -272,5 +284,33 @@ export class PlayQueue {
   /** Number of songs not yet played in Random mode. */
   unplayedCount(): number {
     return this.songs.length - this.playedIndices.size;
+  }
+
+  /**
+   * Capture the queue as a persistable snapshot (songs minus `url`, current
+   * index, mode). Songs keep their `requestedBy` so restored play-history
+   * attribution stays correct. See restore().
+   */
+  snapshot(): QueueSnapshot {
+    return {
+      songs: this.songs.map(({ url: _url, ...s }) => s),
+      currentIndex: this.currentIndex,
+      mode: this.mode,
+    };
+  }
+
+  /**
+   * Replace the queue contents from a snapshot. Rebuilds the derived
+   * playedIndices/history/forwardStack to a clean, consistent state for the
+   * restored index (an out-of-range index degrades to -1 = "nothing current").
+   */
+  restore(s: QueueSnapshot): void {
+    this.songs = s.songs.map((song) => ({ ...song }));
+    this.mode = s.mode;
+    this.currentIndex =
+      s.currentIndex >= 0 && s.currentIndex < this.songs.length ? s.currentIndex : -1;
+    this.playedIndices = new Set(this.currentIndex >= 0 ? [this.currentIndex] : []);
+    this.history = [];
+    this.forwardStack = [];
   }
 }

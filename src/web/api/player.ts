@@ -461,7 +461,11 @@ export function createPlayerRouter(
     }
   });
 
-  // Play a single song by ID — resolves URL on demand
+  // Play a single song by ID — resolves URL on demand. Funnels through
+  // bot.playSingleSong so the config.playKeepsQueue decision (clear-and-play vs
+  // insert-and-jump, keeping the queue) lives in one place shared with chat
+  // !play. Serialized via runExclusive like /play-now-song so concurrent
+  // requests can't interleave the queue mutation + playback (#119).
   router.post("/:botId/play-song", authorize({ capability: "player.control" }), async (req, res) => {
     try {
       const bot = (req as any).bot;
@@ -474,23 +478,16 @@ export function createPlayerRouter(
         rejectDisabledLocalAudio(res);
         return;
       }
-      const queue = bot.getQueueManager();
-      bot.getPlayer().stop();
-      queue.clear();
-      queue.add({ ...song, requestedBy: requesterName(req) });
-      queue.play();
-
-      bot.getPlayer().resetFailures();
-      const ok = await bot.resolveAndPlay(queue.current()!);
-      // Sweep AFTER the new song is queued+resolved, so replaying a local song
-      // that was still in the queue doesn't delete the file we're about to play.
-      bot.cleanupQueuedLocalSongs?.("queue_replaced");
-      if (!ok) {
-        res.json({ ok: false, message: `无法播放「${song.name || song.id}」（区域/版权限制）` });
-        return;
-      }
-
-      res.json({ ok: true, message: `正在播放：${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` });
+      // The cleanupQueuedLocalSongs sweep now lives inside playSingleSong's
+      // clear branch — do NOT also call it here, or it would delete retained
+      // local uploads in keep-queue mode.
+      const body = await bot.runExclusive(async () => {
+        const ok = await bot.playSingleSong({ ...song }, requesterName(req));
+        return ok
+          ? { ok: true, message: `正在播放：${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` }
+          : { ok: false, message: `无法播放「${song.name || song.id}」（区域/版权限制）` };
+      });
+      res.json(body);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

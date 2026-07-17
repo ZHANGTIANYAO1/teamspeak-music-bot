@@ -115,6 +115,10 @@ export const usePlayerStore = defineStore('player', {
     enabledProviders: [] as string[],
     defaultSource: 'netease' as string,
 
+    // Whether the admin enabled save/load queues (#119). Gates the nav entry
+    // and the /saved-queues page. Fetched from /api/bot/settings (non-guest).
+    savedQueuesEnabled: false,
+
     // Home page cache, split by source
     recommendPlaylists: { netease: [] as PlaylistItem[], qq: [] as PlaylistItem[], kugou: [] as PlaylistItem[], spotify: [] as PlaylistItem[] },
     dailySongs:         { netease: [] as Song[],         qq: [] as Song[],         kugou: [] as Song[], spotify: [] as Song[] },
@@ -593,6 +597,18 @@ export const usePlayerStore = defineStore('player', {
 
     isFavorited(playlistId: string, platform: string): boolean {
       return this.favoritedPlaylists.some((f) => f.playlistId === playlistId && f.platform === platform);
+    },
+
+    /** Load global bot settings we care about client-side (currently just the
+     *  saved-queues gate). Guests get a 403 here, which we swallow so the nav
+     *  entry simply stays hidden for them. */
+    async fetchBotSettings() {
+      try {
+        const res = await axios.get('/api/bot/settings');
+        this.savedQueuesEnabled = res.data?.savedQueuesEnabled === true;
+      } catch {
+        // not critical (guests 403; keep previous value otherwise)
+      }
     },
 
     /** Load the server-side source gate (enabledProviders + default). */

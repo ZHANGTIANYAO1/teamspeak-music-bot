@@ -1,6 +1,46 @@
 import Database from "better-sqlite3";
 import { CAPABILITIES, BOTS_ALL } from "./permissions.js";
 import { GUEST_USER_ID, GUEST_USERNAME } from "./users.js";
+import type { QueuedSong } from "../audio/queue.js";
+
+/**
+ * Reserved owner id for chat-saved / opt-in-shared queues. A `__`-bracketed
+ * literal can never collide with a real WebUI user id (UUIDs), so it cleanly
+ * partitions "shared" saved queues from per-user private ones (issue #119).
+ */
+export const SHARED_QUEUE_OWNER = "__shared__";
+/** Cap per owner (private user OR the shared bucket). */
+export const MAX_SAVED_QUEUES = 50;
+/** Cap per saved queue / persisted live-queue snapshot. */
+export const MAX_QUEUE_SONGS = 1000;
+
+/** A stored song is a QueuedSong minus the lazily-resolved `url`. */
+export type StoredSong = Omit<QueuedSong, "url">;
+
+/** Saved-queue row without the (potentially large) songs blob — for list views. */
+export interface SavedQueueMeta {
+  id: number;
+  ownerId: string;
+  name: string;
+  songCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Full saved queue, including its songs. */
+export interface SavedQueue extends SavedQueueMeta {
+  songs: StoredSong[];
+}
+
+/** One-row-per-bot persisted live-queue state (Feature 2, auto-restore). */
+export interface QueueStateRow {
+  botId: string;
+  songs: StoredSong[];
+  currentIndex: number;
+  mode: string;
+  isFmMode: boolean;
+  fmPlatform: string;
+}
 
 export interface PlayHistoryEntry {
   botId: string;
@@ -104,6 +144,15 @@ export interface BotDatabase {
   removeFavorite(userId: string, playlistId: string, platform: string): boolean;
   getFavorites(userId: string): FavoritePlaylist[];
   isFavorited(userId: string, playlistId: string, platform: string): boolean;
+  // Saved queues (Feature 1) — upsert by (ownerId, name), capped.
+  saveQueue(ownerId: string, name: string, songs: StoredSong[]): SavedQueue;
+  listSavedQueues(ownerId: string, includeShared: boolean): SavedQueueMeta[];
+  getSavedQueue(id: number): SavedQueue | null;
+  deleteSavedQueue(id: number): boolean;
+  // Live-queue persistence (Feature 2) — one row per bot.
+  saveQueueState(state: QueueStateRow): void;
+  getQueueState(botId: string): QueueStateRow | null;
+  clearQueueState(botId: string): void;
   close(): void;
 }
 
@@ -257,6 +306,28 @@ function initTables(db: Database.Database): void {
       FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_user_bot_access_userId ON user_bot_access(userId);
+
+    CREATE TABLE IF NOT EXISTS saved_queues (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      ownerId   TEXT NOT NULL,
+      name      TEXT NOT NULL,
+      songs     TEXT NOT NULL,
+      songCount INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+      updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(ownerId, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_saved_queues_ownerId ON saved_queues(ownerId);
+
+    CREATE TABLE IF NOT EXISTS queue_state (
+      botId        TEXT PRIMARY KEY,
+      songs        TEXT NOT NULL,
+      currentIndex INTEGER NOT NULL,
+      mode         TEXT NOT NULL,
+      isFmMode     INTEGER NOT NULL DEFAULT 0,
+      fmPlatform   TEXT NOT NULL DEFAULT '',
+      updatedAt    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 }
 
@@ -382,6 +453,67 @@ export function createDatabase(dbPath: string): BotDatabase {
     SELECT 1 FROM favorite_playlists WHERE userId = ? AND playlistId = ? AND platform = ?
   `);
 
+  // A corrupt/hand-edited songs blob must never throw into a route or the
+  // restore path — degrade to an empty list instead.
+  const parseSongs = (raw: string): StoredSong[] => {
+    try {
+      const v = JSON.parse(raw);
+      return Array.isArray(v) ? (v as StoredSong[]) : [];
+    } catch {
+      return [];
+    }
+  };
+  const rowToSavedMeta = (r: {
+    id: number; ownerId: string; name: string; songCount: number; createdAt: string; updatedAt: string;
+  }): SavedQueueMeta => ({
+    id: r.id,
+    ownerId: r.ownerId,
+    name: r.name,
+    songCount: r.songCount,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  });
+
+  const upsertSavedQueue = db.prepare(`
+    INSERT INTO saved_queues (ownerId, name, songs, songCount)
+    VALUES (@ownerId, @name, @songs, @songCount)
+    ON CONFLICT(ownerId, name) DO UPDATE SET
+      songs = excluded.songs,
+      songCount = excluded.songCount,
+      updatedAt = datetime('now')
+  `);
+  const selectSavedQueueByOwnerName = db.prepare(
+    "SELECT * FROM saved_queues WHERE ownerId = ? AND name = ?",
+  );
+  const selectSavedQueueIdByOwnerName = db.prepare(
+    "SELECT id FROM saved_queues WHERE ownerId = ? AND name = ?",
+  );
+  const countSavedQueues = db.prepare(
+    "SELECT COUNT(*) AS c FROM saved_queues WHERE ownerId = ?",
+  );
+  const listSavedQueuesOwn = db.prepare(
+    "SELECT id, ownerId, name, songCount, createdAt, updatedAt FROM saved_queues WHERE ownerId = ? ORDER BY updatedAt DESC",
+  );
+  const listSavedQueuesShared = db.prepare(
+    "SELECT id, ownerId, name, songCount, createdAt, updatedAt FROM saved_queues WHERE ownerId = ? OR ownerId = ? ORDER BY updatedAt DESC",
+  );
+  const selectSavedQueueById = db.prepare("SELECT * FROM saved_queues WHERE id = ?");
+  const deleteSavedQueueById = db.prepare("DELETE FROM saved_queues WHERE id = ?");
+
+  const upsertQueueState = db.prepare(`
+    INSERT INTO queue_state (botId, songs, currentIndex, mode, isFmMode, fmPlatform, updatedAt)
+    VALUES (@botId, @songs, @currentIndex, @mode, @isFmMode, @fmPlatform, datetime('now'))
+    ON CONFLICT(botId) DO UPDATE SET
+      songs = excluded.songs,
+      currentIndex = excluded.currentIndex,
+      mode = excluded.mode,
+      isFmMode = excluded.isFmMode,
+      fmPlatform = excluded.fmPlatform,
+      updatedAt = datetime('now')
+  `);
+  const selectQueueState = db.prepare("SELECT * FROM queue_state WHERE botId = ?");
+  const deleteQueueState = db.prepare("DELETE FROM queue_state WHERE botId = ?");
+
   return {
     db,
 
@@ -500,6 +632,85 @@ export function createDatabase(dbPath: string): BotDatabase {
     isFavorited(userId, playlistId, platform) {
       const row = checkFavorited.get(userId, playlistId, platform);
       return row !== undefined;
+    },
+
+    saveQueue(ownerId, name, songs) {
+      if (songs.length > MAX_QUEUE_SONGS) {
+        throw new Error(`保存失败：歌曲数量超过上限 ${MAX_QUEUE_SONGS}`);
+      }
+      // Strip any lazily-resolved url before persisting.
+      const stripped: StoredSong[] = songs.map((s) => {
+        const { url: _url, ...rest } = s as QueuedSong;
+        return rest;
+      });
+      // Enforce the per-owner cap only for a NEW name (an overwrite of an
+      // existing saved queue must always be allowed).
+      const existing = selectSavedQueueIdByOwnerName.get(ownerId, name) as
+        | { id: number }
+        | undefined;
+      if (!existing) {
+        const { c } = countSavedQueues.get(ownerId) as { c: number };
+        if (c >= MAX_SAVED_QUEUES) {
+          throw new Error(`保存失败：已保存队列数量超过上限 ${MAX_SAVED_QUEUES}`);
+        }
+      }
+      upsertSavedQueue.run({
+        ownerId,
+        name,
+        songs: JSON.stringify(stripped),
+        songCount: stripped.length,
+      });
+      const row = selectSavedQueueByOwnerName.get(ownerId, name) as SavedQueueMeta;
+      return { ...rowToSavedMeta(row), songs: stripped };
+    },
+
+    listSavedQueues(ownerId, includeShared) {
+      const rows = includeShared
+        ? (listSavedQueuesShared.all(ownerId, SHARED_QUEUE_OWNER) as SavedQueueMeta[])
+        : (listSavedQueuesOwn.all(ownerId) as SavedQueueMeta[]);
+      return rows.map(rowToSavedMeta);
+    },
+
+    getSavedQueue(id) {
+      const row = selectSavedQueueById.get(id) as
+        | (SavedQueueMeta & { songs: string })
+        | undefined;
+      if (!row) return null;
+      return { ...rowToSavedMeta(row), songs: parseSongs(row.songs) };
+    },
+
+    deleteSavedQueue(id) {
+      return deleteSavedQueueById.run(id).changes > 0;
+    },
+
+    saveQueueState(state) {
+      upsertQueueState.run({
+        botId: state.botId,
+        songs: JSON.stringify(state.songs),
+        currentIndex: state.currentIndex,
+        mode: state.mode,
+        isFmMode: state.isFmMode ? 1 : 0,
+        fmPlatform: state.fmPlatform,
+      });
+    },
+
+    getQueueState(botId) {
+      const r = selectQueueState.get(botId) as
+        | { botId: string; songs: string; currentIndex: number; mode: string; isFmMode: number; fmPlatform: string }
+        | undefined;
+      if (!r) return null;
+      return {
+        botId: r.botId,
+        songs: parseSongs(r.songs),
+        currentIndex: r.currentIndex,
+        mode: r.mode,
+        isFmMode: r.isFmMode === 1,
+        fmPlatform: r.fmPlatform,
+      };
+    },
+
+    clearQueueState(botId) {
+      deleteQueueState.run(botId);
     },
 
     close() {
