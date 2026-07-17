@@ -876,7 +876,7 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — 保存/加载播放清单 + 重启恢复队列
+### 最新版本 — v1.11.0：播放清单持久化 / 设置保留 / 自定义默认音源
 
 **保存/加载播放清单 + 队列持久化（[#119](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/119)）——三项开关均默认关闭，升级无行为变化**
 
@@ -885,7 +885,23 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 - **单曲直接播放不清空队列（`playKeepsQueue`，默认关闭，独立开关）**：开启后，直接播放单曲会插入到当前歌曲之后并立即播放、播完继续原队列，而不是清空整个队列。仅影响单曲的「直接播放」；歌单 / 专辑 / 电台仍会替换队列。
 - 三项均在 设置 → 行为设置 中开关，保存即时生效，无需重启。
 
-### Jellyfin 可选音源
+**重启后保留播放设置（[#125](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/125)）**
+
+- **音量与播放模式**现按机器人持久化到数据库（`bot_instances` 表新增 `volume` / `play_mode` 列，自动迁移），**各平台音质**持久化到 `config.json` 的 `audioQuality` 字段；重启后自动恢复，不再需要每次手动重调。
+- 聊天命令、WebUI、REST 三种入口的改动都会落盘；`!fm` / `!artist` 的临时随机 / 循环切换**不会**覆盖你用 `!mode` 显式保存的偏好。播放队列、当前歌曲与播放进度仍不持久化（队列恢复见上方 `savedQueuesEnabled`）。
+
+**自定义默认音源（[#126](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/126)）**
+
+- `config.json` 新增可选字段 `defaultPlatform`，或在 **设置 → 默认音源** 下拉选择：设定后，不带平台标志的 `!play` / `!search` / `!fm` 走你指定的音源（例如设为 `bilibili` 后点播 B 站视频音乐无需每次加 `-b`）。
+- 留空 / `null` 恢复原有固定优先级（网易云 → QQ → 酷狗 → Jellyfin → B 站 → YouTube）；若指定音源未启用或值非法，自动回退到优先级，保存即时生效、无需重启。
+
+**修复与加固**
+
+- **QQ 音乐 API 端口对齐（[#122](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/122)）**：内嵌 QQ 音乐 API sidecar 现在保证绑定到 `qqMusicApiPort`（与客户端请求端口一致），启动日志改为打印**实际绑定端口**便于排查。若你在旧 `latest` 镜像上遇到「日志里 baseURL 是 3200、服务却在 3300」导致二维码不显示，请 `docker compose pull` 重新拉取镜像。
+- **WebUI 不再被搜索引擎收录（[#128](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/128)）**：所有响应加 `X-Robots-Tag: noindex, nofollow`、新增 `/robots.txt`（Disallow 全站）、页面加 `robots` meta 标签。⚠️ 这只是阻止**收录**，不是访问控制——公网部署请务必依赖登录鉴权与反向代理，并且不要把自己的 WebUI 链接发到公开网页。
+- **`.gitignore` 补充 `.claude/`（[#127](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/127)，感谢 [@ItsEricRao](https://github.com/ItsEricRao)）**：本地 Claude Code 配置不再被误提交（已从版本库取消跟踪，本地文件不受影响）。
+
+### v1.10.1 — Jellyfin 可选音源
 
 **Jellyfin 集成（[PR #123](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/123)，由 [@ItsEricRao](https://github.com/ItsEricRao) 贡献；随后调整为可选音源）**
 
