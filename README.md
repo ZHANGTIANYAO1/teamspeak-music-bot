@@ -414,6 +414,20 @@ sudo systemctl start tsmusicbot
 
 在设置页面选择音质，立即生效（影响后续播放的歌曲）。
 
+> **重启后保留（#125）**：音质选择会持久化到 `data/config.json`（每个平台各自记录），重启机器人后自动恢复，无需每次手动重设。
+
+### 重启后保留的播放设置
+
+以下运行时设置在改动时自动落盘，重启机器人后自动恢复，不再回到默认值：
+
+| 设置 | 作用范围 | 存储位置 |
+|------|----------|----------|
+| **播放音量**（`!vol` / WebUI 音量条 / REST `/volume`） | 每个机器人独立 | 数据库 `bot_instances.volume` |
+| **播放模式**（`!mode` / WebUI / REST `/mode`：顺序 / 列表循环 / 随机 / 随机循环） | 每个机器人独立 | 数据库 `bot_instances.play_mode` |
+| **音质**（各平台，WebUI 设置页 / REST `/quality`） | 全局（各平台各自记录） | `data/config.json` 的 `audioQuality` |
+
+聊天命令、WebUI、REST API 三种入口的改动都会被持久化。播放队列、当前歌曲、进度、`!fm` / `!artist` 等临时播放状态仍为一次性状态，重启后不保留（`!fm` / `!artist` 内部临时切换的随机 / 循环也**不会**覆盖你用 `!mode` 显式保存的偏好）。
+
 ## 项目架构
 
 ```
@@ -789,10 +803,13 @@ A：使用 `!move <频道名>` 命令，或在设置页面创建机器人时指�
 A：可以。在设置页面创建多个实例，分别连接不同的 TS 服务器或频道。
 
 **Q：端口 3200 被占用？**
-A：QQ 音乐 API 启动时自动监听 3200 端口。如果之前的进程还在运行，程序会自动复用。如需重启可手动结束 `node` 进程。
+A：QQ 音乐 API 启动时会监听 `config.json` 里的 `qqMusicApiPort`（默认 **3200**），客户端也用同一个端口发请求，二者始终一致。如果之前的进程还在运行，程序会自动复用。如需改端口，改 `qqMusicApiPort` 后重启即可；如需重启可手动结束 `node` 进程。
+
+**Q：日志里 `baseURL` 是 3200，但 QQ API 实际监听在 3300？（二维码不弹）**
+A：这是**旧版本**（或过期的 `latest` Docker 镜像）才有的问题：早期实现用的上游包默认端口是 3300，而客户端 `baseURL` 已经是 3200，两边对不上，取二维码时就 `ECONNREFUSED 127.0.0.1:3200`。当前版本已把内嵌 QQ 音乐 API **强制绑定到 `qqMusicApiPort`（默认 3200）**，并在启动前把上游包读取的 `PORT` 环境变量对齐到该端口，二者不可能再错位。修复方法：**拉取最新镜像并重启**（`docker compose pull && docker compose up -d`），或用 `npm ci && npm run build` 更新到最新代码。启动后可在日志里确认那行 `QQ Music API started`，其 `port` 字段就是实际监听端口。
 
 **Q：QQ 音乐二维码不弹 / 扫码登录失败 / cookie 无法使用？**
-A：通常是内置的 QQ 音乐 API 服务没起来——它一旦没监听 3200 端口，机器人去取二维码就会拿到 `ECONNREFUSED 127.0.0.1:3200`，于是二维码不显示，登录和 cookie 也全失效。先看日志里 QQ API 的启动报错：
+A：通常是内置的 QQ 音乐 API 服务没起来——它一旦没监听 `qqMusicApiPort`（默认 3200）端口，机器人去取二维码就会拿到 `ECONNREFUSED 127.0.0.1:3200`，于是二维码不显示，登录和 cookie 也全失效。先看日志里 QQ API 的启动报错：
 - 报 `ERR_REQUIRE_ESM`：装到了不兼容的 `@sansenjian/qq-music-api` 版本。本项目把它锁在 **`~2.4.0`**（需要 **Node ≥ 20.17 / 22.9**）；务必用 `npm ci` 或 `npm install` 让版本与锁文件一致，**不要**手动 `npm update` 把它升级或降级到不兼容的中间版本（2.3.0/2.3.1 是纯 ESM、会触发此错）。
 - 报 Node 版本不满足：升级 Node 到 ≥ 20.17，或将该依赖降到 `~2.2.10`（无此 Node 要求）后重装。
 修好版本后重新 `npm install && npm run build` 并重启即可。
@@ -892,6 +909,7 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 - **会话存储**：服务端 SQLite 表 `sessions`，存储 sha256(token)；浏览器只持有原始 token cookie。7 天 TTL，每小时滚动续期。同账号最多 10 个并发会话（超出剔除最旧）。
 - **登录限流**：每 IP 每分钟 5 次 `/login` + 3 次 `/setup`，命中返回 429 + `Retry-After`。
 - **CSRF & 安全头**：所有 mutating 请求强制 `Origin`/`Referer` 同源；响应携带 `X-Frame-Options: DENY` 和 `Content-Security-Policy: frame-ancestors 'none'`（防点击劫持）。
+- **搜索引擎隐身（防止实例被收录，issue #128）**：为避免部署实例的 WebUI 被搜索引擎收录、被陌生人搜到控制页，采用纵深防御——所有响应携带 `X-Robots-Tag: noindex, nofollow`，`/robots.txt` 返回 `User-agent: * / Disallow: /`，`index.html` 内置 `<meta name="robots" content="noindex, nofollow">`（专属链接 `/bot/<id>` 等所有页面同样覆盖）。这些只阻止「被索引」，不是访问控制——**请不要把自己的 WebUI 链接发到公开网页 / 论坛 / 聊天群**，真正的防护来自登录鉴权与反向代理。
 - **配置变更**：反向代理部署务必 `"trustProxy": true`（详见 [反向代理部署注意事项](#反向代理部署注意事项)）。`config.adminGroups` 现已启用，用于限制管理类聊天命令只能由指定 TeamSpeak 服务器组运行（为空 = 不限制，详见 [TeamSpeak 命令权限](#teamspeak-命令权限管理类命令限制)）；`config.adminPassword` 仍为旧版预留字段，保留以兼容旧 `config.json`，当前未使用。
 
 ### v0.x — Bot Profile 自动更新与协议层升级
