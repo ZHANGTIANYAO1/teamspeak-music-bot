@@ -82,6 +82,61 @@ describe("config", () => {
     expect(defaultPlatform(config)).toBe("netease");
   });
 
+  // --- #126: an explicit operator default source ---
+
+  it("defaultPlatform is null by default (follow the priority order)", () => {
+    expect(getDefaultConfig().defaultPlatform).toBeNull();
+  });
+
+  it("defaultPlatform() honors an explicit, enabled preference over the priority order", () => {
+    const config = getDefaultConfig();
+    // Priority would pick netease; a Bilibili-loving server sets B站 instead (#126).
+    config.defaultPlatform = "bilibili";
+    expect(defaultPlatform(config)).toBe("bilibili");
+  });
+
+  it("defaultPlatform() ignores a preference whose source is not enabled", () => {
+    const config = getDefaultConfig();
+    config.defaultPlatform = "jellyfin"; // opt-in, not enabled in the default config
+    // Falls back to the fixed priority order (netease)…
+    expect(defaultPlatform(config)).toBe("netease");
+    // …until the preferred source is actually enabled.
+    config.enabledProviders = [...config.enabledProviders, "jellyfin"];
+    expect(defaultPlatform(config)).toBe("jellyfin");
+  });
+
+  it("loadConfig keeps a valid, enabled defaultPlatform", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ defaultPlatform: "bilibili" }));
+    const config = loadConfig(path);
+    expect(config.defaultPlatform).toBe("bilibili");
+    expect(defaultPlatform(config)).toBe("bilibili");
+  });
+
+  it("loadConfig nulls a defaultPlatform that is unknown, disabled, or the wrong type", () => {
+    const dir = makeTmpDir();
+    // Unknown provider name.
+    const p1 = join(dir, "c1.json");
+    writeFileSync(p1, JSON.stringify({ defaultPlatform: "bogus" }));
+    expect(loadConfig(p1).defaultPlatform).toBeNull();
+    // Known provider, but not in enabledProviders.
+    const p2 = join(dir, "c2.json");
+    writeFileSync(p2, JSON.stringify({ enabledProviders: ["netease"], defaultPlatform: "bilibili" }));
+    expect(loadConfig(p2).defaultPlatform).toBeNull();
+    // Wrong type.
+    const p3 = join(dir, "c3.json");
+    writeFileSync(p3, JSON.stringify({ defaultPlatform: 42 }));
+    expect(loadConfig(p3).defaultPlatform).toBeNull();
+  });
+
+  it("round-trips defaultPlatform through save/load", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    saveConfig(path, { ...getDefaultConfig(), defaultPlatform: "qq" });
+    expect(loadConfig(path).defaultPlatform).toBe("qq");
+  });
+
   it("respects an explicit jellyfin-only enabledProviders from disk", () => {
     const dir = makeTmpDir();
     const path = join(dir, "config.json");

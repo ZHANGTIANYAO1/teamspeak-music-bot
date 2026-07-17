@@ -77,15 +77,24 @@ export function isProviderEnabled(config: BotConfig, platform: string): boolean 
 }
 
 /**
- * The default platform for !play/!add/!playlist/!album and all REST/WebUI calls:
- * the first enabled provider in a fixed priority order (netease with the default
- * config; jellyfin ranks after the online music platforms because it is an
- * opt-in source, but ahead of the video sites for users who run it as their
- * only music library). Falls back to "netease" when nothing is enabled so
- * callers always get a provider — the enabled-gate then produces the friendly
- * error.
+ * The default platform for !play/!add/!playlist/!album and all REST/WebUI calls.
+ *
+ * An explicit user preference (`config.defaultPlatform`) wins whenever it points
+ * at a source that is currently enabled — this lets e.g. a Bilibili-loving server
+ * set B站 as the default so `!play <歌名>` needs no `-b` flag (issue #126). The
+ * enabled-guard here matters at runtime too: if the operator later disables the
+ * preferred source, we must fall through instead of returning a dead default.
+ *
+ * With no (usable) preference we fall back to the first enabled provider in a
+ * fixed priority order (netease with the default config; jellyfin ranks after
+ * the online music platforms because it is an opt-in source, but ahead of the
+ * video sites for users who run it as their only music library). Falls back to
+ * "netease" when nothing is enabled so callers always get a provider — the
+ * enabled-gate then produces the friendly error.
  */
 export function defaultPlatform(config: BotConfig): GateableProvider {
+  const pref = config.defaultPlatform;
+  if (pref && config.enabledProviders.includes(pref)) return pref;
   for (const p of ["netease", "qq", "kugou", "jellyfin", "bilibili", "youtube"] as const) {
     if (config.enabledProviders.includes(p)) return p;
   }
@@ -128,6 +137,14 @@ export interface BotConfig {
    * API servers must not start (or bind ports 3001/3200) unless enabled.
    */
   enabledProviders: GateableProvider[];
+  /**
+   * Optional operator-chosen default source for commands/REST/WebUI calls that
+   * omit a platform (issue #126). When set to an enabled gateable provider it
+   * overrides the fixed priority order in defaultPlatform(); `null` (the default)
+   * keeps that priority order. loadConfig cleans stale/unknown/disabled values
+   * back to null.
+   */
+  defaultPlatform: GateableProvider | null;
 }
 
 export function getDefaultConfig(): BotConfig {
@@ -190,6 +207,7 @@ export function getDefaultConfig(): BotConfig {
       jellyfin: "direct",
     },
     enabledProviders: ["netease", "qq", "bilibili", "youtube", "kugou"],
+    defaultPlatform: null,
   };
 }
 
@@ -344,6 +362,18 @@ export function loadConfig(path: string): BotConfig {
         )
       : defaults.enabledProviders;
 
+    // defaultPlatform → an explicit operator default (issue #126). Keep it only
+    // when it names a KNOWN gateable provider that is ALSO currently enabled;
+    // anything else (unknown value, disabled source, wrong type, missing) becomes
+    // null so defaultPlatform() falls back to the fixed priority order.
+    const rawDefault = partial.defaultPlatform;
+    const defaultPlatformPref: GateableProvider | null =
+      typeof rawDefault === "string" &&
+      (GATEABLE_PROVIDERS as readonly string[]).includes(rawDefault) &&
+      enabledProviders.includes(rawDefault as GateableProvider)
+        ? (rawDefault as GateableProvider)
+        : null;
+
     // audioQuality → per-provider strings; each field falls back to its default
     // when missing/blank/non-string (a hand-edited/legacy config must never smuggle
     // a non-string past the gate — the value is fed straight to provider.setQuality).
@@ -367,6 +397,7 @@ export function loadConfig(path: string): BotConfig {
       jellyfin,
       audioQuality,
       enabledProviders,
+      defaultPlatform: defaultPlatformPref,
     };
   }
 }
