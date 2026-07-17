@@ -222,6 +222,7 @@ export class TS3Client extends EventEmitter {
     });
 
     this.client.on("textMessage", (msg: TextMessage) => {
+      if (msg.invokerID === this.clientId) return;
       this.emit("textMessage", toTS3TextMessage(msg));
     });
 
