@@ -100,6 +100,15 @@ async function main() {
   if (jellyfinAuth) jellyfinProvider.setCookie(jellyfinAuth);
   jellyfinProvider.setPersist((serialized) => cookieStore.save("jellyfin", serialized));
 
+  // Restore the persisted per-provider audio quality (#125) onto the shared,
+  // process-wide providers so a restart keeps the user's choice. setQuality()
+  // normalizes/ignores unknown values, so a stale entry can never break playback.
+  neteaseProvider.setQuality(config.audioQuality.netease);
+  qqProvider.setQuality(config.audioQuality.qq);
+  bilibiliProvider.setQuality(config.audioQuality.bilibili);
+  kugouProvider.setQuality(config.audioQuality.kugou);
+  jellyfinProvider.setQuality(config.audioQuality.jellyfin);
+
   const permissions = createPermissionStore(db.db);
 
   // Single process-wide Spotify authorization (one Premium account for Stage 3).

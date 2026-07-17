@@ -1,9 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
+import cookieParser from "cookie-parser";
 import request from "supertest";
 import pino from "pino";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { MusicProvider, SearchResult } from "../../music/provider.js";
-import { getDefaultConfig, type BotConfig } from "../../data/config.js";
+import { getDefaultConfig, loadConfig, type BotConfig } from "../../data/config.js";
+import { createDatabase, type BotDatabase } from "../../data/database.js";
+import { createUserStore } from "../../data/users.js";
+import { createSessionStore } from "../../data/sessions.js";
+import { createPermissionStore } from "../../data/permissions.js";
+import { createRequireAuth } from "../middleware/requireAuth.js";
+import { SESSION_COOKIE_NAME } from "../auth/validateSession.js";
 import { createMusicRouter } from "./music.js";
 
 const empty: SearchResult = { songs: [], albums: [], playlists: [] };
@@ -145,5 +155,124 @@ describe("music router provider gating (enabledProviders) + jellyfin endpoints",
     const { app } = mount(configWithJellyfin());
     const res = await request(app).get("/api/music/jellyfin/favorites");
     expect(res.status).toBe(401);
+  });
+});
+
+describe("music router POST /quality — persistence (#125)", () => {
+  let tmpDir: string;
+  let configPath: string;
+  let config: BotConfig;
+  let botDb: BotDatabase;
+  let app: express.Express;
+  let cookie: string;
+  let providers: Record<string, MusicProvider>;
+
+  /** A provider whose in-memory quality is settable and readable, like the real
+   *  ones. */
+  function qualityProvider(platform: MusicProvider["platform"], initial: string): MusicProvider {
+    let q = initial;
+    return {
+      platform,
+      search: vi.fn().mockResolvedValue(empty),
+      getQuality: vi.fn(() => q),
+      setQuality: vi.fn((v: string) => { q = v; }),
+    } as unknown as MusicProvider;
+  }
+
+  /** Jellyfin only accepts its own tiers (mirrors the real provider), so a
+   *  broadcast of a foreign value is ignored — proving the snapshot captures each
+   *  provider's ACTUAL post-apply state, not just the request value. */
+  function jellyfinQualityProvider(): MusicProvider {
+    let q = "direct";
+    const tiers = new Set(["direct", "320", "192", "128"]);
+    return {
+      platform: "jellyfin",
+      search: vi.fn().mockResolvedValue(empty),
+      getQuality: vi.fn(() => q),
+      setQuality: vi.fn((v: string) => { if (tiers.has(v)) q = v; }),
+    } as unknown as MusicProvider;
+  }
+
+  beforeEach(async () => {
+    botDb = createDatabase(":memory:");
+    const users = createUserStore(botDb.db);
+    const sessions = createSessionStore(botDb.db);
+    const admin = await users.createUser("admin", "pw-admin", "admin");
+    cookie = `${SESSION_COOKIE_NAME}=${sessions.createSession(admin.id).token}`;
+
+    tmpDir = mkdtempSync(join(tmpdir(), "musicquality-"));
+    configPath = join(tmpDir, "config.json");
+    config = getDefaultConfig();
+
+    providers = {
+      netease: qualityProvider("netease", "exhigh"),
+      qq: qualityProvider("qq", "exhigh"),
+      bilibili: qualityProvider("bilibili", "high"),
+      kugou: qualityProvider("kugou", "128"),
+      jellyfin: jellyfinQualityProvider(),
+    };
+
+    app = express();
+    app.use(express.json());
+    app.use(cookieParser());
+    app.use("/api", createRequireAuth(sessions, createPermissionStore(botDb.db), () => getDefaultConfig().guestMode));
+    app.use(
+      "/api/music",
+      createMusicRouter(
+        providers.netease, providers.qq, providers.bilibili, pino({ level: "silent" }),
+        undefined, config, providers.kugou, undefined, providers.jellyfin, configPath,
+      ),
+    );
+  });
+
+  afterEach(() => {
+    botDb.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("persists a platform-specific quality change to config.json", async () => {
+    const res = await request(app)
+      .post("/api/music/quality")
+      .set("Cookie", cookie)
+      .send({ platform: "netease", quality: "lossless" });
+    expect(res.status).toBe(200);
+    expect(providers.netease.setQuality).toHaveBeenCalledWith("lossless");
+    // in-memory config mutated
+    expect(config.audioQuality.netease).toBe("lossless");
+    // written to disk + reload reflects it (survives a restart)
+    const onDisk = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(onDisk.audioQuality.netease).toBe("lossless");
+    expect(loadConfig(configPath).audioQuality.netease).toBe("lossless");
+  });
+
+  it("snapshots each provider's post-apply quality on a broadcast change", async () => {
+    const res = await request(app)
+      .post("/api/music/quality")
+      .set("Cookie", cookie)
+      .send({ quality: "320" });
+    expect(res.status).toBe(200);
+    // Broadcast reached every provider…
+    expect(providers.netease.setQuality).toHaveBeenCalledWith("320");
+    expect(providers.jellyfin.setQuality).toHaveBeenCalledWith("320");
+    // …and the snapshot reflects what each one actually accepted. Jellyfin's
+    // "320" is a valid tier here, so it takes; a foreign value would be ignored.
+    expect(config.audioQuality).toEqual({
+      netease: "320",
+      qq: "320",
+      bilibili: "320",
+      kugou: "320",
+      jellyfin: "320",
+    });
+  });
+
+  it("ignores foreign broadcast values that a provider rejects (jellyfin)", async () => {
+    const res = await request(app)
+      .post("/api/music/quality")
+      .set("Cookie", cookie)
+      .send({ quality: "lossless" });
+    expect(res.status).toBe(200);
+    // jellyfin rejects the NetEase-style value → stays at its default tier.
+    expect(config.audioQuality.jellyfin).toBe("direct");
+    expect(config.audioQuality.netease).toBe("lossless");
   });
 });

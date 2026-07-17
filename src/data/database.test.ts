@@ -131,6 +131,92 @@ describe("database", () => {
     expect(botDb.deleteBotInstance("nonexistent")).toBe(false);
   });
 
+  it("persists and restores per-bot player settings (volume + play mode) (#125)", () => {
+    const inst = {
+      id: "bot-ps",
+      name: "B",
+      serverAddress: "x",
+      serverPort: 9987,
+      nickname: "n",
+      defaultChannel: "",
+      channelId: "",
+      channelPassword: "",
+      autoStart: false,
+      serverProtocol: "",
+      ts6ApiKey: "",
+      serverPassword: "",
+    };
+    botDb.saveBotInstance(inst);
+
+    // Fresh row → in-memory defaults.
+    expect(botDb.getPlayerSettings("bot-ps")).toEqual({ volume: 75, playMode: "seq" });
+
+    // Volume and play mode persist independently.
+    botDb.saveVolume("bot-ps", 42);
+    expect(botDb.getPlayerSettings("bot-ps")).toEqual({ volume: 42, playMode: "seq" });
+    botDb.savePlayMode("bot-ps", "rloop");
+    expect(botDb.getPlayerSettings("bot-ps")).toEqual({ volume: 42, playMode: "rloop" });
+
+    // A later saveBotInstance upsert (e.g. autoStart toggle) must NOT reset them.
+    botDb.saveBotInstance({ ...inst, autoStart: true });
+    expect(botDb.getPlayerSettings("bot-ps")).toEqual({ volume: 42, playMode: "rloop" });
+  });
+
+  it("defaults player settings for an unknown bot and validates inputs (#125)", () => {
+    // No row → defaults.
+    expect(botDb.getPlayerSettings("does-not-exist")).toEqual({ volume: 75, playMode: "seq" });
+
+    botDb.saveBotInstance({
+      id: "bot-v",
+      name: "B",
+      serverAddress: "x",
+      serverPort: 9987,
+      nickname: "n",
+      defaultChannel: "",
+      channelId: "",
+      channelPassword: "",
+      autoStart: false,
+      serverProtocol: "",
+      ts6ApiKey: "",
+      serverPassword: "",
+    });
+    // Out-of-range volume is clamped; an unknown play mode is ignored (not stored).
+    botDb.saveVolume("bot-v", 250);
+    expect(botDb.getPlayerSettings("bot-v").volume).toBe(100);
+    botDb.saveVolume("bot-v", -10);
+    expect(botDb.getPlayerSettings("bot-v").volume).toBe(0);
+    botDb.savePlayMode("bot-v", "bogus");
+    expect(botDb.getPlayerSettings("bot-v").playMode).toBe("seq");
+  });
+
+  it("migrates volume + play_mode columns onto a legacy bot_instances table (#125)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tsmb-mig-"));
+    const p = join(dir, "legacy.db");
+    // Build a minimal pre-#125 bot_instances table (no volume/play_mode columns).
+    const legacy = createDatabase(p);
+    legacy.db.exec("DROP TABLE bot_instances");
+    legacy.db.exec(`CREATE TABLE bot_instances (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, serverAddress TEXT NOT NULL,
+      serverPort INTEGER NOT NULL, nickname TEXT NOT NULL, defaultChannel TEXT NOT NULL,
+      channelId TEXT NOT NULL DEFAULT '', channelPassword TEXT NOT NULL,
+      autoStart INTEGER NOT NULL DEFAULT 0, serverProtocol TEXT NOT NULL DEFAULT '',
+      ts6ApiKey TEXT NOT NULL DEFAULT '', serverPassword TEXT NOT NULL DEFAULT '', identity TEXT
+    )`);
+    legacy.db
+      .prepare("INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelPassword) VALUES (?, 'B', 'x', 9987, 'n', '', '')")
+      .run("legacy-bot");
+    legacy.close();
+
+    // Reopen → migrateSchema adds the columns; the old row gets the defaults.
+    const reopened = createDatabase(p);
+    const cols = (reopened.db.prepare("PRAGMA table_info(bot_instances)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain("volume");
+    expect(cols).toContain("play_mode");
+    expect(reopened.getPlayerSettings("legacy-bot")).toEqual({ volume: 75, playMode: "seq" });
+    reopened.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("persists and clears customAvatarPath on a bot instance", () => {
     const inst = {
       id: "bot-1",

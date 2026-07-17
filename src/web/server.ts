@@ -165,7 +165,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
   );
   app.use(
     "/api/music",
-    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.localProvider, options.config, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider)
+    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.localProvider, options.config, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider, options.configPath)
   );
   app.use("/api/player", createPlayerRouter(
     options.botManager, logger, options.database,
