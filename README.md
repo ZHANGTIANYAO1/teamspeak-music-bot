@@ -876,7 +876,14 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.11.0：播放清单持久化 / 设置保留 / 自定义默认音源
+### 最新版本 — v1.11.1：修复 `!help` 触发机器人自动点歌
+
+**丢弃自回显消息（[PR #135](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/135)，感谢 [@EvolvedGhost](https://github.com/EvolvedGhost)）**
+
+- 修复输入 `!help` 后机器人会自己点一首歌开始播放的问题：帮助文本超过 TeamSpeak 单条消息上限被分段发送，而 TeamSpeak 会把 bot 自己发到频道的消息回推给它自己，第二段恰好以 `!artist ...` 开头，被误当作新命令解析执行。
+- 现在在协议层丢弃发送者为机器人自身的消息，机器人不再响应任何自己发出的文本，所有超长分段输出均安全。无配置变化，升级无需任何操作。
+
+### v1.11.0 — 播放清单持久化 / 设置保留 / 自定义默认音源
 
 **保存/加载播放清单 + 队列持久化（[#119](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/119)）——三项开关均默认关闭，升级无行为变化**
 
