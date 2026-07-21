@@ -71,6 +71,7 @@ export function createBotRouter(
     res.json({
       idleTimeoutMinutes: config.idleTimeoutMinutes ?? 0,
       autoPauseOnEmpty: config.autoPauseOnEmpty,
+      voiceDucking: config.voiceDucking,
       localAudioEnabled: config.localAudioEnabled,
       savedQueuesEnabled: config.savedQueuesEnabled,
       playKeepsQueue: config.playKeepsQueue,
@@ -86,7 +87,14 @@ export function createBotRouter(
   // POST /api/bot/settings — 保存全局 bot 行为设置 (gated: changing global bot
   // behavior is a bot.manage operation, consistent with PR #80's permission model)
   router.post("/settings", requirePermission("bot.manage"), (req, res) => {
-    const { idleTimeoutMinutes, autoPauseOnEmpty, localAudioEnabled, guestMode, adminGroups } = req.body;
+    const {
+      idleTimeoutMinutes,
+      autoPauseOnEmpty,
+      localAudioEnabled,
+      voiceDucking,
+      guestMode,
+      adminGroups,
+    } = req.body;
 
     const hasIdle = idleTimeoutMinutes !== undefined;
     if (hasIdle && (typeof idleTimeoutMinutes !== "number" || idleTimeoutMinutes < 0)) {
@@ -100,6 +108,27 @@ export function createBotRouter(
     if (hasIdle) config.idleTimeoutMinutes = idleTimeoutMinutes;
     if (hasAutoPause) config.autoPauseOnEmpty = autoPauseOnEmpty;
     if (hasLocalAudioEnabled) config.localAudioEnabled = localAudioEnabled;
+
+    // Voice ducking is a partial settings block. Merge only known, strictly
+    // valid fields so malformed JSON cannot replace the object or inject NaN /
+    // out-of-range gain values into the live audio path.
+    const hasVoiceDucking =
+      voiceDucking !== null &&
+      typeof voiceDucking === "object" &&
+      !Array.isArray(voiceDucking);
+    if (hasVoiceDucking) {
+      if (typeof voiceDucking.enabled === "boolean") {
+        config.voiceDucking.enabled = voiceDucking.enabled;
+      }
+      if (
+        typeof voiceDucking.volumePercent === "number" &&
+        Number.isFinite(voiceDucking.volumePercent) &&
+        voiceDucking.volumePercent >= 0 &&
+        voiceDucking.volumePercent <= 100
+      ) {
+        config.voiceDucking.volumePercent = voiceDucking.volumePercent;
+      }
+    }
 
     // Saved-queues + play-keeps-queue toggles (default off). Both read live from
     // config by BotInstance / the saved-queues router, so no per-bot push needed;
@@ -244,11 +273,13 @@ export function createBotRouter(
     for (const bot of botManager.getAllBots()) {
       if (hasIdle) bot.updateIdleTimeout(config.idleTimeoutMinutes);
       if (hasAutoPause) bot.updateAutoPause(config.autoPauseOnEmpty);
+      if (hasVoiceDucking) bot.updateVoiceDucking(config.voiceDucking);
     }
 
     res.json({
       idleTimeoutMinutes: config.idleTimeoutMinutes ?? 0,
       autoPauseOnEmpty: config.autoPauseOnEmpty,
+      voiceDucking: config.voiceDucking,
       localAudioEnabled: config.localAudioEnabled,
       savedQueuesEnabled: config.savedQueuesEnabled,
       playKeepsQueue: config.playKeepsQueue,

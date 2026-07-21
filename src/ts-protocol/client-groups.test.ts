@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import pino from "pino";
 import { TS3Client } from "./client.js";
 
@@ -81,5 +81,61 @@ describe("TS3Client.getClientServerGroups — live query + parse smoke test", ()
   it("returns [] when not connected (no underlying client)", async () => {
     const ts = makeClient();
     expect(await ts.getClientServerGroups(5)).toEqual([]);
+  });
+});
+
+describe("TS3Client stable identity UID", () => {
+  it("derives the same client UID after exporting and restoring an identity", () => {
+    const first = makeClient();
+    const restored = new TS3Client(
+      {
+        host: "localhost",
+        port: 9987,
+        queryPort: 10011,
+        nickname: "RestoredBot",
+        identity: first.getIdentityExport(),
+      },
+      pino({ level: "silent" }),
+    );
+
+    expect(first.getClientUid()).toBeTruthy();
+    expect(restored.getClientUid()).toBe(first.getClientUid());
+  });
+});
+
+type VisibleUidHarness = {
+  visibleClientUids: Map<number, string>;
+  rememberVisibleClientUid(clientId: number, clientUid: string): void;
+  releaseVisibleClientUid(clientId: number): void;
+  clearVisibleClientUids(): void;
+};
+
+describe("TS3Client visible client UID grace", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("retains a leaving client's UID for final reordered voice packets", () => {
+    vi.useFakeTimers();
+    const cache = makeClient() as unknown as VisibleUidHarness;
+    cache.rememberVisibleClientUid(7, "managed-bot-uid=");
+
+    cache.releaseVisibleClientUid(7);
+    vi.advanceTimersByTime(999);
+    expect(cache.visibleClientUids.get(7)).toBe("managed-bot-uid=");
+
+    vi.advanceTimersByTime(1);
+    expect(cache.visibleClientUids.has(7)).toBe(false);
+  });
+
+  it("lets a new clientEnter overwrite a reused id and cancel stale cleanup", () => {
+    vi.useFakeTimers();
+    const cache = makeClient() as unknown as VisibleUidHarness;
+    cache.rememberVisibleClientUid(7, "old-managed-bot-uid=");
+    cache.releaseVisibleClientUid(7);
+
+    cache.rememberVisibleClientUid(7, "new-human-uid=");
+    vi.advanceTimersByTime(1_000);
+
+    expect(cache.visibleClientUids.get(7)).toBe("new-human-uid=");
+    cache.clearVisibleClientUids();
   });
 });

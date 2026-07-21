@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import {
   Client as TS3FullClient,
   generateIdentity as genTS3Identity,
+  getUidFromPublicKey,
   identityFromString,
   sendTextMessage,
   listChannels,
@@ -15,6 +16,7 @@ import {
   type ClientInfo,
   type ClientLeftViewEvent,
   type ClientMovedEvent,
+  type VoiceData,
   type FileUploadInfo,
 } from "@honeybbq/teamspeak-client";
 import type { Logger } from "../logger.js";
@@ -23,6 +25,10 @@ import {
   type ServerProtocol,
 } from "./protocol-detect.js";
 import { TS6HttpQuery } from "./http-query.js";
+import {
+  TrackingVoiceEndpointResolver,
+  type ResolvedVoiceEndpoint,
+} from "./voice-endpoint.js";
 
 export { CODEC_OPUS_MUSIC } from "./voice.js";
 export type { ServerProtocol } from "./protocol-detect.js";
@@ -65,6 +71,20 @@ export interface TS3TextMessage {
   invokerGroups: string[]; // sender's TS server-group ids; [] when not in view cache
 }
 
+/** Lightweight voice-packet signal used for activity detection. The encoded
+ * payload is intentionally not forwarded beyond this protocol wrapper. */
+export interface TS3VoiceActivity {
+  clientId: number;
+  codec: number;
+  /** Stable TeamSpeak identity when the sender is present in the client view. */
+  clientUid?: string;
+}
+
+// Command notifications and UDP voice packets can be reordered in flight.
+// Retain a leaving client's UID briefly so its final packet is still
+// attributable; a new clientEnter for the same id cancels and overwrites it.
+const VISIBLE_CLIENT_UID_RELEASE_GRACE_MS = 1_000;
+
 /**
  * Map the library's TextMessage to our wrapper. Preserves invokerGroups (the
  * sender's TS server groups), which the library populates only when the sender
@@ -85,12 +105,19 @@ export function toTS3TextMessage(msg: TextMessage): TS3TextMessage {
 export class TS3Client extends EventEmitter {
   private client: TS3FullClient | null = null;
   private identity: Identity;
+  private readonly clientUid: string;
   private clientId = 0;
+  private readonly visibleClientUids = new Map<number, string>();
+  private readonly visibleClientUidReleaseTimers = new Map<
+    number,
+    ReturnType<typeof setTimeout>
+  >();
   private logger: Logger;
   private disconnecting = false;
   private detectedProtocol: ServerProtocol = "unknown";
   private httpQuery: TS6HttpQuery | null = null;
   private udpErrorTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly voiceEndpointResolver = new TrackingVoiceEndpointResolver();
 
   constructor(private options: TS3ClientOptions, logger: Logger) {
     super();
@@ -101,6 +128,7 @@ export class TS3Client extends EventEmitter {
     } else {
       this.identity = genTS3Identity(8);
     }
+    this.clientUid = getUidFromPublicKey(this.identity.publicKeyBase64());
   }
 
   /** The detected (or forced) server protocol after connect(). */
@@ -114,6 +142,8 @@ export class TS3Client extends EventEmitter {
   }
 
   async connect(): Promise<void> {
+    this.voiceEndpointResolver.reset();
+    this.clearVisibleClientUids();
     // Clean up any existing connection before creating a new one
     if (this.client) {
       this.logger.info("Cleaning up previous connection before reconnecting");
@@ -213,6 +243,7 @@ export class TS3Client extends EventEmitter {
       // Forward server password to the protocol library so it can be
       // included in clientinit for password-protected servers
       serverPassword: this.options.serverPassword,
+      resolver: this.voiceEndpointResolver,
       logger: {
         debug: (msg) => this.logger.debug(msg),
         info: (msg) => this.logger.info(msg),
@@ -226,13 +257,28 @@ export class TS3Client extends EventEmitter {
       this.emit("textMessage", toTS3TextMessage(msg));
     });
 
+    this.client.on("voiceData", (voice: VoiceData) => {
+      // The library normally suppresses our own packets; retain the explicit
+      // guard so a future protocol change cannot make a bot duck itself.
+      if (voice.clientId === this.clientId) return;
+      const clientUid = this.visibleClientUids.get(voice.clientId);
+      const activity: TS3VoiceActivity = {
+        clientId: voice.clientId,
+        codec: voice.codec,
+        ...(clientUid ? { clientUid } : {}),
+      };
+      this.emit("voiceActivity", activity);
+    });
+
     this.client.on("disconnected", (err) => {
       this.logger.warn({ err: err?.message }, "Connection closed");
       this.clientId = 0;
+      this.clearVisibleClientUids();
       this.emit("disconnected");
     });
 
     this.client.on("clientEnter", (info: ClientInfo) => {
+      this.rememberVisibleClientUid(info.id, info.uid);
       this.logger.debug(
         { nickname: info.nickname, id: info.id },
         "Client entered"
@@ -241,6 +287,7 @@ export class TS3Client extends EventEmitter {
     });
 
     this.client.on("clientLeave", (ev: ClientLeftViewEvent) => {
+      this.releaseVisibleClientUid(ev.id);
       this.logger.debug({ id: ev.id }, "Client left");
       this.emit("clientLeave", ev);
     });
@@ -430,6 +477,52 @@ export class TS3Client extends EventEmitter {
     return this.clientId;
   }
 
+  /** Actual endpoint selected by the SDK's SRV/TSDNS discovery and DNS lookup. */
+  getResolvedVoiceEndpoint(): ResolvedVoiceEndpoint | null {
+    return this.voiceEndpointResolver.getEndpoint();
+  }
+
+  /** Stable identity of this managed TeamSpeak client. */
+  getClientUid(): string {
+    return this.clientUid;
+  }
+
+  private rememberVisibleClientUid(clientId: number, clientUid: string): void {
+    const pendingRelease = this.visibleClientUidReleaseTimers.get(clientId);
+    if (pendingRelease) clearTimeout(pendingRelease);
+    this.visibleClientUidReleaseTimers.delete(clientId);
+
+    if (clientId > 0 && clientUid) {
+      this.visibleClientUids.set(clientId, clientUid);
+    } else {
+      this.visibleClientUids.delete(clientId);
+    }
+  }
+
+  private releaseVisibleClientUid(clientId: number): void {
+    const clientUid = this.visibleClientUids.get(clientId);
+    if (!clientUid) return;
+
+    const previous = this.visibleClientUidReleaseTimers.get(clientId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      if (this.visibleClientUids.get(clientId) === clientUid) {
+        this.visibleClientUids.delete(clientId);
+      }
+      this.visibleClientUidReleaseTimers.delete(clientId);
+    }, VISIBLE_CLIENT_UID_RELEASE_GRACE_MS);
+    timer.unref?.();
+    this.visibleClientUidReleaseTimers.set(clientId, timer);
+  }
+
+  private clearVisibleClientUids(): void {
+    for (const timer of this.visibleClientUidReleaseTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.visibleClientUidReleaseTimers.clear();
+    this.visibleClientUids.clear();
+  }
+
   disconnect(): void {
     if (this.client && !this.disconnecting) {
       this.disconnecting = true;
@@ -442,6 +535,7 @@ export class TS3Client extends EventEmitter {
       });
     }
     this.clientId = 0;
+    this.clearVisibleClientUids();
     this.httpQuery = null;
     this.detectedProtocol = "unknown";
     if (this.udpErrorTimer) {

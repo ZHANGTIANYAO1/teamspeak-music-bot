@@ -780,6 +780,70 @@
 
       <label class="profile-toggle behavior-toggle">
         <div class="profile-toggle-text">
+          <div class="profile-toggle-label">语音闪避</div>
+          <div class="profile-toggle-hint">检测到其他客户端说话时自动压低音乐音量，说话结束后恢复。默认关闭。</div>
+        </div>
+        <input
+          v-model="voiceDuckingEnabled"
+          type="checkbox"
+          class="profile-toggle-switch"
+          :disabled="voiceDuckingControlsDisabled"
+          @change="saveVoiceDucking"
+        />
+      </label>
+
+      <div class="setting-row voice-ducking-volume">
+        <div class="setting-label">
+          <Icon icon="mdi:volume-minus" class="setting-icon" />
+          <div>
+            <div>说话时保留原音量</div>
+            <div class="voice-ducking-hint">例如设为 30%，有人说话时音乐将降至原音量的 30%。</div>
+          </div>
+        </div>
+        <div class="voice-ducking-controls">
+          <input
+            v-model.number="voiceDuckingVolumePercent"
+            type="range"
+            min="0"
+            max="100"
+            step="0.1"
+            class="voice-ducking-range"
+            :disabled="voiceDuckingControlsDisabled"
+            aria-label="说话时保留原音量百分比"
+          />
+          <div class="prefix-input-wrap">
+            <input
+              v-model.number="voiceDuckingVolumePercent"
+              type="number"
+              min="0"
+              max="100"
+              step="0.1"
+              class="input input-sm"
+              style="max-width:80px"
+              :disabled="voiceDuckingControlsDisabled"
+              aria-label="说话时保留原音量百分比"
+              @blur="normalizeVoiceDuckingVolume"
+            />
+            <span class="voice-ducking-unit">%</span>
+            <button class="btn-primary" :disabled="voiceDuckingControlsDisabled" @click="saveVoiceDucking">
+              {{ !voiceDuckingLoaded ? '加载设置…' : voiceDuckingSaving ? '保存中…' : '保存比例' }}
+            </button>
+          </div>
+        </div>
+        <p
+          v-if="voiceDuckingMessage"
+          class="voice-ducking-message"
+          :class="`tone-${voiceDuckingMessageTone}`"
+          :role="voiceDuckingMessageTone === 'warn' ? 'alert' : 'status'"
+          :aria-live="voiceDuckingMessageTone === 'warn' ? 'assertive' : 'polite'"
+          aria-atomic="true"
+        >
+          {{ voiceDuckingMessage }}
+        </p>
+      </div>
+
+      <label class="profile-toggle behavior-toggle">
+        <div class="profile-toggle-text">
           <div class="profile-toggle-label">本地音频播放</div>
           <div class="profile-toggle-hint">开启后允许在搜索页拖拽/选择本地音频上传并播放；关闭后会拒绝新的本地上传和本地歌曲播放请求。</div>
         </div>
@@ -1595,16 +1659,59 @@ async function savePrefix() {
 const idleTimeout = ref(0);
 // Defaults OFF to match the backend default (config.ts getDefaultConfig).
 const autoPauseOnEmpty = ref(false);
+// Voice ducking defaults OFF and retains 30% of the configured player volume.
+const voiceDuckingEnabled = ref(false);
+const voiceDuckingVolumePercent = ref(30);
+const voiceDuckingLoaded = ref(false);
+const voiceDuckingSaving = ref(false);
+const voiceDuckingControlsDisabled = computed(
+  () => !voiceDuckingLoaded.value || voiceDuckingSaving.value,
+);
+const voiceDuckingMessage = ref('');
+const voiceDuckingMessageTone = ref<'ok' | 'warn'>('ok');
+let savedVoiceDucking = { enabled: false, volumePercent: 30 };
+let voiceDuckingRequestRevision = 0;
 const localAudioEnabled = ref(true);
 // Saved-queues + play-keeps-queue toggles (#119), both default OFF.
 const savedQueuesEnabled = ref(false);
 const playKeepsQueue = ref(false);
 
+function normalizeVoiceDuckingVolume(): number {
+  const raw = voiceDuckingVolumePercent.value as number | string;
+  const value = raw === '' ? Number.NaN : Number(raw);
+  voiceDuckingVolumePercent.value = Number.isFinite(value)
+    ? Math.min(100, Math.max(0, value))
+    : savedVoiceDucking.volumePercent;
+  return voiceDuckingVolumePercent.value;
+}
+
+function applyVoiceDuckingConfig(config: unknown) {
+  if (!config || typeof config !== 'object') return;
+  const value = config as { enabled?: unknown; volumePercent?: unknown };
+  voiceDuckingEnabled.value = typeof value.enabled === 'boolean' ? value.enabled : false;
+  const percent = value.volumePercent;
+  voiceDuckingVolumePercent.value = typeof percent === 'number' && Number.isFinite(percent)
+    ? Math.min(100, Math.max(0, percent))
+    : 30;
+  savedVoiceDucking = {
+    enabled: voiceDuckingEnabled.value,
+    volumePercent: voiceDuckingVolumePercent.value,
+  };
+}
+
 async function loadIdleTimeout() {
+  const voiceDuckingLoadRevision = voiceDuckingRequestRevision;
   try {
     const res = await axios.get('/api/bot/settings');
     idleTimeout.value = res.data.idleTimeoutMinutes ?? 0;
     autoPauseOnEmpty.value = res.data.autoPauseOnEmpty ?? false;
+    // A later save owns the state. Do not let an older GET response overwrite
+    // it if this loader is ever re-entered while a POST is in flight.
+    if (voiceDuckingLoadRevision === voiceDuckingRequestRevision) {
+      applyVoiceDuckingConfig(res.data.voiceDucking ?? { enabled: false, volumePercent: 30 });
+      voiceDuckingLoaded.value = true;
+      voiceDuckingMessage.value = '';
+    }
     localAudioEnabled.value = res.data.localAudioEnabled ?? true;
     savedQueuesEnabled.value = res.data.savedQueuesEnabled ?? false;
     playKeepsQueue.value = res.data.playKeepsQueue ?? false;
@@ -1620,7 +1727,12 @@ async function loadIdleTimeout() {
     }
     // null (unset) → "" so the select shows "自动（按优先级）".
     defaultPlatformForm.value = res.data.defaultPlatform ?? '';
-  } catch { /* ignore */ }
+  } catch {
+    if (!voiceDuckingLoaded.value) {
+      voiceDuckingMessageTone.value = 'warn';
+      voiceDuckingMessage.value = '语音闪避设置加载失败，请刷新页面重试';
+    }
+  }
 }
 
 async function saveIdleTimeout() {
@@ -1633,6 +1745,29 @@ async function saveAutoPause() {
   try {
     await axios.post('/api/bot/settings', { autoPauseOnEmpty: autoPauseOnEmpty.value });
   } catch { /* ignore */ }
+}
+
+async function saveVoiceDucking() {
+  if (!voiceDuckingLoaded.value || voiceDuckingSaving.value) return;
+  voiceDuckingSaving.value = true;
+  voiceDuckingRequestRevision++;
+  voiceDuckingMessage.value = '';
+  const submitted = {
+    enabled: voiceDuckingEnabled.value,
+    volumePercent: normalizeVoiceDuckingVolume(),
+  };
+  try {
+    const res = await axios.post('/api/bot/settings', { voiceDucking: submitted });
+    applyVoiceDuckingConfig(res.data?.voiceDucking ?? submitted);
+    voiceDuckingMessageTone.value = 'ok';
+    voiceDuckingMessage.value = '已保存';
+  } catch {
+    applyVoiceDuckingConfig(savedVoiceDucking);
+    voiceDuckingMessageTone.value = 'warn';
+    voiceDuckingMessage.value = '保存失败，请稍后重试';
+  } finally {
+    voiceDuckingSaving.value = false;
+  }
 }
 
 async function saveLocalAudioEnabled() {
@@ -2912,6 +3047,45 @@ onUnmounted(() => {
   padding-top: 4px;
 }
 
+.voice-ducking-volume {
+  padding: 4px 0 14px;
+}
+
+.voice-ducking-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+  line-height: 1.4;
+  font-weight: 400;
+}
+
+.voice-ducking-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.voice-ducking-range {
+  flex: 1 1 240px;
+  min-width: 160px;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.voice-ducking-unit {
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+.voice-ducking-message {
+  margin: 8px 0 0;
+  font-size: 12px;
+
+  &.tone-ok { color: var(--color-online); }
+  &.tone-warn { color: #e26a6a; }
+}
+
 @media (max-width: 768px) {
   .profile-bot-header {
     padding: 14px 12px;
@@ -2938,6 +3112,17 @@ onUnmounted(() => {
     &:checked::before {
       transform: translateX(20px);
     }
+  }
+
+  .voice-ducking-controls {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .voice-ducking-range {
+    flex-basis: auto;
+    width: 100%;
   }
 }
 

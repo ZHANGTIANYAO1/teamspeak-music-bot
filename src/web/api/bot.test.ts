@@ -13,20 +13,29 @@ import { createAvatarStore } from "../../data/avatars.js";
 import { createRequireAuth } from "../middleware/requireAuth.js";
 import { createPermissionStore } from "../../data/permissions.js";
 import { createBotRouter } from "./bot.js";
-import { getDefaultConfig, type BotConfig, type JellyfinConfig } from "../../data/config.js";
+import {
+  getDefaultConfig,
+  type BotConfig,
+  type JellyfinConfig,
+  type VoiceDuckingConfig,
+} from "../../data/config.js";
 import { SESSION_COOKIE_NAME } from "../auth/validateSession.js";
 import type { BotManager } from "../../bot/manager.js";
 
-/** Records every updateIdleTimeout / updateAutoPause call so the test can assert propagation. */
+/** Records live settings updates so the tests can assert per-bot propagation. */
 function makeFakeBot() {
   return {
     idleTimeoutCalls: [] as number[],
     autoPauseCalls: [] as boolean[],
+    voiceDuckingCalls: [] as VoiceDuckingConfig[],
     updateIdleTimeout(minutes: number) {
       this.idleTimeoutCalls.push(minutes);
     },
     updateAutoPause(enabled: boolean) {
       this.autoPauseCalls.push(enabled);
+    },
+    updateVoiceDucking(settings: VoiceDuckingConfig) {
+      this.voiceDuckingCalls.push({ ...settings });
     },
   };
 }
@@ -82,6 +91,60 @@ describe("bot router /settings", () => {
     expect(res.status).toBe(200);
     expect(res.body.idleTimeoutMinutes).toBe(15);
     expect(res.body.autoPauseOnEmpty).toBe(true);
+  });
+
+  it("GET /settings includes voiceDucking with safe defaults", async () => {
+    const res = await request(app).get("/api/bot/settings").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.voiceDucking).toEqual({ enabled: false, volumePercent: 30 });
+  });
+
+  it("POST /settings safely partial-merges, persists and hot-applies voiceDucking", async () => {
+    const enable = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ voiceDucking: { enabled: true } });
+    expect(enable.status).toBe(200);
+    expect(enable.body.voiceDucking).toEqual({ enabled: true, volumePercent: 30 });
+
+    const setVolume = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ voiceDucking: { volumePercent: 42.5 } });
+    expect(setVolume.status).toBe(200);
+    expect(config.voiceDucking).toEqual({ enabled: true, volumePercent: 42.5 });
+
+    for (const bot of fakeBots) {
+      expect(bot.voiceDuckingCalls).toEqual([
+        { enabled: true, volumePercent: 30 },
+        { enabled: true, volumePercent: 42.5 },
+      ]);
+    }
+
+    const persisted = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(persisted.voiceDucking).toEqual({ enabled: true, volumePercent: 42.5 });
+    const followUp = await request(app).get("/api/bot/settings").set("Cookie", cookie);
+    expect(followUp.body.voiceDucking).toEqual({ enabled: true, volumePercent: 42.5 });
+  });
+
+  it("POST /settings ignores malformed voiceDucking fields and non-object blocks", async () => {
+    config.voiceDucking = { enabled: true, volumePercent: 25 };
+    const invalidFields = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ voiceDucking: { enabled: "yes", volumePercent: 101 } });
+    expect(invalidFields.status).toBe(200);
+    expect(config.voiceDucking).toEqual({ enabled: true, volumePercent: 25 });
+
+    const arrayBlock = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ voiceDucking: [{ enabled: false, volumePercent: 0 }] });
+    expect(arrayBlock.status).toBe(200);
+    expect(config.voiceDucking).toEqual({ enabled: true, volumePercent: 25 });
+    for (const bot of fakeBots) {
+      expect(bot.voiceDuckingCalls).toEqual([{ enabled: true, volumePercent: 25 }]);
+    }
   });
 
   it("POST /settings with autoPauseOnEmpty:false persists and propagates to bots", async () => {

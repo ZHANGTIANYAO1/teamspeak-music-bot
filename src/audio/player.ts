@@ -161,6 +161,15 @@ export class AudioPlayer extends EventEmitter {
   private encoder: Encoder;
   private state: PlayerState = "idle";
   private volume = 75;
+  /**
+   * A transient gain envelope layered on top of the persisted user volume.
+   * Voice ducking drives this value; keeping it separate means a temporary
+   * attenuation can never leak into the saved volume setting.
+   */
+  private duckingRampStartGain = 1;
+  private duckingTargetGain = 1;
+  private duckingRampStartedAt = 0;
+  private duckingRampDurationMs = 0;
   private pcmBuffer: Buffer = Buffer.alloc(0);
   private logger: Logger;
   private frameLoopRunning = false;
@@ -732,15 +741,52 @@ export class AudioPlayer extends EventEmitter {
   }
 
   private applyVolume(pcm: Buffer): Buffer {
-    const factor = volumeToFactor(this.volume);
-    // factor === 1 only at volume 100; skip the per-sample loop at full loudness.
-    if (factor >= 1) return Buffer.from(pcm);
+    const baseFactor = volumeToFactor(this.volume);
+    const now = performance.now();
+    const startDuckingGain = this.duckingGainAt(now);
+    const endDuckingGain = this.duckingGainAt(now + FRAME_DURATION_MS);
+    const startFactor = baseFactor * startDuckingGain;
+    const endFactor = baseFactor * endDuckingGain;
+
+    if (startFactor >= 1 && endFactor >= 1) {
+      return Buffer.from(pcm);
+    }
+
     const out = Buffer.alloc(pcm.length);
+    // Most frames are outside the short attack/release windows. Preserve the
+    // old constant-factor hot path instead of doing interpolation per sample.
+    if (startFactor === endFactor) {
+      for (let i = 0; i < pcm.length; i += 2) {
+        const sample = Math.round(pcm.readInt16LE(i) * startFactor);
+        out.writeInt16LE(Math.max(-32768, Math.min(32767, sample)), i);
+      }
+      return out;
+    }
+
+    // PCM is fixed at stereo s16le. Use one gain for each L/R pair so a ramp
+    // never creates a tiny channel imbalance, and span the whole 20 ms frame.
+    const stereoFrames = Math.max(1, Math.ceil(pcm.length / 4));
     for (let i = 0; i < pcm.length; i += 2) {
-      let sample = Math.round(pcm.readInt16LE(i) * factor);
+      const frameIndex = Math.floor(i / 4);
+      const progress = stereoFrames === 1 ? 0 : frameIndex / (stereoFrames - 1);
+      const factor = startFactor + (endFactor - startFactor) * progress;
+      const sample = Math.round(pcm.readInt16LE(i) * factor);
       out.writeInt16LE(Math.max(-32768, Math.min(32767, sample)), i);
     }
     return out;
+  }
+
+  private duckingGainAt(at: number): number {
+    if (this.duckingRampDurationMs <= 0) return this.duckingTargetGain;
+
+    const progress = Math.max(
+      0,
+      Math.min(1, (at - this.duckingRampStartedAt) / this.duckingRampDurationMs),
+    );
+    return (
+      this.duckingRampStartGain +
+      (this.duckingTargetGain - this.duckingRampStartGain) * progress
+    );
   }
 
   // NOTE: in external (Spotify sidecar) mode getElapsed() is frame-count based
@@ -762,6 +808,22 @@ export class AudioPlayer extends EventEmitter {
   resetFailures(): void { this.consecutiveFailures = 0; }
   setVolume(vol: number): void { this.volume = Math.max(0, Math.min(100, vol)); }
   getVolume(): number { return this.volume; }
+  /** Set the temporary voice-ducking gain (0=silent, 1=unchanged). */
+  setDuckingGain(gain: number, rampMs = 0): void {
+    if (!Number.isFinite(gain)) return;
+
+    const now = performance.now();
+    const currentGain = this.duckingGainAt(now);
+    const targetGain = Math.max(0, Math.min(1, gain));
+    const duration = Number.isFinite(rampMs) ? Math.max(0, rampMs) : 0;
+
+    this.duckingRampStartGain = currentGain;
+    this.duckingTargetGain = targetGain;
+    this.duckingRampStartedAt = now;
+    this.duckingRampDurationMs =
+      duration > 0 && currentGain !== targetGain ? duration : 0;
+  }
+  getDuckingGain(): number { return this.duckingGainAt(performance.now()); }
   getState(): PlayerState { return this.state; }
   // True only while attached to an external (Spotify sidecar) PCM stream. Used
   // by the orchestrator to decide whether to re-attach: stop() detaches (sets

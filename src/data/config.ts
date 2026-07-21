@@ -54,6 +54,12 @@ export interface AudioQualityConfig {
   jellyfin: string;
 }
 
+export interface VoiceDuckingConfig {
+  enabled: boolean;
+  /** Percentage of the normal playback volume retained while someone speaks. */
+  volumePercent: number;
+}
+
 /**
  * Providers gated by `enabledProviders`. Not listed here:
  *  - "local"   → governed by the existing `localAudioEnabled` flag
@@ -113,6 +119,8 @@ export interface BotConfig {
   adminGroups: number[];
   autoReturnDelay: number;
   autoPauseOnEmpty: boolean;
+  /** Lower music volume while voice from another client is being received. */
+  voiceDucking: VoiceDuckingConfig;
   idleTimeoutMinutes: number;
   /** Enable uploading and playback of server-stored local audio files. */
   localAudioEnabled: boolean;
@@ -176,6 +184,10 @@ export function getDefaultConfig(): BotConfig {
     // command, which is unreliable on some servers (it can time out when other
     // clients are present). Users can opt in from the web UI.
     autoPauseOnEmpty: false,
+    voiceDucking: {
+      enabled: false,
+      volumePercent: 30,
+    },
     idleTimeoutMinutes: 0,
     localAudioEnabled: true,
     savedQueuesEnabled: false,
@@ -383,6 +395,31 @@ export function loadConfig(path: string): BotConfig {
     const savedQueuesEnabled = partial.savedQueuesEnabled === true;
     const playKeepsQueue = partial.playKeepsQueue === true;
 
+    // Voice ducking is opt-in and the retained-volume percentage is consumed
+    // directly by the audio path. Only a plain-object block with correctly
+    // typed, finite and in-range fields may override the safe defaults.
+    const rawVoiceDucking = partial.voiceDucking;
+    const partialVoiceDucking =
+      rawVoiceDucking !== null &&
+      typeof rawVoiceDucking === "object" &&
+      !Array.isArray(rawVoiceDucking)
+        ? (rawVoiceDucking as Partial<VoiceDuckingConfig>)
+        : {};
+    const rawVolumePercent = partialVoiceDucking.volumePercent;
+    const voiceDucking: VoiceDuckingConfig = {
+      enabled:
+        typeof partialVoiceDucking.enabled === "boolean"
+          ? partialVoiceDucking.enabled
+          : defaults.voiceDucking.enabled,
+      volumePercent:
+        typeof rawVolumePercent === "number" &&
+        Number.isFinite(rawVolumePercent) &&
+        rawVolumePercent >= 0 &&
+        rawVolumePercent <= 100
+          ? rawVolumePercent
+          : defaults.voiceDucking.volumePercent,
+    };
+
     // defaultPlatform → an explicit operator default (issue #126). Keep it only
     // when it names a KNOWN gateable provider that is ALSO currently enabled;
     // anything else (unknown value, disabled source, wrong type, missing) becomes
@@ -420,6 +457,7 @@ export function loadConfig(path: string): BotConfig {
       enabledProviders,
       savedQueuesEnabled,
       playKeepsQueue,
+      voiceDucking,
       defaultPlatform: defaultPlatformPref,
     };
   }
