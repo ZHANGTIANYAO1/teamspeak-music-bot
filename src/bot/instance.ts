@@ -155,9 +155,12 @@ export class BotInstance extends EventEmitter {
   private player: AudioPlayer;
   private voiceDucking: VoiceDuckingController;
   private managedVoiceClients: ManagedVoiceClientRegistry;
+  private readonly configuredVoiceServerScope: ManagedVoiceClientScope;
   private voiceServerScope: ManagedVoiceClientScope;
   private registeredVoiceClientId = 0;
   private registeredVoiceClientOwner: ManagedVoiceClientOwnerToken | null = null;
+  private registeredVoiceClientScope: ManagedVoiceClientScope | null = null;
+  private registeredVoiceClientUid: string | null = null;
   private spotifyController: SpotifyController;
   private queue: PlayQueue;
   private neteaseProvider: MusicProvider;
@@ -222,10 +225,11 @@ export class BotInstance extends EventEmitter {
     );
     this.managedVoiceClients =
       options.managedVoiceClients ?? new ManagedVoiceClientRegistry();
-    this.voiceServerScope = {
+    this.configuredVoiceServerScope = {
       host: options.tsOptions.host,
       voicePort: options.tsOptions.port,
     };
+    this.voiceServerScope = { ...this.configuredVoiceServerScope };
     this.queue = new PlayQueue();
 
     // Restore persisted per-bot player settings (#125): volume + play mode
@@ -422,7 +426,10 @@ export class BotInstance extends EventEmitter {
 
     this.tsClient.on("voiceActivity", (activity: TS3VoiceActivity) => {
       if (!this.connected) return;
-      if (this.managedVoiceClients.has(this.voiceServerScope, activity.clientId)) {
+      if (
+        this.managedVoiceClients.hasClientUid(activity.clientUid) ||
+        this.managedVoiceClients.has(this.voiceServerScope, activity.clientId)
+      ) {
         return;
       }
       this.voiceDucking.handleVoiceActivity(activity.clientId);
@@ -461,22 +468,31 @@ export class BotInstance extends EventEmitter {
     if (!Number.isSafeInteger(clientId) || clientId <= 0) return;
 
     const owner = {};
-    if (this.managedVoiceClients.register(this.voiceServerScope, clientId, owner)) {
+    const scope = { ...this.voiceServerScope };
+    const clientUid = this.tsClient.getClientUid();
+    if (this.managedVoiceClients.register(scope, clientId, owner, clientUid)) {
       this.registeredVoiceClientId = clientId;
       this.registeredVoiceClientOwner = owner;
+      this.registeredVoiceClientScope = scope;
+      this.registeredVoiceClientUid = clientUid;
     }
   }
 
   private unregisterManagedVoiceClient(graceMs = 0): void {
     const clientId = this.registeredVoiceClientId;
     const owner = this.registeredVoiceClientOwner;
-    const scope = { ...this.voiceServerScope };
+    const clientUid = this.registeredVoiceClientUid ?? undefined;
+    const scope = this.registeredVoiceClientScope
+      ? { ...this.registeredVoiceClientScope }
+      : { ...this.voiceServerScope };
     this.registeredVoiceClientId = 0;
     this.registeredVoiceClientOwner = null;
+    this.registeredVoiceClientScope = null;
+    this.registeredVoiceClientUid = null;
     if (clientId <= 0 || owner === null) return;
 
     const unregister = () => {
-      this.managedVoiceClients.unregister(scope, clientId, owner);
+      this.managedVoiceClients.unregister(scope, clientId, owner, clientUid);
     };
     if (graceMs > 0) {
       const timer = setTimeout(unregister, graceMs);
@@ -523,12 +539,12 @@ export class BotInstance extends EventEmitter {
     this.disconnectEmitted = false;
     await this.tsClient.connect();
     const resolvedEndpoint = this.tsClient.getResolvedVoiceEndpoint();
-    if (resolvedEndpoint) {
-      this.voiceServerScope = {
-        host: resolvedEndpoint.host,
-        voicePort: resolvedEndpoint.port,
-      };
-    }
+    this.voiceServerScope = {
+      host:
+        resolvedEndpoint?.host ?? this.configuredVoiceServerScope.host,
+      voicePort:
+        resolvedEndpoint?.port ?? this.configuredVoiceServerScope.voicePort,
+    };
     // Race guard: if disconnect() was called while the handshake was
     // awaiting, don't flip connected back to true — that would leave the
     // bot in an inconsistent state (externally "connected" but the tsClient

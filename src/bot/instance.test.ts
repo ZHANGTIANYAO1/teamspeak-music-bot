@@ -137,6 +137,10 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
         connect: vi.fn(() => connectPromise),
         getResolvedVoiceEndpoint: vi.fn(() => ({ host: "203.0.113.20", port: 12000 })),
       },
+      configuredVoiceServerScope: {
+        host: "voice-alias.example.com",
+        voicePort: 9987,
+      },
       voiceServerScope: { host: "voice-alias.example.com", voicePort: 9987 },
       voiceDucking: { reset: vi.fn() },
       registerManagedVoiceClient: vi.fn(),
@@ -172,6 +176,18 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
     expect(ctx.voiceDucking.reset).not.toHaveBeenCalled();
   });
 
+  it("falls back to the configured endpoint when identity discovery is unavailable", async () => {
+    const ctx = makeConnectContext(Promise.resolve());
+    ctx.tsClient.getResolvedVoiceEndpoint.mockReturnValue(null as any);
+
+    await connect.call(ctx);
+
+    expect(ctx.voiceServerScope).toEqual({
+      host: "voice-alias.example.com",
+      voicePort: 9987,
+    });
+  });
+
   it("routes human voice activity but filters another managed bot", () => {
     const tsClient = new EventEmitter() as EventEmitter & {
       getClientId(): number;
@@ -179,7 +195,13 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
     tsClient.getClientId = () => 10;
     const managedVoiceClients = new ManagedVoiceClientRegistry();
     const voiceServerScope = { host: "voice.example.com", voicePort: 9987 };
-    managedVoiceClients.register(voiceServerScope, 20, {});
+    managedVoiceClients.register(
+      { host: "192.168.1.10", voicePort: 20_000 },
+      20,
+      {},
+      "managed-bot-uid=",
+    );
+    managedVoiceClients.register(voiceServerScope, 22, {}, "fallback-bot-uid=");
     const handleVoiceActivity = vi.fn();
     const ctx = {
       tsClient,
@@ -194,8 +216,19 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
     } as Record<string, any>;
 
     (BotInstance.prototype as any).setupTsEvents.call(ctx);
-    tsClient.emit("voiceActivity", { clientId: 20, codec: 5 });
-    tsClient.emit("voiceActivity", { clientId: 21, codec: 5 });
+    tsClient.emit("voiceActivity", {
+      clientId: 20,
+      codec: 5,
+      clientUid: "managed-bot-uid=",
+    });
+    // If a UID is momentarily unavailable, the scoped client-id registry is
+    // retained as a fallback for the common same-endpoint case.
+    tsClient.emit("voiceActivity", { clientId: 22, codec: 5 });
+    tsClient.emit("voiceActivity", {
+      clientId: 21,
+      codec: 5,
+      clientUid: "human-uid=",
+    });
 
     expect(handleVoiceActivity).toHaveBeenCalledOnce();
     expect(handleVoiceActivity).toHaveBeenCalledWith(21);
@@ -207,12 +240,19 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
       const managedVoiceClients = new ManagedVoiceClientRegistry();
       const voiceServerScope = { host: "voice.example.com", voicePort: 9987 };
       const owner = {};
-      managedVoiceClients.register(voiceServerScope, 20, owner);
+      managedVoiceClients.register(
+        voiceServerScope,
+        20,
+        owner,
+        "managed-bot-uid=",
+      );
       const ctx = {
         managedVoiceClients,
         voiceServerScope,
         registeredVoiceClientId: 20,
         registeredVoiceClientOwner: owner,
+        registeredVoiceClientScope: voiceServerScope,
+        registeredVoiceClientUid: "managed-bot-uid=",
       };
 
       (BotInstance.prototype as any).unregisterManagedVoiceClient.call(ctx, 1_000);
@@ -220,11 +260,13 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
       // cleanup must still target the scope that owned the old client id.
       ctx.voiceServerScope = { host: "other.example.com", voicePort: 9987 };
       expect(managedVoiceClients.has(voiceServerScope, 20)).toBe(true);
+      expect(managedVoiceClients.hasClientUid("managed-bot-uid=")).toBe(true);
 
       vi.advanceTimersByTime(999);
       expect(managedVoiceClients.has(voiceServerScope, 20)).toBe(true);
       vi.advanceTimersByTime(1);
       expect(managedVoiceClients.has(voiceServerScope, 20)).toBe(false);
+      expect(managedVoiceClients.hasClientUid("managed-bot-uid=")).toBe(false);
     } finally {
       vi.useRealTimers();
     }

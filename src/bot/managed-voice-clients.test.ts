@@ -39,6 +39,7 @@ describe("managed voice client scope normalization", () => {
       }),
     ).toBeNull();
   });
+
 });
 
 describe("ManagedVoiceClientRegistry", () => {
@@ -74,6 +75,50 @@ describe("ManagedVoiceClientRegistry", () => {
     ).toBe(false);
   });
 
+  it("finds a managed bot by stable client UID across network endpoints", () => {
+    const registry = new ManagedVoiceClientRegistry();
+    const owner = Symbol("connection");
+
+    registry.register(
+      { host: "127.0.0.1", voicePort: 9987 },
+      17,
+      owner,
+      "  managed-client-uid=  ",
+    );
+
+    expect(registry.hasClientUid("managed-client-uid=")).toBe(true);
+    expect(
+      registry.has({ host: "192.168.1.10", voicePort: 20_000 }, 17),
+    ).toBe(false);
+  });
+
+  it("keeps a shared managed UID until its last owner unregisters", () => {
+    const registry = new ManagedVoiceClientRegistry();
+    const scope = { host: "203.0.113.4", voicePort: 9987 };
+    const first = Symbol("first connection");
+    const second = Symbol("second connection");
+    registry.register(scope, 18, first, "shared-client-uid=");
+    registry.register(scope, 19, second, "shared-client-uid=");
+
+    expect(registry.unregister(scope, 18, first, "shared-client-uid=")).toBe(true);
+    expect(registry.hasClientUid("shared-client-uid=")).toBe(true);
+    expect(registry.unregister(scope, 19, second, "shared-client-uid=")).toBe(true);
+    expect(registry.hasClientUid("shared-client-uid=")).toBe(false);
+  });
+
+  it("ignores missing or empty client UIDs", () => {
+    const registry = new ManagedVoiceClientRegistry();
+    registry.register(
+      { host: "203.0.113.4", voicePort: 9987 },
+      19,
+      Symbol("connection"),
+      "   ",
+    );
+
+    expect(registry.hasClientUid(undefined)).toBe(false);
+    expect(registry.hasClientUid("   ")).toBe(false);
+  });
+
   it("uses an IPv6-safe scope key", () => {
     const registry = new ManagedVoiceClientRegistry();
     registry.register(
@@ -93,13 +138,21 @@ describe("ManagedVoiceClientRegistry", () => {
     const oldConnection = Symbol("old connection");
     const newConnection = Symbol("new connection");
 
-    registry.register(scope, 12, oldConnection);
-    registry.register(scope, 12, newConnection);
+    registry.register(scope, 12, oldConnection, "managed-client-uid=");
+    registry.register(scope, 12, newConnection, "managed-client-uid=");
 
-    expect(registry.unregister(scope, 12, oldConnection)).toBe(false);
+    // The old UID owner is removed, but the replacement still owns both the
+    // scoped id and the shared stable UID.
+    expect(
+      registry.unregister(scope, 12, oldConnection, "managed-client-uid="),
+    ).toBe(true);
     expect(registry.has(scope, 12)).toBe(true);
-    expect(registry.unregister(scope, 12, newConnection)).toBe(true);
+    expect(registry.hasClientUid("managed-client-uid=")).toBe(true);
+    expect(
+      registry.unregister(scope, 12, newConnection, "managed-client-uid="),
+    ).toBe(true);
     expect(registry.has(scope, 12)).toBe(false);
+    expect(registry.hasClientUid("managed-client-uid=")).toBe(false);
   });
 
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(

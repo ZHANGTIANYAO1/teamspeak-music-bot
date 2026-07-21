@@ -80,8 +80,17 @@ function validClientId(clientId: number): boolean {
   return Number.isSafeInteger(clientId) && clientId > 0;
 }
 
+function normalizeClientUid(clientUid: string | undefined): string | null {
+  if (typeof clientUid !== "string") return null;
+  const normalized = clientUid.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 /**
- * Tracks voice client ids owned by bot connections in this process.
+ * Tracks voice client ids and stable TeamSpeak identities owned by bot
+ * connections in this process. The UID path survives DNS aliases, NAT,
+ * multiple NICs, and dual-stack endpoints; scoped ids remain a fallback when
+ * a sender has not yet appeared in the receiving client's view cache.
  *
  * This class intentionally has no module-level singleton. BotManager owns one
  * instance and injects it into its BotInstances so separate managers remain
@@ -92,15 +101,21 @@ export class ManagedVoiceClientRegistry {
     string,
     Map<number, ManagedVoiceClientOwnerToken>
   >();
+  private readonly ownersByClientUid = new Map<
+    string,
+    Set<ManagedVoiceClientOwnerToken>
+  >();
 
   /**
-   * Register (or replace) the connection that owns a client id.
+   * Register (or replace) the connection that owns a client id and, when
+   * available, add its stable UID to the managed set.
    * Returns false when the scope or client id is invalid.
    */
   register(
     scope: ManagedVoiceClientScope,
     clientId: number,
     ownerToken: ManagedVoiceClientOwnerToken,
+    clientUid?: string,
   ): boolean {
     const key = scopeKey(scope);
     if (!key || !validClientId(clientId)) return false;
@@ -111,6 +126,16 @@ export class ManagedVoiceClientRegistry {
       this.clientsByScope.set(key, clients);
     }
     clients.set(clientId, ownerToken);
+
+    const normalizedUid = normalizeClientUid(clientUid);
+    if (normalizedUid) {
+      let owners = this.ownersByClientUid.get(normalizedUid);
+      if (!owners) {
+        owners = new Set();
+        this.ownersByClientUid.set(normalizedUid, owners);
+      }
+      owners.add(ownerToken);
+    }
     return true;
   }
 
@@ -124,21 +149,39 @@ export class ManagedVoiceClientRegistry {
     scope: ManagedVoiceClientScope,
     clientId: number,
     ownerToken: ManagedVoiceClientOwnerToken,
+    clientUid?: string,
   ): boolean {
     const key = scopeKey(scope);
     if (!key || !validClientId(clientId)) return false;
 
+    let removed = false;
     const clients = this.clientsByScope.get(key);
-    if (!clients || clients.get(clientId) !== ownerToken) return false;
+    if (clients?.get(clientId) === ownerToken) {
+      clients.delete(clientId);
+      if (clients.size === 0) this.clientsByScope.delete(key);
+      removed = true;
+    }
 
-    clients.delete(clientId);
-    if (clients.size === 0) this.clientsByScope.delete(key);
-    return true;
+    const normalizedUid = normalizeClientUid(clientUid);
+    if (normalizedUid) {
+      const owners = this.ownersByClientUid.get(normalizedUid);
+      if (owners?.delete(ownerToken)) removed = true;
+      if (owners?.size === 0) this.ownersByClientUid.delete(normalizedUid);
+    }
+    return removed;
   }
 
   has(scope: ManagedVoiceClientScope, clientId: number): boolean {
     const key = scopeKey(scope);
     if (!key || !validClientId(clientId)) return false;
     return this.clientsByScope.get(key)?.has(clientId) ?? false;
+  }
+
+  /** TeamSpeak client UIDs are stable across endpoint aliases and NAT paths. */
+  hasClientUid(clientUid: string | undefined): boolean {
+    const normalizedUid = normalizeClientUid(clientUid);
+    return normalizedUid
+      ? (this.ownersByClientUid.get(normalizedUid)?.size ?? 0) > 0
+      : false;
   }
 }
