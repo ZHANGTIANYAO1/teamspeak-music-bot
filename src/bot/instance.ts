@@ -3,6 +3,7 @@ import {
   TS3Client,
   type TS3ClientOptions,
   type TS3TextMessage,
+  type TS3VoiceActivity,
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
@@ -21,6 +22,7 @@ import {
   defaultPlatform,
   type BotConfig,
   type SpotifyConfig,
+  type VoiceDuckingConfig,
 } from "../data/config.js";
 import type { JellyfinPlaybackReporter } from "../music/jellyfin.js";
 import { BotProfileManager } from "./profile.js";
@@ -35,6 +37,12 @@ import path from "node:path";
 import { SpotifyController } from "../music/spotify/controller.js";
 import type { SpotifyTrackEndedEvent } from "../music/spotify/backend.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
+import { VoiceDuckingController } from "./voice-ducking.js";
+import {
+  ManagedVoiceClientRegistry,
+  type ManagedVoiceClientOwnerToken,
+  type ManagedVoiceClientScope,
+} from "./managed-voice-clients.js";
 
 /** Reply sent when a non-admin invokes an admin-only chat command. */
 export const COMMAND_DENIED_MESSAGE = "⛔ 需要管理员权限（该命令仅限管理员服务器组）";
@@ -47,6 +55,10 @@ const PLAY_MODE_BY_VALUE: Record<string, PlayMode> = {
   random: PlayMode.Random,
   rloop: PlayMode.RandomLoop,
 };
+
+// Keep a disconnected bot id classified as managed briefly so UDP packets
+// already in flight cannot make another local bot duck during teardown.
+const MANAGED_VOICE_CLIENT_RELEASE_GRACE_MS = 1_000;
 
 /** Fallback message when Spotify audio can't be served (backend unavailable
  *  OR a per-track playTrack failure against a dead/failed sidecar). */
@@ -100,6 +112,8 @@ export interface BotInstanceOptions {
   config: BotConfig;
   logger: Logger;
   avatarStore: AvatarStore;
+  /** Shared across one manager so its bots do not trigger one another. */
+  managedVoiceClients?: ManagedVoiceClientRegistry;
   /** Base dir (under DATA_DIR) for per-bot go-librespot work/config trees. */
   spotifyDataDir?: string;
   /** Process-wide shared Spotify OAuth (single account); injected into the
@@ -139,6 +153,11 @@ export class BotInstance extends EventEmitter {
 
   private tsClient: TS3Client;
   private player: AudioPlayer;
+  private voiceDucking: VoiceDuckingController;
+  private managedVoiceClients: ManagedVoiceClientRegistry;
+  private voiceServerScope: ManagedVoiceClientScope;
+  private registeredVoiceClientId = 0;
+  private registeredVoiceClientOwner: ManagedVoiceClientOwnerToken | null = null;
   private spotifyController: SpotifyController;
   private queue: PlayQueue;
   private neteaseProvider: MusicProvider;
@@ -197,6 +216,16 @@ export class BotInstance extends EventEmitter {
 
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
+    this.voiceDucking = new VoiceDuckingController(
+      this.player,
+      this.config.voiceDucking ?? { enabled: false, volumePercent: 30 },
+    );
+    this.managedVoiceClients =
+      options.managedVoiceClients ?? new ManagedVoiceClientRegistry();
+    this.voiceServerScope = {
+      host: options.tsOptions.host,
+      voicePort: options.tsOptions.port,
+    };
     this.queue = new PlayQueue();
 
     // Restore persisted per-bot player settings (#125): volume + play mode
@@ -358,6 +387,8 @@ export class BotInstance extends EventEmitter {
       // this.connected was never flipped to true. Previously this handler
       // short-circuited on !this.connected, leaving player stuck as "playing".
       this.connected = false;
+      this.unregisterManagedVoiceClient(MANAGED_VOICE_CLIENT_RELEASE_GRACE_MS);
+      this.voiceDucking.reset(true);
       // Cancel any pending live-queue snapshot BEFORE clearing the queue: a
       // debounced snapshot firing after clear() would persist an empty queue
       // (clearQueueState), wiping the state we want to restore on reconnect —
@@ -389,6 +420,14 @@ export class BotInstance extends EventEmitter {
       this._startJellyfinReportPoller();
     });
 
+    this.tsClient.on("voiceActivity", (activity: TS3VoiceActivity) => {
+      if (!this.connected) return;
+      if (this.managedVoiceClients.has(this.voiceServerScope, activity.clientId)) {
+        return;
+      }
+      this.voiceDucking.handleVoiceActivity(activity.clientId);
+    });
+
     // React near-instantly to channel membership changes. The 30s idle
     // poller remains the fallback if any of these events are missed.
     //
@@ -400,8 +439,51 @@ export class BotInstance extends EventEmitter {
       this._resumeIfReturning();
       void this.refreshOccupancy();
     });
-    this.tsClient.on("clientLeave", () => void this.refreshOccupancy());
-    this.tsClient.on("clientMoved", () => void this.refreshOccupancy());
+    this.tsClient.on("clientLeave", (event: { id: number }) => {
+      this.voiceDucking.removeSpeaker(event.id);
+      void this.refreshOccupancy();
+    });
+    this.tsClient.on("clientMoved", (event: { id: number }) => {
+      if (event.id === this.tsClient.getClientId()) {
+        // Moving the bot invalidates every activity deadline from its old
+        // channel even if no individual leave events arrive.
+        this.voiceDucking.reset(false);
+      } else {
+        this.voiceDucking.removeSpeaker(event.id);
+      }
+      void this.refreshOccupancy();
+    });
+  }
+
+  private registerManagedVoiceClient(): void {
+    this.unregisterManagedVoiceClient();
+    const clientId = this.tsClient.getClientId();
+    if (!Number.isSafeInteger(clientId) || clientId <= 0) return;
+
+    const owner = {};
+    if (this.managedVoiceClients.register(this.voiceServerScope, clientId, owner)) {
+      this.registeredVoiceClientId = clientId;
+      this.registeredVoiceClientOwner = owner;
+    }
+  }
+
+  private unregisterManagedVoiceClient(graceMs = 0): void {
+    const clientId = this.registeredVoiceClientId;
+    const owner = this.registeredVoiceClientOwner;
+    const scope = { ...this.voiceServerScope };
+    this.registeredVoiceClientId = 0;
+    this.registeredVoiceClientOwner = null;
+    if (clientId <= 0 || owner === null) return;
+
+    const unregister = () => {
+      this.managedVoiceClients.unregister(scope, clientId, owner);
+    };
+    if (graceMs > 0) {
+      const timer = setTimeout(unregister, graceMs);
+      timer.unref?.();
+    } else {
+      unregister();
+    }
   }
 
   /**
@@ -440,6 +522,13 @@ export class BotInstance extends EventEmitter {
   async connect(): Promise<void> {
     this.disconnectEmitted = false;
     await this.tsClient.connect();
+    const resolvedEndpoint = this.tsClient.getResolvedVoiceEndpoint();
+    if (resolvedEndpoint) {
+      this.voiceServerScope = {
+        host: resolvedEndpoint.host,
+        voicePort: resolvedEndpoint.port,
+      };
+    }
     // Race guard: if disconnect() was called while the handshake was
     // awaiting, don't flip connected back to true — that would leave the
     // bot in an inconsistent state (externally "connected" but the tsClient
@@ -448,6 +537,12 @@ export class BotInstance extends EventEmitter {
       throw new Error("Connect aborted by concurrent disconnect");
     }
     this.connected = true;
+    // Register only after the outer lifecycle race guard succeeds. The TS
+    // wrapper emits its own "connected" event before connect() resolves, so
+    // registering in that callback could let a cancelled, late handshake
+    // overwrite a newer instance that reused the same client id.
+    this.voiceDucking.reset(true);
+    this.registerManagedVoiceClient();
     this.profileManager.onConnect();
     this.emit("connected");
     // Feature 2 (#119): restore + resume the live queue persisted before the
@@ -458,6 +553,7 @@ export class BotInstance extends EventEmitter {
 
   disconnect(): void {
     this._cancelIdleTimer();
+    this.voiceDucking.reset(true);
     // Cancel any pending live-queue snapshot before clearing so it can't fire
     // afterwards and persist an empty queue over the state we keep for restore
     // (#119). The disconnected handler cancels too, but do it here as well for
@@ -478,6 +574,10 @@ export class BotInstance extends EventEmitter {
       this.emit("disconnected");
     }
     this.tsClient.disconnect();
+    // Stop outbound PCM and initiate the TeamSpeak disconnect before removing
+    // our id from the shared registry, minimizing the window in which another
+    // managed bot could mistake our final packet for a human speaker.
+    this.unregisterManagedVoiceClient(MANAGED_VOICE_CLIENT_RELEASE_GRACE_MS);
   }
 
   /** 外部更新 idleTimeoutMinutes（由 API 保存时调用） */
@@ -498,6 +598,12 @@ export class BotInstance extends EventEmitter {
       this.autoPaused = false;
       this.emit("stateChange");
     }
+  }
+
+  /** Hot-apply voice ducking without mutating the user's base player volume. */
+  updateVoiceDucking(settings: VoiceDuckingConfig): void {
+    this.config.voiceDucking = { ...settings };
+    this.voiceDucking.updateSettings(settings);
   }
 
   private _startIdlePoller(): void {

@@ -48,6 +48,79 @@ describe("config", () => {
     expect(config).toEqual(getDefaultConfig());
   });
 
+  it("defaults voice ducking to disabled at 30 percent", () => {
+    expect(getDefaultConfig().voiceDucking).toEqual({
+      enabled: false,
+      volumePercent: 30,
+    });
+  });
+
+  it("fills voiceDucking defaults for legacy and partial configs", () => {
+    const dir = makeTmpDir();
+    const legacyPath = join(dir, "legacy.json");
+    writeFileSync(legacyPath, JSON.stringify({ webPort: 4000 }));
+    expect(loadConfig(legacyPath).voiceDucking).toEqual({
+      enabled: false,
+      volumePercent: 30,
+    });
+
+    const partialPath = join(dir, "partial.json");
+    writeFileSync(partialPath, JSON.stringify({ voiceDucking: { enabled: true } }));
+    expect(loadConfig(partialPath).voiceDucking).toEqual({
+      enabled: true,
+      volumePercent: 30,
+    });
+  });
+
+  it("loadConfig preserves valid voiceDucking values including range endpoints", () => {
+    const dir = makeTmpDir();
+    for (const volumePercent of [0, 37.5, 100]) {
+      const path = join(dir, `voice-ducking-${volumePercent}.json`);
+      writeFileSync(
+        path,
+        JSON.stringify({ voiceDucking: { enabled: true, volumePercent } }),
+      );
+      expect(loadConfig(path).voiceDucking).toEqual({ enabled: true, volumePercent });
+    }
+  });
+
+  it("loadConfig strictly sanitizes malformed voiceDucking values", () => {
+    const dir = makeTmpDir();
+    const malformed: Array<{ name: string; json: string }> = [
+      { name: "null-block", json: JSON.stringify({ voiceDucking: null }) },
+      { name: "array-block", json: JSON.stringify({ voiceDucking: [true, 10] }) },
+      { name: "string-block", json: JSON.stringify({ voiceDucking: "on" }) },
+      {
+        name: "wrong-types",
+        json: JSON.stringify({ voiceDucking: { enabled: "yes", volumePercent: "25" } }),
+      },
+      {
+        name: "below-range",
+        json: JSON.stringify({ voiceDucking: { enabled: true, volumePercent: -1 } }),
+      },
+      {
+        name: "above-range",
+        json: JSON.stringify({ voiceDucking: { enabled: true, volumePercent: 101 } }),
+      },
+      // JSON.parse("1e309") produces Infinity, exercising the finite-number guard.
+      {
+        name: "non-finite",
+        json: '{"voiceDucking":{"enabled":true,"volumePercent":1e309}}',
+      },
+    ];
+
+    for (const testCase of malformed) {
+      const path = join(dir, `${testCase.name}.json`);
+      writeFileSync(path, testCase.json);
+      const loaded = loadConfig(path).voiceDucking;
+      if (testCase.name === "below-range" || testCase.name === "above-range" || testCase.name === "non-finite") {
+        expect(loaded).toEqual({ enabled: true, volumePercent: 30 });
+      } else {
+        expect(loaded).toEqual({ enabled: false, volumePercent: 30 });
+      }
+    }
+  });
+
   it("defaults to the online sources with jellyfin as opt-in (disabled)", () => {
     const config = getDefaultConfig();
     expect(config.enabledProviders).toEqual(["netease", "qq", "bilibili", "youtube", "kugou"]);

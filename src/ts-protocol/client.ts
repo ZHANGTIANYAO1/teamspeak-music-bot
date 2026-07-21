@@ -15,6 +15,7 @@ import {
   type ClientInfo,
   type ClientLeftViewEvent,
   type ClientMovedEvent,
+  type VoiceData,
   type FileUploadInfo,
 } from "@honeybbq/teamspeak-client";
 import type { Logger } from "../logger.js";
@@ -23,6 +24,10 @@ import {
   type ServerProtocol,
 } from "./protocol-detect.js";
 import { TS6HttpQuery } from "./http-query.js";
+import {
+  TrackingVoiceEndpointResolver,
+  type ResolvedVoiceEndpoint,
+} from "./voice-endpoint.js";
 
 export { CODEC_OPUS_MUSIC } from "./voice.js";
 export type { ServerProtocol } from "./protocol-detect.js";
@@ -65,6 +70,13 @@ export interface TS3TextMessage {
   invokerGroups: string[]; // sender's TS server-group ids; [] when not in view cache
 }
 
+/** Lightweight voice-packet signal used for activity detection. The encoded
+ * payload is intentionally not forwarded beyond this protocol wrapper. */
+export interface TS3VoiceActivity {
+  clientId: number;
+  codec: number;
+}
+
 /**
  * Map the library's TextMessage to our wrapper. Preserves invokerGroups (the
  * sender's TS server groups), which the library populates only when the sender
@@ -91,6 +103,7 @@ export class TS3Client extends EventEmitter {
   private detectedProtocol: ServerProtocol = "unknown";
   private httpQuery: TS6HttpQuery | null = null;
   private udpErrorTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly voiceEndpointResolver = new TrackingVoiceEndpointResolver();
 
   constructor(private options: TS3ClientOptions, logger: Logger) {
     super();
@@ -114,6 +127,7 @@ export class TS3Client extends EventEmitter {
   }
 
   async connect(): Promise<void> {
+    this.voiceEndpointResolver.reset();
     // Clean up any existing connection before creating a new one
     if (this.client) {
       this.logger.info("Cleaning up previous connection before reconnecting");
@@ -213,6 +227,7 @@ export class TS3Client extends EventEmitter {
       // Forward server password to the protocol library so it can be
       // included in clientinit for password-protected servers
       serverPassword: this.options.serverPassword,
+      resolver: this.voiceEndpointResolver,
       logger: {
         debug: (msg) => this.logger.debug(msg),
         info: (msg) => this.logger.info(msg),
@@ -224,6 +239,17 @@ export class TS3Client extends EventEmitter {
     this.client.on("textMessage", (msg: TextMessage) => {
       if (msg.invokerID === this.clientId) return;
       this.emit("textMessage", toTS3TextMessage(msg));
+    });
+
+    this.client.on("voiceData", (voice: VoiceData) => {
+      // The library normally suppresses our own packets; retain the explicit
+      // guard so a future protocol change cannot make a bot duck itself.
+      if (voice.clientId === this.clientId) return;
+      const activity: TS3VoiceActivity = {
+        clientId: voice.clientId,
+        codec: voice.codec,
+      };
+      this.emit("voiceActivity", activity);
     });
 
     this.client.on("disconnected", (err) => {
@@ -428,6 +454,11 @@ export class TS3Client extends EventEmitter {
 
   getClientId(): number {
     return this.clientId;
+  }
+
+  /** Actual endpoint selected by the SDK's SRV/TSDNS discovery and DNS lookup. */
+  getResolvedVoiceEndpoint(): ResolvedVoiceEndpoint | null {
+    return this.voiceEndpointResolver.getEndpoint();
   }
 
   disconnect(): void {

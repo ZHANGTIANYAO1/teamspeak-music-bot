@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import { BotInstance, COMMAND_DENIED_MESSAGE, spotifyPortsForBotId } from "./instance.js";
 import type { BotInstanceOptions } from "./instance.js";
 import { PlayQueue, PlayMode } from "../audio/queue.js";
@@ -11,6 +12,7 @@ import type { MusicProvider } from "../music/provider.js";
 import type { BotDatabase } from "../data/database.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { BotConfig } from "../data/config.js";
+import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
 
 // Constructing a real BotInstance is heavy (spawns a TS3Client, AudioPlayer,
 // reads avatars, etc.), and runExclusive only touches a single private field
@@ -119,6 +121,113 @@ describe("BotInstance.runExclusive — serialization", () => {
       "Z-start",
       "Z-end",
     ]);
+  });
+});
+
+describe("BotInstance voice-ducking lifecycle integration", () => {
+  const connect = BotInstance.prototype.connect as unknown as (
+    this: Record<string, any>,
+  ) => Promise<void>;
+
+  function makeConnectContext(connectPromise: Promise<void>) {
+    return {
+      disconnectEmitted: false,
+      connected: false,
+      tsClient: {
+        connect: vi.fn(() => connectPromise),
+        getResolvedVoiceEndpoint: vi.fn(() => ({ host: "203.0.113.20", port: 12000 })),
+      },
+      voiceServerScope: { host: "voice-alias.example.com", voicePort: 9987 },
+      voiceDucking: { reset: vi.fn() },
+      registerManagedVoiceClient: vi.fn(),
+      profileManager: { onConnect: vi.fn() },
+      emit: vi.fn(),
+      restoreQueueFromSnapshot: vi.fn(async () => {}),
+    };
+  }
+
+  it("registers its managed client only after a successful outer connect", async () => {
+    const ctx = makeConnectContext(Promise.resolve());
+
+    await connect.call(ctx);
+
+    expect(ctx.connected).toBe(true);
+    expect(ctx.voiceServerScope).toEqual({ host: "203.0.113.20", voicePort: 12000 });
+    expect(ctx.voiceDucking.reset).toHaveBeenCalledWith(true);
+    expect(ctx.registerManagedVoiceClient).toHaveBeenCalledOnce();
+    expect(ctx.profileManager.onConnect).toHaveBeenCalledOnce();
+  });
+
+  it("does not register a late handshake after disconnect aborted it", async () => {
+    const handshake = deferred();
+    const ctx = makeConnectContext(handshake.promise);
+
+    const result = connect.call(ctx);
+    ctx.disconnectEmitted = true;
+    handshake.resolve();
+
+    await expect(result).rejects.toThrow("Connect aborted by concurrent disconnect");
+    expect(ctx.connected).toBe(false);
+    expect(ctx.registerManagedVoiceClient).not.toHaveBeenCalled();
+    expect(ctx.voiceDucking.reset).not.toHaveBeenCalled();
+  });
+
+  it("routes human voice activity but filters another managed bot", () => {
+    const tsClient = new EventEmitter() as EventEmitter & {
+      getClientId(): number;
+    };
+    tsClient.getClientId = () => 10;
+    const managedVoiceClients = new ManagedVoiceClientRegistry();
+    const voiceServerScope = { host: "voice.example.com", voicePort: 9987 };
+    managedVoiceClients.register(voiceServerScope, 20, {});
+    const handleVoiceActivity = vi.fn();
+    const ctx = {
+      tsClient,
+      connected: true,
+      managedVoiceClients,
+      voiceServerScope,
+      voiceDucking: {
+        handleVoiceActivity,
+        removeSpeaker: vi.fn(),
+        reset: vi.fn(),
+      },
+    } as Record<string, any>;
+
+    (BotInstance.prototype as any).setupTsEvents.call(ctx);
+    tsClient.emit("voiceActivity", { clientId: 20, codec: 5 });
+    tsClient.emit("voiceActivity", { clientId: 21, codec: 5 });
+
+    expect(handleVoiceActivity).toHaveBeenCalledOnce();
+    expect(handleVoiceActivity).toHaveBeenCalledWith(21);
+  });
+
+  it("keeps a disconnecting bot registered during the in-flight packet grace", () => {
+    vi.useFakeTimers();
+    try {
+      const managedVoiceClients = new ManagedVoiceClientRegistry();
+      const voiceServerScope = { host: "voice.example.com", voicePort: 9987 };
+      const owner = {};
+      managedVoiceClients.register(voiceServerScope, 20, owner);
+      const ctx = {
+        managedVoiceClients,
+        voiceServerScope,
+        registeredVoiceClientId: 20,
+        registeredVoiceClientOwner: owner,
+      };
+
+      (BotInstance.prototype as any).unregisterManagedVoiceClient.call(ctx, 1_000);
+      // A reconnect may resolve to a new endpoint before the grace expires;
+      // cleanup must still target the scope that owned the old client id.
+      ctx.voiceServerScope = { host: "other.example.com", voicePort: 9987 };
+      expect(managedVoiceClients.has(voiceServerScope, 20)).toBe(true);
+
+      vi.advanceTimersByTime(999);
+      expect(managedVoiceClients.has(voiceServerScope, 20)).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(managedVoiceClients.has(voiceServerScope, 20)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

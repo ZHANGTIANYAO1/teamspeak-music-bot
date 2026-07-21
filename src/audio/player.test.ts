@@ -216,6 +216,78 @@ const silentLogger = {
   },
 } as unknown as Logger;
 
+function applyPlayerVolume(player: AudioPlayer, pcm: Buffer): Buffer {
+  return (
+    player as unknown as { applyVolume(input: Buffer): Buffer }
+  ).applyVolume(pcm);
+}
+
+function stereoPcm(sample: number, frames = 2): Buffer {
+  const pcm = Buffer.alloc(frames * 4);
+  for (let offset = 0; offset < pcm.length; offset += 2) {
+    pcm.writeInt16LE(sample, offset);
+  }
+  return pcm;
+}
+
+describe("AudioPlayer transient ducking gain", () => {
+  it("layers ducking on the PCM path without changing the user's base volume", () => {
+    const player = new AudioPlayer(silentLogger);
+    player.setVolume(100);
+    player.setDuckingGain(0.3);
+
+    const adjusted = applyPlayerVolume(player, stereoPcm(10_000));
+
+    expect(adjusted.readInt16LE(0)).toBe(3_000);
+    expect(adjusted.readInt16LE(2)).toBe(3_000);
+    expect(player.getVolume()).toBe(100);
+    expect(player.getDuckingGain()).toBe(0.3);
+  });
+
+  it("multiplies the transient gain by the existing base-volume curve", () => {
+    const player = new AudioPlayer(silentLogger);
+    player.setVolume(50);
+    player.setDuckingGain(0.5);
+
+    const adjusted = applyPlayerVolume(player, stereoPcm(10_000));
+    expect(adjusted.readInt16LE(0)).toBe(
+      Math.round(10_000 * volumeToFactor(50) * 0.5),
+    );
+  });
+
+  it("interpolates ramps smoothly across each stereo PCM frame", () => {
+    let now = 100;
+    const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      const player = new AudioPlayer(silentLogger);
+      player.setVolume(100);
+      player.setDuckingGain(0.2, 100);
+
+      now = 150;
+      expect(player.getDuckingGain()).toBeCloseTo(0.6, 8);
+      const adjusted = applyPlayerVolume(player, stereoPcm(10_000));
+
+      // At t=150 the ramp is 0.6; at the end of this 20 ms frame it is 0.44.
+      expect(adjusted.readInt16LE(0)).toBe(6_000);
+      expect(adjusted.readInt16LE(2)).toBe(6_000);
+      expect(adjusted.readInt16LE(4)).toBe(4_400);
+      expect(adjusted.readInt16LE(6)).toBe(4_400);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("clamps transient gain and ignores a non-finite update", () => {
+    const player = new AudioPlayer(silentLogger);
+    player.setDuckingGain(-1);
+    expect(player.getDuckingGain()).toBe(0);
+    player.setDuckingGain(2);
+    expect(player.getDuckingGain()).toBe(1);
+    player.setDuckingGain(Number.NaN);
+    expect(player.getDuckingGain()).toBe(1);
+  });
+});
+
 // A readable we fully control: no underlying source; we push PCM manually and
 // keep it open (never push(null)) to model the long-lived go-librespot sidecar.
 function openPcmReadable(): Readable {

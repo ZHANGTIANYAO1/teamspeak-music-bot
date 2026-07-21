@@ -15,6 +15,7 @@ import type { ServerProtocol } from "../ts-protocol/client.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { PermissionStore } from "../data/permissions.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
+import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
 
 /**
  * Run bot.connect() with a hard deadline. If the handshake hangs (e.g. the
@@ -72,6 +73,7 @@ export interface CreateBotParams {
 
 export class BotManager extends EventEmitter {
   private bots = new Map<string, BotInstance>();
+  private readonly managedVoiceClients = new ManagedVoiceClientRegistry();
   private neteaseProvider: MusicProvider;
   private qqProvider: MusicProvider;
   private bilibiliProvider: MusicProvider;
@@ -161,6 +163,7 @@ export class BotManager extends EventEmitter {
       config: this.config,
       logger: this.logger,
       avatarStore: this.avatarStore,
+      managedVoiceClients: this.managedVoiceClients,
       spotifyDataDir: this.spotifyDataDir,
       spotifyOAuth: this.spotifyOAuth,
     });
@@ -305,6 +308,7 @@ export class BotManager extends EventEmitter {
         config: this.config,
         logger: this.logger,
         avatarStore: this.avatarStore,
+        managedVoiceClients: this.managedVoiceClients,
         spotifyDataDir: this.spotifyDataDir,
         spotifyOAuth: this.spotifyOAuth,
       });
@@ -363,6 +367,7 @@ export class BotManager extends EventEmitter {
         config: this.config,
         logger: this.logger,
         avatarStore: this.avatarStore,
+        managedVoiceClients: this.managedVoiceClients,
         spotifyDataDir: this.spotifyDataDir,
         spotifyOAuth: this.spotifyOAuth,
       });
