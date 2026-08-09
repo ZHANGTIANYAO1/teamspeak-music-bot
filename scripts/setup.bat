@@ -10,8 +10,11 @@ title TSMusicBot Setup
 ::  - 自动修复 PowerShell 环境变量
 :: ============================================================
 
-set "SCRIPT_VERSION=2.1"
+set "SCRIPT_VERSION=2.2"
 set "MIN_NODE_MAJOR=20"
+:: Newest Node major this project is regularly tested against. Anything above
+:: still works, it just may have no prebuilt addons and fall back to a source build.
+set "TESTED_NODE_MAJOR=22"
 set "LOG_FILE=%~dp0..\setup.log"
 set "FAILED=0"
 
@@ -64,12 +67,37 @@ for /f "tokens=1 delims=v." %%a in ("%NODE_VER%") do set "NODE_MAJOR=%%a"
 call :log "Node.js version: %NODE_VER%"
 echo [OK] Node.js found: %NODE_VER%
 
-if %NODE_MAJOR% LSS %MIN_NODE_MAJOR% (
-    call :error "Node.js version too old. Need %MIN_NODE_MAJOR%+, found %NODE_VER%."
+:: The supported floor is not just a major version, so let node decide:
+:: @honeybbq/teamspeak-client needs >=20.19, @sansenjian/qq-music-api needs
+:: >=20.17 / >=22.9, and the odd majors (21 / 23) are excluded by
+:: better-sqlite3 and vitest. Keep this in sync with "engines" in package.json.
+node -e "const v=process.versions.node.split('.').map(Number); process.exit((v[0]===20&&v[1]>=19)||(v[0]===22&&v[1]>=12)||v[0]>=24?0:1)"
+if errorlevel 1 (
+    call :error "Node.js %NODE_VER% is not supported. Use Node 20.19+ LTS or Node 22.12+ LTS."
+    echo         Download: https://nodejs.org/  or  https://nodejs.cn/
     pause
     exit /b 1
 )
+
+:: Not fatal: setup now rebuilds the native modules for whatever ABI you run,
+:: so newer Node majors work - they are just slower to install.
+:: NOTE: keep every line inside these parenthesised blocks pure ASCII.
+:: cmd.exe mis-tracks its file offset when a block contains multi-byte UTF-8
+:: characters and starts eating the "echo " prefix of following lines.
+:: Bilingual guidance lives in the Node scripts, which print UTF-8 reliably.
+if %NODE_MAJOR% GTR %TESTED_NODE_MAJOR% (
+    echo [WARN] Node %NODE_VER% is newer than the tested LTS line, Node 20 / Node 22.
+    echo        Newer Node majors may have no prebuilt opus / better-sqlite3,
+    echo        so setup falls back to a source build - slower, needs C++ build tools.
+    echo        Recommended: Node 20 LTS or Node 22 LTS - https://nodejs.org/ or https://nodejs.cn/
+    echo        This is only a warning; setup still builds the binaries for %NODE_VER%.
+    call :log "[WARN] Node major %NODE_MAJOR% is newer than tested LTS %TESTED_NODE_MAJOR%"
+)
 echo.
+
+:: Native addons are tied to one Node ABI. If node_modules was built by a
+:: different Node major, step 4b below detects it and repairs it.
+call :log "Node ABI for this install: see node_modules\.tsmusicbot-abi after step 4b"
 
 :: ============================================================
 :: Step 2: Check npm
@@ -143,16 +171,40 @@ echo [OK] Backend dependencies installed.
 echo.
 
 :: ============================================================
-:: Step 4b: Download native binaries from CDN
+:: Step 4b: Verify / download / repair native binaries (ABI aware)
 :: ============================================================
-call :step "4b/7" "Downloading native binaries"
+call :step "4b/7" "Checking native binaries"
 
-node scripts/download-binaries.mjs %CDN_MIRROR% >>"%LOG_FILE%" 2>&1
-if errorlevel 1 (
-    echo [WARN] Binary download had issues. Check %LOG_FILE% for details.
-) else (
-    echo [OK] Native binaries installed.
+echo Verifying native modules for %NODE_VER% and downloading whatever is missing.
+echo Progress is shown below; the full transcript goes to the log file.
+echo.
+
+:: The .mjs writes progress to stderr and - with TSMB_BINARY_LOG_STDOUT=1 - the
+:: same lines to stdout. Redirecting only stdout therefore keeps the log complete
+:: while the user still sees live progress instead of a frozen window.
+set "TSMB_BINARY_LOG_STDOUT=1"
+node scripts\download-binaries.mjs %CDN_MIRROR% >>"%LOG_FILE%"
+set "BIN_RESULT=!errorlevel!"
+set "TSMB_BINARY_LOG_STDOUT="
+
+:: ASCII only inside these blocks - see the note near the Node version check.
+if not "!BIN_RESULT!"=="0" (
+    set "FAILED=1"
+    call :error "A required native module is unusable - see the [binary] lines above."
+    echo         Required: @discordjs/opus and better-sqlite3.
+    echo         Full log: %LOG_FILE%
 )
+
+if "!FAILED!"=="1" (
+    echo.
+    echo Setup aborted. Fix the problem above and run this script again.
+    call :log "Setup aborted at step 4b"
+    pause
+    exit /b 1
+)
+
+echo [OK] Native binaries ready for %NODE_VER%.
+echo      ABI recorded in node_modules\.tsmusicbot-abi
 echo.
 
 :: ============================================================

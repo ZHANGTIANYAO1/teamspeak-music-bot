@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Node.js-20+-339933?logo=nodedotjs&logoColor=white" />
+  <img src="https://img.shields.io/badge/Node.js-20%20%7C%2022%20LTS-339933?logo=nodedotjs&logoColor=white" />
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" />
   <img src="https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white" />
   <img src="https://img.shields.io/badge/许可证-MIT-green" />
@@ -62,20 +62,25 @@
 
 ### 方式一：Windows 一键部署（最简单）
 
-只需电脑有网络连接，其他一切自动安装。
+先装好 Node.js，其余依赖（含内置 FFmpeg）全部自动安装。
 
 ```
-1. 下载或 clone 本项目
-2. 双击 scripts\setup.bat      （首次安装，自动安装 Node.js 和所有依赖）
-3. 双击 scripts\start.bat      （启动机器人）
-4. 浏览器打开 http://localhost:3000
+1. 安装 Node.js 20 LTS 或 22 LTS（https://nodejs.org/ 或 https://nodejs.cn/）
+2. 下载或 clone 本项目
+3. 双击 scripts\setup.bat      （安装依赖并构建，不含 Node.js 本身）
+4. 双击 scripts\start.bat      （启动机器人）
+5. 浏览器打开 http://localhost:3000
 ```
 
-> `setup.bat` 会自动通过 winget 安装 Node.js（如果未安装），运行 `npm install` 安装所有依赖（包括内置 FFmpeg），最后构建项目。之后每次只需双击 `start.bat` 启动。
+> **先装 Node.js 20 LTS 或 22 LTS**（[nodejs.org](https://nodejs.org/) / 国内镜像 [nodejs.cn](https://nodejs.cn/)）。`setup.bat` 检测到没装 Node 时会给出下载地址并退出，不会替你安装。
+>
+> 之后 `setup.bat` 会运行 `npm install` 安装所有依赖（包括内置 FFmpeg），按当前 Node 版本准备好原生模块，最后构建项目。之后每次只需双击 `start.bat` 启动。
+>
+> 更新的 Node 大版本（如 24）也能用，但通常没有现成的 opus / better-sqlite3 预编译包，安装脚本会改用源码编译，需要 C/C++ 构建工具且耗时更久——所以推荐 20 / 22 LTS。**装好之后不要再换 Node 大版本**：原生模块只能在编译它的那个版本上加载，换版本后必须重新运行 `setup.bat`（脚本会自动检测并重装，见下方常见问题）。
 
 ### 方式二：手动安装（所有系统）
 
-**前置条件：** [Node.js 20+](https://nodejs.org/) 和一个 TeamSpeak 服务器（TS3/TS5/TS6 均可）。
+**前置条件：** [Node.js 20 LTS 或 22 LTS](https://nodejs.org/)（推荐；更新的大版本可用但需要源码编译原生模块）和一个 TeamSpeak 服务器（TS3/TS5/TS6 均可）。
 FFmpeg **已自动内置**，无需手动安装。
 
 ```bash
@@ -505,7 +510,7 @@ teamspeak-music-bot/
 
 | 层级 | 技术 |
 |------|------|
-| **运行时** | Node.js 20+, TypeScript 5 |
+| **运行时** | Node.js 20 / 22 LTS, TypeScript 5 |
 | **后端框架** | Express 4, WebSocket (ws) |
 | **数据库** | better-sqlite3 (SQLite) |
 | **音频处理** | FFmpeg (ffmpeg-static 内置), @discordjs/opus |
@@ -796,6 +801,9 @@ A：支持。本项目内置 TS3/TS6 双协议支持，连接时会自动检测�
 
 **Q：机器人连接了但 TeamSpeak 中听不到音乐？**
 A：确保机器人和你在同一个频道。检查音量（`!vol 75`）。部分 VIP 歌曲需要先登录账号。
+
+**Q：启动报 `NODE_MODULE_VERSION 137 ... requires 127`，或提示找不到 `opus.node`？**
+A：换过 Node 大版本了。原生模块（`@discordjs/opus`、`better-sqlite3`）编译时绑定了一个 Node ABI（Node 20 = 115、22 = 127、24 = 137），换版本后旧的 `.node` 就再也加载不了。**重新运行一次 `scripts\setup.bat`（Linux/macOS 是 `bash scripts/setup.sh`）即可**——安装脚本会实际加载一遍每个原生模块，发现和当前 Node 不匹配就自动重新下载/编译，替换过程中失败也会把原来的文件还原回去。`start.bat` 和 `npm start` 在启动前也会先做这个检查，直接告诉你哪个模块对不上、分别是哪个 ABI，而不是抛一串看不懂的堆栈。想彻底重来就删掉 `node_modules` 和 `web\node_modules` 再跑一次 `setup.bat`。
 
 **Q：提示"无法获取播放链接"？**
 A：在设置页面扫码登录音乐账号。许多歌曲需要登录后才能播放。

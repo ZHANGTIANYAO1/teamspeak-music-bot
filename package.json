@@ -3,10 +3,15 @@
   "version": "0.1.0",
   "description": "TeamSpeak music bot with NetEase Cloud Music and QQ Music support",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc && npm run build:web",
     "build:web": "cd web && npm run build",
+    "check:native": "node scripts/check-native.mjs",
+    "prestart": "node scripts/check-native.mjs",
     "start": "node dist/index.js",
     "play": "node dist/index.js",
     "test": "vitest run",

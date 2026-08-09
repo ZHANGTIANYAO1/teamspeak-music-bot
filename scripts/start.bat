@@ -29,6 +29,19 @@ if not exist "dist" (
     exit /b 1
 )
 
+:: Preflight: do the compiled native modules match THIS Node version?
+:: Switching Node majors after setup leaves node_modules built for the old ABI;
+:: without this check the bot dies mid-startup with a NODE_MODULE_VERSION stack.
+:: check-native.mjs prints the bilingual explanation itself; keep the lines in
+:: this block pure ASCII (cmd.exe garbles multi-byte text inside blocks).
+node scripts\check-native.mjs
+if errorlevel 1 (
+    echo.
+    echo Please run scripts\setup.bat to rebuild the native modules.
+    pause
+    exit /b 1
+)
+
 :: Ensure PowerShell is in PATH (fix for jdymusic CDN playback on some systems)
 where powershell >nul 2>&1
 if errorlevel 1 (
@@ -38,6 +51,9 @@ if errorlevel 1 (
 )
 
 :: Start the application
+echo WebUI: http://localhost:3000
+echo Press Ctrl+C to stop.
+echo.
 node dist/index.js
 
 pause
