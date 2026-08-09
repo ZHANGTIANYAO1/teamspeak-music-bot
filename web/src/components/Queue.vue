@@ -26,6 +26,7 @@
         :key="`${song.id}-${i}`"
         class="queue-item"
         :class="{ active: store.currentSong?.id === song.id }"
+        @click="onRowClick($event, i)"
         @dblclick="playAtIndex(i)"
       >
         <CoverArt :url="song.coverUrl" :size="32" :radius="4" />
@@ -33,7 +34,7 @@
           <div class="queue-song-name">{{ song.name }}</div>
           <div class="queue-song-artist">{{ song.artist }}</div>
         </div>
-        <button v-if="can('player.queue') || guestCan('removeClear')" class="remove-btn" @click="removeSong(i)" title="移除">
+        <button v-if="can('player.queue') || guestCan('removeClear')" class="remove-btn" @click.stop="removeSong(i)" title="移除">
           <Icon icon="mdi:close" />
         </button>
       </div>
@@ -70,6 +71,21 @@ async function playAtIndex(index: number) {
   if (!can('player.control')) return;
   await store.playAtIndex(index);
   await store.fetchQueue();
+}
+
+// Touch has no `dblclick`, so double-click-to-play was dead in the mobile queue
+// drawer (#143). Same per-event touch rule as SongCard.vue — see the full
+// rationale in the `isTouchClick` comment there. Permission gating stays in
+// playAtIndex(); the remove button uses @click.stop so it can't double-fire.
+function isTouchClick(e: MouseEvent): boolean {
+  const pointerType = (e as PointerEvent).pointerType;
+  if (pointerType) return pointerType === 'touch' || pointerType === 'pen';
+  return window.matchMedia?.('(pointer: coarse)').matches ?? false;
+}
+
+function onRowClick(e: MouseEvent, index: number) {
+  if (!isTouchClick(e)) return;
+  void playAtIndex(index);
 }
 
 async function removeSong(index: number) {
@@ -204,5 +220,16 @@ async function clearAndStop() {
   transition: opacity var(--transition-fast);
   color: var(--text-tertiary);
   &:hover { color: var(--text-primary); }
+}
+
+// Touch devices have no :hover, so the parent-hover-reveals-the-button pattern
+// leaves an *invisible but still tappable* remove button on the right edge of
+// every row. Now that a single tap on the row plays (#143), that invisible
+// target reads as "I tapped to play and it deleted the song" — show it, same as
+// .song-actions in SongCard.vue.
+@media (pointer: coarse) {
+  .remove-btn {
+    opacity: 1;
+  }
 }
 </style>

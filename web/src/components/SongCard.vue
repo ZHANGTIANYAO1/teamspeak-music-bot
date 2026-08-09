@@ -1,5 +1,5 @@
 <template>
-  <div class="song-card" :class="{ active }" @dblclick="showPlay && $emit('play')">
+  <div class="song-card" :class="{ active }" @click="onRowClick" @dblclick="showPlay && $emit('play')">
     <div class="song-index">{{ index }}</div>
     <CoverArt :url="song.coverUrl" :size="36" :radius="6" />
     <div class="song-info">
@@ -51,11 +51,40 @@ const showPlay = computed(() => can('player.control') || guestCan('playNow'));
 const showPlayNext = computed(() => can('player.control') || guestCan('playNext'));
 const showAdd = computed(() => can('player.queue') || guestCan('addToQueue'));
 
-defineEmits<{
+const emit = defineEmits<{
   play: [];
   playNext: [];
   add: [];
 }>();
+
+/**
+ * Was this click made with a finger/stylus rather than a mouse? (#143)
+ *
+ * `dblclick` is mouse-only and never fires on touch, so double-tap-to-play was
+ * simply dead on phones. A single *tap* plays instead, while a single mouse
+ * click must keep doing nothing — otherwise desktop behaviour changes and the
+ * surviving dblclick would fire play twice.
+ *
+ * The check is per-EVENT, not per-device: a `click` is a PointerEvent in modern
+ * browsers, so pointerType describes how *this* click was made. A global
+ * matchMedia('(pointer: coarse)') check reports only the *primary* pointer and
+ * is therefore wrong on hybrid laptops (touchscreen + trackpad); it is used only
+ * as a fallback for browsers that give us no pointerType.
+ */
+function isTouchClick(e: MouseEvent): boolean {
+  const pointerType = (e as PointerEvent).pointerType;
+  if (pointerType) return pointerType === 'touch' || pointerType === 'pen';
+  return window.matchMedia?.('(pointer: coarse)').matches ?? false;
+}
+
+// Listening on `click` rather than `pointerup` on purpose: the browser already
+// suppresses the click that ended a scroll gesture, so a tap that was really the
+// start of a flick can't hijack playback for everyone in the channel.
+// (The action buttons stop propagation, so they never double-fire this.)
+function onRowClick(e: MouseEvent) {
+  if (!showPlay.value || !isTouchClick(e)) return;
+  emit('play');
+}
 
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
