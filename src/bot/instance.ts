@@ -1113,9 +1113,9 @@ export class BotInstance extends EventEmitter {
   /**
    * Resolve a !play/!add/!playnext argument into a single Song, supporting three
    * forms (issue #90):
-   *   1) "#N"          — the Nth result of the previous !search
-   *   2) id:<id> / URL — an exact song (disambiguates same-name songs)
-   *   3) plain text    — search, returning the single most-popular hit (legacy)
+   *   1) "#N"           — the Nth result of the previous !search
+   *   2) id <id> / URL  — an exact song (disambiguates same-name songs)
+   *   3) plain text     — search, returning the single most-popular hit (legacy)
    */
   private async resolvePlayQuery(cmd: ParsedCommand): Promise<{ song?: Song; error?: string }> {
     const args = (cmd.args ?? "").trim();
@@ -1131,7 +1131,7 @@ export class BotInstance extends EventEmitter {
       return { song: this.lastSearchResults[sel - 1] };
     }
 
-    // 2) id:/URL — fetch that exact song.
+    // 2) id/URL — fetch that exact song.
     const ref = parseSongRef(args);
     if (ref) {
       if (ref.platform) this.assertProviderEnabled(ref.platform);
@@ -1159,13 +1159,13 @@ export class BotInstance extends EventEmitter {
       (s, i) => `${i + 1}. ${s.name} - ${s.artist}${s.album ? ` 《${s.album}》` : ""} [id:${s.id}]`,
     );
     return [
-      `搜索结果（用 ${p}play #序号 播放，或 ${p}play id:<id>）:`,
+      `搜索结果（用 ${p}play #序号 播放，或 ${p}play id <id>）:`,
       ...lines,
     ].join("\n");
   }
 
   private async cmdPlay(cmd: ParsedCommand, requesterName?: string): Promise<string> {
-    if (!cmd.args) return `Usage: ${this.config.commandPrefix}play <song name | #N | id:<id> | URL>`;
+    if (!cmd.args) return `Usage: ${this.config.commandPrefix}play <song name | #N | id <id> | URL>`;
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const song0 = song!;
@@ -1259,7 +1259,7 @@ export class BotInstance extends EventEmitter {
   }
 
   private async cmdAdd(cmd: ParsedCommand, requesterName?: string): Promise<string> {
-    if (!cmd.args) return `Usage: ${this.config.commandPrefix}add <song name | #N | id:<id> | URL>`;
+    if (!cmd.args) return `Usage: ${this.config.commandPrefix}add <song name | #N | id <id> | URL>`;
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const s = song!;
@@ -1283,7 +1283,7 @@ export class BotInstance extends EventEmitter {
   }
 
   private async cmdPlayNext(cmd: ParsedCommand, requesterName?: string): Promise<string> {
-    if (!cmd.args) return `Usage: ${this.config.commandPrefix}playnext <song name | #N | id:<id> | URL>`;
+    if (!cmd.args) return `Usage: ${this.config.commandPrefix}playnext <song name | #N | id <id> | URL>`;
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const s = song!;
@@ -1840,8 +1840,8 @@ export class BotInstance extends EventEmitter {
       ...(flagHelp ? [`  Source flags: ${flagHelp}`] : []),
       `${p}search <name> — List top matches to pick a specific (same-name) song`,
       `${p}play #N       — Play the Nth result of the last ${p}search`,
-      `${p}play id:<id>  — Play an exact song by id / URL`,
-      `${p}add <song>   — Add to queue (also accepts #N / id: / URL)`,
+      `${p}play id <id> — Play an exact song by id / URL`,
+      `${p}add <song>   — Add to queue (also accepts #N / id <id> / URL)`,
       `${p}playnext <song> — Insert as next song (alias: ${p}pn)`,
       `${p}pause/resume — Pause/resume`,
       `${p}next/prev    — Next/previous`,

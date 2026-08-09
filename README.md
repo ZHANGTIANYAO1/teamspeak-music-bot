@@ -348,8 +348,8 @@ sudo systemctl start tsmusicbot
 | `!play -y <关键词>` | 从 YouTube 搜索并播放（需要安装 [yt-dlp](#可选youtube-音源)）|
 | `!search <歌名> [-j\|-n\|-q\|-k\|-b\|-y]` | 列出前若干个匹配结果（含序号与 id），用于挑选同名歌曲；可加平台标志切换音源 |
 | `!play #<序号>` | 播放上一次 `!search` 结果中的第 N 项（区分同名歌曲） |
-| `!play id:<id>` | 按歌曲 id 播放精确的某首歌（也支持直接粘贴网易云 / QQ / B站 歌曲链接；Jellyfin 曲目用 GUID ItemId） |
-| `!add <歌名>` | 添加到播放队列（同样支持 `#序号` / `id:<id>` / 链接） |
+| `!play id <id>` | 按歌曲 id 播放精确的某首歌（也支持直接粘贴网易云 / QQ / B站 歌曲链接；Jellyfin 曲目用 GUID ItemId）。旧写法 `!play id:<id>` 仍然可用 |
+| `!add <歌名>` | 添加到播放队列（同样支持 `#序号` / `id <id>` / 链接） |
 | `!pause` / `!resume` | 暂停 / 恢复播放 |
 | `!next` / `!prev` | 下一首 / 上一首 |
 | `!stop` | 停止播放并清空队列 |
@@ -564,7 +564,7 @@ teamspeak-music-bot/
 - **电台 / FM**（`!fm -j` 或首页「Jellyfin 电台」卡片）— 随机取一首**收藏**做种子生成 Instant Mix 歌曲流；没有收藏则回退到最近播放、再回退随机曲目
 - **首页区块** — 最近添加（专辑）/ 播放最多 / Jellyfin 收藏 / 我的歌单 / 流派（点流派芯片即播放该流派）
 - **播放上报** — 播放开始 / 进度（约 10s 一次）/ 停止会回报给 Jellyfin（`Sessions/Playing` 系列接口），你的 Jellyfin 播放统计（PlayCount、最近播放）保持准确；上报失败不影响播放
-- **聊天命令** — 启用后用 `-j` 标志：`!play -j <歌名>`、`!fm -j`、`!artist -j <歌手>`；`!playlist` / `!album` / `!play id:` 可直接粘贴 Jellyfin GUID。若把在线音源全部停用、只保留 Jellyfin，不带标志的命令会自动以 Jellyfin 为默认音源
+- **聊天命令** — 启用后用 `-j` 标志：`!play -j <歌名>`、`!fm -j`、`!artist -j <歌手>`；`!playlist` / `!album` / `!play id <id>` 可直接粘贴 Jellyfin GUID。若把在线音源全部停用、只保留 Jellyfin，不带标志的命令会自动以 Jellyfin 为默认音源
 
 ### enabledProviders：音源开关
 
@@ -801,7 +801,7 @@ A：确保机器人和你在同一个频道。检查音量（`!vol 75`）。部�
 A：在设置页面扫码登录音乐账号。许多歌曲需要登录后才能播放。
 
 **Q：同名歌曲 `!play` 只能播到最热门的那首，怎么播放指定的版本？**
-A：`!play <歌名>` 默认取最热门的匹配项。要播放同名的另一首，有三种方式：(1) 先 `!search <歌名>` 列出带序号的结果，再 `!play #序号` 选择；(2) `!play id:<歌曲id>` 按 id 精确播放；(3) 直接粘贴歌曲链接，如 `!play https://music.163.com/song?id=442867526`（也支持 QQ / B站 链接）。在 WebUI 中则可直接在搜索结果列表里点选任意同名歌曲。
+A：`!play <歌名>` 默认取最热门的匹配项。要播放同名的另一首，有三种方式：(1) 先 `!search <歌名>` 列出带序号的结果，再 `!play #序号` 选择；(2) `!play id <歌曲id>` 按 id 精确播放（`!search` 结果里每行末尾的 `[id:...]` 就是它）；(3) 直接粘贴歌曲链接，如 `!play https://music.163.com/song?id=442867526`（也支持 QQ / B站 链接）。在 WebUI 中则可直接在搜索结果列表里点选任意同名歌曲。
 
 **Q：如何更换机器人所在频道？**
 A：使用 `!move <频道名>` 命令，或在设置页面创建机器人时指定默认频道。

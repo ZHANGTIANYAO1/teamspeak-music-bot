@@ -19,8 +19,21 @@ export interface SongRef {
 }
 
 /**
+ * Could this token plausibly BE an id on a supported platform?
+ *   - NetEase / Kugou numeric ids      → all digits
+ *   - BiliBili                         → BV + 8-12 alphanumerics
+ *   - QQ mid (14), YouTube (11), Spotify (22), Jellyfin GUID / Kugou hash (32)
+ *                                      → 11+ chars from the id alphabet
+ * Deliberately conservative: anything rejected here just stays an ordinary
+ * search term, which is what it almost certainly was.
+ */
+function looksLikeSongId(token: string): boolean {
+  return /^(?:\d+|BV[0-9A-Za-z]{8,12}|[0-9A-Za-z_-]{11,})$/i.test(token);
+}
+
+/**
  * Detect an explicit song reference in a query. Recognizes:
- *   - `id:<id>`                         → platform from flags/default
+ *   - `id <id>` / `id:<id>`             → platform from flags/default
  *   - NetEase song URL                  → music.163.com/song?id=N (also /#/song?id=N, /song/N)
  *   - QQ song URL                       → y.qq.com/.../songDetail/MID (or ?songmid=MID)
  *   - BiliBili BVID (bare or in a URL)  → bilibili.com/video/BVxxxx, b23.tv, or BVxxxx
@@ -30,11 +43,25 @@ export function parseSongRef(raw: string): SongRef | null {
   const q = (raw ?? "").trim();
   if (!q) return null;
 
-  // Explicit "id:<id>" — platform decided by the command's flags/default.
-  // Strip trailing punctuation that tags along from a chat paste ("id:12345."
-  // / "id:12345)") — no supported id (numeric / BVID / mid) ends in those.
-  const idPrefix = /^id:\s*(\S+)$/i.exec(q);
-  if (idPrefix) return { id: idPrefix[1].replace(/[.,;)\]]+$/, ""), platform: null };
+  // Explicit id — platform decided by the command's flags/default. The
+  // separator is a colon or plain whitespace, so `id <id>` matches the
+  // `!<cmd> <sub> <arg>` shape of every other command (issue #139) while the
+  // older `id:<id>` keeps working. Strip trailing punctuation that tags along
+  // from a chat paste ("id:12345." / "id:12345)") — no supported id
+  // (numeric / BVID / mid) ends in those.
+  //
+  // The colon is an unambiguous sigil, so `id:<anything>` is always an id. A
+  // space is not: "ID 4" and "ID Bruno" are real track titles, and `id <url>`
+  // has to keep resolving as a URL. So the space form only claims tokens that
+  // could actually be an id; anything else falls through to the URL branches
+  // below and ultimately to a plain search.
+  const idPrefix = /^id(:\s*|\s+)(\S+)$/i.exec(q);
+  if (idPrefix) {
+    const id = idPrefix[2].replace(/[.,;)\]]+$/, "");
+    if (idPrefix[1].startsWith(":") || looksLikeSongId(id)) {
+      return { id, platform: null };
+    }
+  }
 
   // BiliBili BV id, bare or inside a bilibili URL (NetEase ids are numeric, so
   // a "BV..." token never collides with them).
