@@ -605,4 +605,141 @@ describe("PlayQueue", () => {
       expect(q.list().map((s) => s.id)).toEqual(["A"]);
     });
   });
+
+  // Issue #141: in Random/RandomLoop, next() picks from the shuffle bag and
+  // ignores array order, so a song spliced in by addNext (!pn) was NOT played
+  // next — it just waited for its random turn like any other song. addNext now
+  // records the insert slot on the forward stack, which next() honours first.
+  describe("addNext in random modes (issue #141)", () => {
+    for (const mode of [PlayMode.Random, PlayMode.RandomLoop]) {
+      it(`plays the inserted song next in ${mode} mode`, () => {
+        queue.setMode(mode);
+        for (const id of ["a", "b", "c", "d"]) queue.add(makeSong(id));
+        queue.play(); // current = 0 (a)
+        queue.addNext(makeSong("x"));
+        expect(queue.next()?.id).toBe("x");
+      });
+    }
+
+    it("plays consecutive inserts in the order the queue displays them", () => {
+      queue.setMode(PlayMode.RandomLoop);
+      for (const id of ["a", "b", "c", "d"]) queue.add(makeSong(id));
+      queue.play(); // current = 0 (a)
+      queue.addNext(makeSong("x"));
+      queue.addNext(makeSong("y")); // splices in front of x, as in sequential
+      expect(queue.list().map((s) => s.id)).toEqual(["a", "y", "x", "b", "c", "d"]);
+      expect(queue.next()?.id).toBe("y");
+      expect(queue.next()?.id).toBe("x");
+    });
+
+    it("honours the insert even after the shuffle bag is exhausted", () => {
+      // Random (non-loop) returns null once every song has played. Songs added
+      // afterwards must still be reachable via !pn — and with TWO of them the
+      // order can only come from the forward stack, not from the bag having a
+      // single remaining candidate.
+      queue.setMode(PlayMode.Random);
+      for (const id of ["a", "b", "c", "d"]) queue.add(makeSong(id));
+      queue.play();
+      for (let i = 0; i < 3; i++) queue.next();
+      expect(queue.next()).toBeNull(); // bag exhausted
+      queue.addNext(makeSong("x"));
+      queue.addNext(makeSong("y"));
+      queue.addNext(makeSong("z"));
+      expect(queue.next()?.id).toBe("z");
+      expect(queue.next()?.id).toBe("y");
+      expect(queue.next()?.id).toBe("x");
+    });
+
+    it("pops past a prev() marker to reach the pending insert", () => {
+      // prev() shares the forward stack, and in random mode with no history it
+      // pushes the current index and then returns null. next() must walk past
+      // those self-referencing markers instead of consuming one and giving up
+      // to the shuffle bag.
+      queue.setMode(PlayMode.Random);
+      for (const id of ["a", "b", "c", "d"]) queue.add(makeSong(id));
+      queue.play(); // a
+      queue.addNext(makeSong("x"));
+      expect(queue.prev()).toBeNull();
+      expect(queue.prev()).toBeNull();
+      expect(queue.next()?.id).toBe("x");
+    });
+
+    it("plays each song exactly once — the insert is not replayed later", () => {
+      queue.setMode(PlayMode.Random);
+      for (const id of ["a", "b", "c", "d"]) queue.add(makeSong(id));
+      queue.play(); // a
+      queue.addNext(makeSong("x"));
+      queue.addNext(makeSong("y"));
+
+      const played = [queue.current()!.id];
+      for (let i = 0; i < 5; i++) played.push(queue.next()!.id);
+      expect(queue.next()).toBeNull(); // bag exhausted
+      expect(played.slice(0, 3)).toEqual(["a", "y", "x"]);
+      expect(new Set(played).size).toBe(6);
+    });
+
+    it("keeps the insert reachable after an earlier song is removed", () => {
+      queue.setMode(PlayMode.RandomLoop);
+      for (const id of ["a", "b", "c", "d"]) queue.add(makeSong(id));
+      queue.playAt(2); // current = 2 (c)
+      queue.addNext(makeSong("x")); // [a, b, c, x, d]
+      queue.remove(0); // [b, c, x, d] — x slides from 3 to 2
+      expect(queue.next()?.id).toBe("x");
+    });
+
+    it("drops the entry when the inserted song is itself removed", () => {
+      // Leaving the stale entry behind would not throw — index 2 still exists
+      // after the removal, it just points at a different song. So the queue is
+      // arranged with exactly one song the shuffle bag can legally return:
+      // anything else means the dead forward entry was honoured.
+      queue.setMode(PlayMode.RandomLoop);
+      for (const id of ["a", "b", "c"]) queue.add(makeSong(id));
+      queue.playAt(0); // current = 0 (a), played = {0}
+      queue.next(); // b or c — two of the three are now played
+      const remaining = queue.list().find((s) => s.id !== "a" && s.id !== queue.current()!.id)!;
+      queue.addNext(makeSong("x")); // spliced at currentIndex+1
+      queue.remove(queue.getCurrentIndex() + 1); // …and removed again
+      expect(queue.list().map((s) => s.id)).not.toContain("x");
+      expect(queue.next()?.id).toBe(remaining.id);
+    });
+
+    it("never yields a stale index under interleaved inserts and removals", () => {
+      // The forward stack holds array indices, so every splice has to shift
+      // them. next() returning `undefined` here (an out-of-range index) reads
+      // as end-of-queue to BotInstance.playNext and silently stops playback.
+      queue.setMode(PlayMode.RandomLoop);
+      for (let i = 0; i < 6; i++) queue.add(makeSong(`s${i}`));
+      queue.play();
+      for (let step = 0; step < 200; step++) {
+        const roll = step % 4;
+        if (roll === 0) queue.addNext(makeSong(`x${step}`));
+        else if (roll === 1 && queue.size() > 1) queue.remove(step % queue.size());
+        else {
+          const song = queue.next();
+          expect(song === null || song === queue.current()).toBe(true);
+          if (song !== null) expect(song).toBeDefined();
+        }
+      }
+    });
+
+    it("leaves sequential/loop behaviour untouched", () => {
+      queue.setMode(PlayMode.Sequential);
+      for (const id of ["a", "b", "c"]) queue.add(makeSong(id));
+      queue.play(); // a
+      queue.addNext(makeSong("x"));
+      expect(queue.next()?.id).toBe("x");
+      expect(queue.next()?.id).toBe("b");
+      expect(queue.next()?.id).toBe("c");
+      expect(queue.next()).toBeNull();
+    });
+
+    it("still appends (no forward entry) when nothing is playing", () => {
+      queue.setMode(PlayMode.Random);
+      queue.add(makeSong("a"));
+      queue.addNext(makeSong("x")); // currentIndex is still -1 → plain push
+      expect(queue.list().map((s) => s.id)).toEqual(["a", "x"]);
+      queue.play(); // a — a stray forward entry would have hijacked this
+      expect(queue.current()?.id).toBe("a");
+    });
+  });
 });
