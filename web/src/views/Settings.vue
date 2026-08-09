@@ -387,7 +387,7 @@
             <img :src="qqQr.dataUrl" class="qr-image" alt="QR Code" />
             <div class="qr-status" :class="qqQr.status">
               <template v-if="qqQr.status === 'waiting'">
-                <Icon icon="mdi:cellphone" /> 请使用QQ音乐APP扫码
+                <Icon icon="mdi:cellphone" /> 请使用手机QQ扫码
               </template>
               <template v-else-if="qqQr.status === 'scanned'">
                 <Icon icon="mdi:check" /> 已扫码，请在手机上确认
