@@ -22,6 +22,22 @@
        "same-origin" keeps the real Origin on same-origin requests, so CSRF passes. -->
   <meta name="referrer" content="same-origin">
   <title>TSMusicBot</title>
+  <!-- Icons live in web/public/ so Vite copies them to the dist root, which is
+       what Express serves (src/index.ts STATIC_DIR). Both an .ico and an .svg
+       are declared: browsers that understand the vector one prefer it and stay
+       sharp on hi-dpi tabs, the rest fall back to the .ico. The .ico also
+       answers the implicit /favicon.ico request — without a real file there the
+       SPA catch-all hands back index.html with a 200, so the tab silently keeps
+       the blank-page icon (issue #142). -->
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any">
+  <!-- iOS home-screen icon; iOS masks the corners itself, so this one is a
+       full square. Android reads the manifest instead. -->
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <!-- Matches --bg-primary of the dark theme, which is what the app starts in
+       (stores/player.ts defaults to 'dark' and never follows the OS scheme). -->
+  <meta name="theme-color" content="#222222">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
