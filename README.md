@@ -884,7 +884,41 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.11.1：修复 `!help` 触发机器人自动点歌
+### 最新版本 — v1.12.0：网站图标 / 移动端交互 / 安装脚本按 ABI 自愈
+
+一次性处理了 6 个社区反馈的 issue。**没有配置变化，升级无需任何操作**；`!play id:<id>` 等旧写法全部继续可用。
+
+**安装脚本按 Node ABI 校验并自动修复（[#140](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/140)，[PR #147](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/147)，感谢 [@zbn297427669](https://github.com/zbn297427669)）**
+
+- 换过 Node 大版本后启动报 `NODE_MODULE_VERSION 137 ... requires 127`、或提示找不到 `opus.node` 的问题已修复。原生模块只能在编译它的 Node ABI 上加载，而旧脚本只检查「文件存在且够大」，会把给另一个 Node 版本编译的二进制原样留下。
+- 现在安装脚本会在子进程里真的加载一遍每个原生模块，不匹配就按当前 ABI 重新安装；替换过程先备份再原子替换，任何一步失败都会把原文件逐字节还原，不会让环境变得更糟。被中断留下的备份，下次运行自动认领回来。
+- 必需模块失败会**中止安装并返回非零**，不再出现「setup 显示成功、start 才爆炸」；下载进度实时显示在控制台，不再让人以为卡死。
+- `start.bat` 和 `npm start` 启动前会预检，直接说清楚哪个模块对不上、分别是哪个 ABI、怎么修。
+- 顺带修掉一个会**静默丢掉 ffmpeg** 的问题：源码编译会阻塞事件循环，把同时进行的 80MB ffmpeg 下载误判为超时，而 ffmpeg 是可选模块，于是安装照样报告成功、用户却放不出任何声音。三个模块改为串行处理。
+- Node 版本要求按依赖真实下限判断（20.19+ / 22.12+），推荐 20 或 22 LTS；更新的大版本不阻止，只提示可能需要源码编译。
+
+**随机模式下 `!pn` 真正下一首播放（[#141](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/141)，[PR #144](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/144)，感谢 [@XuVIIJay](https://github.com/XuVIIJay)）**
+
+- 随机 / 随机循环下 `!pn`（以及 WebUI 的「下一首播放」）插入的歌只是和其他歌一样等着被随机抽中，机器人却回复「Up next」。现在会真的下一首播放，连续插入多首时的顺序与队列里显示的一致。
+- 同时修掉两个相关问题：插入或删除队列中的歌之后，待播位置可能指向另一首歌；删得多了甚至会让播放**静默停止**。
+
+**WebUI 站点图标与移动端交互（[#142](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/142) / [#143](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/143) / [#138](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/138)，[PR #146](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/146)，感谢 [@XuVIIJay](https://github.com/XuVIIJay) 与 [@hak5ya](https://github.com/hak5ya)）**
+
+- 新增站点图标：收藏网页、移动端添加到主屏幕都会显示图标（含 iOS 与 Android 适配）。
+- 移动端迷你播放器的进度条现在**可以点按和拖动调节进度**，触摸区域也放大到可用尺寸，拖动时不会被自动跳转到歌词页。
+- 移动端**单击歌曲行即可播放**（桌面端双击行为不变）；队列抽屉里的歌曲行同样支持，其移除按钮在触屏下不再是「看不见但点得到」。
+- QQ 扫码登录的提示改为「请使用手机QQ扫码」——那是 QQ 账号二维码，用 QQ音乐 APP 扫不出来。
+
+**`!play id <id>` 与其他命令语法统一（[#139](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/139)，[PR #145](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/145)，感谢 [@hak5ya](https://github.com/hak5ya)）**
+
+- 按 id 播放现在可以写成 `!play id <id>`，和其他命令的 `<命令> <子命令> <参数>` 形式一致；`!add` / `!playnext` 同样适用。
+- **旧写法 `!play id:<id>` 继续支持**。空格写法只在参数确实像 id 时生效，普通搜索和粘贴链接的行为不受影响。
+
+### v1.11.2 — 可配置语音闪避
+
+- 检测频道内其他人说话时平滑降低音乐音量，停止后平滑恢复；默认关闭，可在设置页启用并调节说话时保留的音量比例（[#136](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/136)，[PR #137](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/137)）。
+
+### v1.11.1：修复 `!help` 触发机器人自动点歌
 
 **丢弃自回显消息（[PR #135](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/135)，感谢 [@EvolvedGhost](https://github.com/EvolvedGhost)）**
 
