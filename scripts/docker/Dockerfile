@@ -46,6 +46,11 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/web/dist ./web/dist
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
+# package.json declares a `prestart` preflight, so `npm start` inside the
+# container needs this file. The image's own CMD calls node directly and never
+# goes through npm, but an interactive `docker exec ... npm start` would
+# otherwise die on a missing script rather than starting the bot.
+COPY --from=builder /app/scripts/check-native.mjs ./scripts/check-native.mjs
 
 # Data directory for database, cookies, logs
 RUN mkdir -p /app/data

@@ -27,6 +27,26 @@ if ! command -v node &>/dev/null; then
 fi
 echo "[OK] Node.js $(node -v)"
 
+# Newest Node major this project is regularly tested against. Anything above
+# still works, it just may have no prebuilt addons and fall back to a source build.
+TESTED_NODE_MAJOR=22
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+
+# The floor is not just a major version, so let node decide: @honeybbq/teamspeak-client
+# needs >=20.19, @sansenjian/qq-music-api needs >=20.17 / >=22.9, and the odd majors
+# (21 / 23) are excluded by better-sqlite3 and vitest. Keep in sync with package.json "engines".
+if ! node -e 'const v=process.versions.node.split(".").map(Number); process.exit((v[0]===20&&v[1]>=19)||(v[0]===22&&v[1]>=12)||v[0]>=24?0:1)'; then
+    echo "[ERROR] Node.js $(node -v) is not supported. Use Node 20.19+ LTS or Node 22.12+ LTS."
+    echo "        https://nodejs.org/  |  https://nodejs.cn/"
+    exit 1
+fi
+if [ "$NODE_MAJOR" -gt "$TESTED_NODE_MAJOR" ]; then
+    echo "[WARN] Node $(node -v) is newer than the tested LTS line (Node 20 / Node 22)."
+    echo "       新版 Node 可能没有现成的 opus / better-sqlite3 预编译包,"
+    echo "       安装时会自动改用源码编译,需要 C/C++ 构建工具,速度较慢。"
+    echo "       This is only a warning - setup builds the binaries for $(node -v) either way."
+fi
+
 if ! command -v npm &>/dev/null; then
     echo "[ERROR] npm not found."
     exit 1
@@ -73,15 +93,30 @@ npm install --registry="$MIRROR_REGISTRY" --ignore-scripts 2>&1 | tee -a "$LOG_F
 echo "[OK] Dependencies installed."
 echo ""
 
-# ---- Step 2: Download native binaries from CDN ----
-echo "---- 2/5: Downloading native binaries ----"
+# ---- Step 2: Verify / download / repair native binaries (ABI aware) ----
+echo "---- 2/5: Checking native binaries ----"
 echo ""
 
-if node scripts/download-binaries.mjs $CDN_MIRROR 2>&1 | tee -a "$LOG_FILE"; then
-    echo "[OK] Native binaries installed."
-else
-    echo "[WARN] Some native binaries had issues (will try source build as fallback)."
+# The old `if node ... | tee ...` only printed a [WARN] and carried on, so a
+# broken native module still produced a "Setup Complete!" banner. It also read
+# the *pipeline's* status: `set -o pipefail` above happens to surface node's
+# failure, but a failing `tee` (unwritable log) was indistinguishable from a
+# failing node. PIPESTATUS[0] is exactly node's own exit code, nothing else.
+set +e
+node scripts/download-binaries.mjs $CDN_MIRROR 2>&1 | tee -a "$LOG_FILE"
+BIN_STATUS=${PIPESTATUS[0]}
+set -e
+
+if [ "$BIN_STATUS" -ne 0 ]; then
+    echo ""
+    echo "[ERROR] A required native module (@discordjs/opus / better-sqlite3) is unusable."
+    echo "        必需的原生模块不可用,安装中止。原因见上面的 [binary] 输出。"
+    echo "        Log: $LOG_FILE"
+    exit 1
 fi
+# ffmpeg-static failures are only a WARN inside the script above (a system
+# ffmpeg on PATH is a supported fallback), so reaching here means we are good.
+echo "[OK] Native binaries ready for $(node -v)."
 echo ""
 
 # ---- Step 3: Install web panel dependencies ----
