@@ -295,7 +295,13 @@ export class BotInstance extends EventEmitter {
       const relPath = this.database.getCustomAvatarPath(this.id);
       if (relPath) {
         const buf = this.avatarStore.read(relPath);
-        if (buf) this.profileManager.setCustomAvatar(buf);
+        // loadCustomAvatar, NOT setCustomAvatar (#148): we are still in the
+        // constructor, so tsClient has not connected. setCustomAvatar would
+        // start a file transfer right here and fail. profileManager.onConnect()
+        // uploads it for real once the handshake completes.
+        // `length > 0` because avatarStore.write is delete-then-write, so a
+        // crash mid-write leaves a 0-byte file that is truthy as a Buffer.
+        if (buf && buf.length > 0) this.profileManager.loadCustomAvatar(buf);
       }
     } catch (err) {
       this.logger.warn({ err }, "Failed to load custom avatar — skipping");
