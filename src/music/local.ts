@@ -330,9 +330,16 @@ export class LocalMusicProvider implements MusicProvider {
       const extracted = path.join(this.uploadDir, `${id}${EXTRACTED_AUDIO_EXT}`);
       if (await extractAudioTrack(filePath, extracted)) {
         try {
-          size = statSync(extracted).size;
+          // Commit filePath and size TOGETHER, and only after the source is
+          // actually gone. rmSync(force) still throws EBUSY/EPERM on Windows,
+          // and assigning size first would leave the record claiming the
+          // small extracted size while still pointing at the whole video —
+          // which makes totalBytes() under-count and lets the upload
+          // directory grow past its quota.
+          const extractedSize = statSync(extracted).size;
           rmSync(filePath, { force: true });
           filePath = extracted;
+          size = extractedSize;
         } catch {
           // Could not stat/remove (Windows lock) — keep playing the original
           // container and drop the half-finished extract.
