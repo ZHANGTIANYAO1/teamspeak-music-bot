@@ -167,7 +167,13 @@ describe("session router", () => {
     expect(meB.status).toBe(401);
 
     expect(u.id).toBe(meA.body.id);
-  });
+    // 20s, not the 5s default: this case runs SIX bcryptjs rounds (one hash to
+    // create the user, four verifies, one hash for the new password), and
+    // bcryptjs is pure JS. It takes ~4.5s on an idle machine — close enough to
+    // the default that it tipped over whenever the full suite saturated the
+    // CPU, which made it look like a real intermittent failure. The work is
+    // genuinely slow, not hung, so the timeout is what was wrong.
+  }, 20000);
 });
 
 describe("session router — guest mode", () => {
