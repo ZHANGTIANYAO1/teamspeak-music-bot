@@ -7,6 +7,56 @@ import { requirePermission } from "../middleware/requirePermission.js";
 import { requireNotGuest } from "../middleware/requireNotGuest.js";
 import { authorize } from "../middleware/authorize.js";
 
+/**
+ * Body cap for a local upload. express.raw buffers the whole body in memory,
+ * so this is also the peak RAM one upload can cost — raised from 200mb for
+ * video (#149), which is far bigger than audio for the same song, but kept
+ * well short of "any video file at all" for that reason. Only the audio track
+ * survives to disk.
+ */
+export const LOCAL_UPLOAD_LIMIT = "500mb";
+
+/**
+ * Body parser for the local-upload route.
+ *
+ * `type` includes "video/*" (#149): the browser sends the File's own MIME
+ * type, so an .mp4 arrives as video/mp4 and used to be rejected by this
+ * filter before ever reaching the provider. Only the audio track is kept —
+ * uploadAudio remuxes it out on the way in.
+ *
+ * express.raw hands an oversize body to the default error handler, which
+ * answers with an HTML page carrying a stack trace and absolute server paths
+ * (unless NODE_ENV=production, which this project never sets). Video makes
+ * hitting the cap far more likely than audio did, so that one case is
+ * translated into the same JSON shape the rest of this route returns. Any
+ * other body-parser error is passed on untouched.
+ *
+ * Exported as a factory so tests can drive the identical path with a small
+ * limit instead of allocating half a gigabyte.
+ */
+export function createLocalUploadBody(limit: string): express.RequestHandler {
+  const raw = express.raw({
+    type: ["audio/*", "video/*", "application/octet-stream"],
+    limit,
+  });
+  return (req, res, next) => {
+    raw(req, res, (err?: unknown) => {
+      if (!err) {
+        next();
+        return;
+      }
+      const e = err as { type?: string; status?: number };
+      if (e?.type === "entity.too.large" || e?.status === 413) {
+        res.status(413).json({ error: `文件太大，单个文件上限 ${limit}` });
+        return;
+      }
+      next(err);
+    });
+  };
+}
+
+const localUploadBody = createLocalUploadBody(LOCAL_UPLOAD_LIMIT);
+
 export function createMusicRouter(
   neteaseProvider: MusicProvider,
   qqProvider: MusicProvider,
@@ -65,10 +115,7 @@ export function createMusicRouter(
       }
       next();
     },
-    express.raw({
-      type: ["audio/*", "video/webm", "application/octet-stream"],
-      limit: "200mb",
-    }),
+    localUploadBody,
     async (req, res) => {
       try {
         if (!localProvider) {

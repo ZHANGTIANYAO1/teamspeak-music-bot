@@ -28,18 +28,18 @@
       >
         <Icon icon="mdi:tray-arrow-up" class="upload-icon" />
         <div class="upload-copy">
-          <div class="upload-title">拖拽本地音频到这里上传</div>
-          <div class="upload-subtitle">支持 mp3、flac、wav、m4a、ogg、opus、aac、webm 等格式，上传后可直接播放或加入队列</div>
+          <div class="upload-title">拖拽本地音频 / 视频到这里上传</div>
+          <div class="upload-subtitle">音频支持 mp3、flac、wav、m4a、ogg、opus、aac、webm 等，视频支持 mp4、mov、avi、mkv、flv、wmv 等（只取其中的音轨播放）；上传后可直接播放或加入队列</div>
         </div>
         <button class="upload-btn" :disabled="uploading" @click="fileInput?.click()">
-          {{ uploading ? '上传中...' : '选择音频' }}
+          {{ uploading ? '上传中...' : '选择文件' }}
         </button>
         <input
           ref="fileInput"
           class="file-input"
           type="file"
           multiple
-          accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.webm,.wma,.alac,.aiff,.ape"
+          accept="audio/*,video/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.webm,.wma,.alac,.aiff,.ape,.mp4,.mov,.avi,.mkv,.flv,.wmv,.m4v,.mpg,.mpeg,.3gp,.ts,.m2ts,.ogv"
           @change="handleFileSelect"
         />
       </div>
@@ -404,8 +404,17 @@ async function doSearch() {
 }
 
 
-function isAudioFile(file: File): boolean {
-  return file.type.startsWith('audio/') || /\.(mp3|flac|wav|m4a|aac|ogg|opus|webm|wma|alac|aiff|ape)$/i.test(file.name);
+/** Must match LOCAL_UPLOAD_LIMIT in src/web/api/music.ts. */
+const UPLOAD_MAX_MB = 500;
+const UPLOAD_MAX_BYTES = UPLOAD_MAX_MB * 1024 * 1024;
+
+// Video is accepted too (#149) — the server keeps only the audio track.
+// Keep the extension list in sync with AUDIO_EXTENSIONS / VIDEO_EXTENSIONS in
+// src/music/local.ts; the server re-validates, this just avoids a round-trip.
+function isMediaFile(file: File): boolean {
+  return file.type.startsWith('audio/')
+    || file.type.startsWith('video/')
+    || /\.(mp3|flac|wav|m4a|aac|ogg|opus|webm|wma|alac|aiff|ape|mp4|mov|avi|mkv|flv|wmv|m4v|mpg|mpeg|3gp|ts|m2ts|ogv)$/i.test(file.name);
 }
 
 async function uploadLocalFiles(fileList: File[]) {
@@ -414,10 +423,22 @@ async function uploadLocalFiles(fileList: File[]) {
     uploadMessage.value = '本地音频播放已关闭';
     return;
   }
-  const files = fileList.filter(isAudioFile);
+  const candidates = fileList.filter(isMediaFile);
+  if (candidates.length === 0) {
+    uploadMessageType.value = 'error';
+    uploadMessage.value = '没有找到可上传的音频 / 视频文件';
+    return;
+  }
+
+  // Reject oversize files before spending minutes uploading them (#149).
+  // The server enforces the same cap (LOCAL_UPLOAD_LIMIT in
+  // src/web/api/music.ts) and answers 413 — this only saves the round-trip,
+  // which matters now that a single video can be hundreds of megabytes.
+  const files = candidates.filter((f) => f.size <= UPLOAD_MAX_BYTES);
+  const oversize = candidates.filter((f) => f.size > UPLOAD_MAX_BYTES);
   if (files.length === 0) {
     uploadMessageType.value = 'error';
-    uploadMessage.value = '没有找到可上传的音频文件';
+    uploadMessage.value = `文件太大，单个文件上限 ${UPLOAD_MAX_MB} MB：${oversize[0].name}`;
     return;
   }
 
@@ -426,8 +447,19 @@ async function uploadLocalFiles(fileList: File[]) {
   uploadMessage.value = `正在上传 ${files.length} 个文件...`;
 
   const uploaded: Song[] = [];
-  const failed: string[] = [];
-  for (const file of files) {
+  const failed: string[] = oversize.map((f) => `${f.name}: 超过 ${UPLOAD_MAX_MB} MB 上限`);
+  for (const [i, file] of files.entries()) {
+    // Videos are orders of magnitude bigger than the audio files this used to
+    // handle (#149), so a silent "正在上传..." can sit there for minutes and
+    // look hung. Report per-file percentage while the bytes are in flight, and
+    // switch to a processing note once the server takes over (it still has to
+    // probe the file and remux the audio track out).
+    const label = files.length > 1 ? `（${i + 1}/${files.length}）` : '';
+    const setProgress = (text: string) => {
+      uploadMessageType.value = 'info';
+      uploadMessage.value = `${text}${label}：${file.name}`;
+    };
+    setProgress('正在上传');
     try {
       const res = await axios.post('/api/music/local/upload', file, {
         headers: {
@@ -435,6 +467,11 @@ async function uploadLocalFiles(fileList: File[]) {
           'X-Filename': encodeURIComponent(file.name),
         },
         maxBodyLength: Infinity,
+        onUploadProgress: (e) => {
+          if (!e.total) return;
+          const pct = Math.round((e.loaded / e.total) * 100);
+          setProgress(pct >= 100 ? '服务端处理中' : `正在上传 ${pct}%`);
+        },
       });
       if (res.data?.song) uploaded.push(res.data.song as Song);
     } catch (err: any) {

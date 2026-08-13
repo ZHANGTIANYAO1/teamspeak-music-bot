@@ -14,7 +14,7 @@ import { createSessionStore } from "../../data/sessions.js";
 import { createPermissionStore } from "../../data/permissions.js";
 import { createRequireAuth } from "../middleware/requireAuth.js";
 import { SESSION_COOKIE_NAME } from "../auth/validateSession.js";
-import { createMusicRouter } from "./music.js";
+import { createMusicRouter, createLocalUploadBody } from "./music.js";
 
 const empty: SearchResult = { songs: [], albums: [], playlists: [] };
 
@@ -293,5 +293,148 @@ describe("music router POST /quality — persistence (#125)", () => {
     // jellyfin rejects the NetEase-style value → stays at its default tier.
     expect(config.audioQuality.jellyfin).toBe("direct");
     expect(config.audioQuality.netease).toBe("lossless");
+  });
+});
+
+// #149: video containers must survive the transport layer. Before this the
+// express.raw type filter only matched audio/*, video/webm and
+// application/octet-stream, so a browser-sent video/mp4 body was never parsed
+// and the handler answered 400 "raw audio body is required".
+describe("music router POST /local/upload — content types and size cap (#149)", () => {
+  let app: express.Express;
+  let botDb: BotDatabase;
+  let cookie: string;
+  let uploadAudio: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    botDb = createDatabase(":memory:");
+    const users = createUserStore(botDb.db);
+    const sessions = createSessionStore(botDb.db);
+    const admin = await users.createUser("admin", "pw-admin", "admin");
+    cookie = `${SESSION_COOKIE_NAME}=${sessions.createSession(admin.id).token}`;
+
+    uploadAudio = vi.fn(async (input: { originalName: string }) => ({
+      id: "local-1", name: input.originalName, artist: "本地上传", album: "本地音乐",
+      duration: 1, coverUrl: "", platform: "local",
+    }));
+    const local = { platform: "local", search: vi.fn().mockResolvedValue(empty), uploadAudio } as unknown as MusicProvider;
+
+    app = express();
+    app.use(express.json());
+    app.use(cookieParser());
+    app.use("/api", createRequireAuth(sessions, createPermissionStore(botDb.db), () => getDefaultConfig().guestMode));
+    app.use("/api/music", createMusicRouter(
+      fakeProvider("netease"), fakeProvider("qq"), fakeProvider("bilibili"),
+      pino({ level: "silent" }), local, getDefaultConfig(),
+    ));
+  });
+
+  afterEach(() => botDb.close());
+
+  const post = (contentType: string, body: Buffer, name = "clip.mp4") =>
+    request(app)
+      .post("/api/music/local/upload")
+      .set("Cookie", cookie)
+      .set("Content-Type", contentType)
+      .set("X-Filename", encodeURIComponent(name))
+      .send(body);
+
+  it("accepts the video MIME types browsers actually send", async () => {
+    // These are what Chrome/Firefox put on a File for .mp4/.mov/.avi/.mkv.
+    for (const ct of ["video/mp4", "video/quicktime", "video/x-msvideo", "video/x-matroska", "video/webm"]) {
+      uploadAudio.mockClear();
+      const res = await post(ct, Buffer.from("fake video bytes"));
+      expect(res.status, `content-type ${ct}`).toBe(200);
+      expect(uploadAudio).toHaveBeenCalledOnce();
+      expect(res.body.song.platform).toBe("local");
+    }
+  });
+
+  it("still accepts audio and octet-stream bodies", async () => {
+    for (const ct of ["audio/mpeg", "audio/flac", "application/octet-stream"]) {
+      uploadAudio.mockClear();
+      const res = await post(ct, Buffer.from("fake audio"), "tune.mp3");
+      expect(res.status, `content-type ${ct}`).toBe(200);
+      expect(uploadAudio).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("passes the decoded filename and the content type through to the provider", async () => {
+    await post("video/mp4", Buffer.from("bytes"), "我的 视频.mp4");
+    expect(uploadAudio).toHaveBeenCalledWith(
+      expect.objectContaining({ originalName: "我的 视频.mp4", mimeType: "video/mp4" }),
+    );
+  });
+
+  it("surfaces a provider rejection as a 400 with its message", async () => {
+    uploadAudio.mockRejectedValueOnce(new Error("这个视频里没有音轨，无法播放"));
+    const res = await post("video/mp4", Buffer.from("bytes"));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("这个视频里没有音轨，无法播放");
+  });
+
+  it("requires authentication", async () => {
+    const res = await request(app)
+      .post("/api/music/local/upload")
+      .set("Content-Type", "video/mp4")
+      .send(Buffer.from("bytes"));
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects an oversize body as JSON, not an HTML stack trace", async () => {
+    // Same middleware the route mounts, built with a small limit so the test
+    // does not have to allocate half a gigabyte to reach the cap.
+    const tiny = express();
+    const reached = vi.fn();
+    tiny.post("/u", createLocalUploadBody("1kb"), (_req, res) => { reached(); res.json({ ok: true }); });
+
+    const res = await request(tiny)
+      .post("/u")
+      .set("Content-Type", "video/mp4")
+      .send(Buffer.alloc(4096, 1));
+
+    expect(res.status).toBe(413);
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.body.error).toContain("文件太大");
+    // The HTML default handler leaked absolute server paths and a stack.
+    expect(res.text).not.toMatch(/node_modules|<\/pre>|at read/);
+    expect(reached).not.toHaveBeenCalled();
+  });
+
+  it("lets a body under the cap through the same middleware", async () => {
+    const tiny = express();
+    tiny.post("/u", createLocalUploadBody("1kb"), (req, res) => {
+      res.json({ bytes: (req.body as Buffer).length });
+    });
+    const res = await request(tiny)
+      .post("/u")
+      .set("Content-Type", "video/mp4")
+      .send(Buffer.alloc(512, 1));
+    expect(res.status).toBe(200);
+    expect(res.body.bytes).toBe(512);
+  });
+
+  it("rejects local uploads when the feature is switched off", async () => {
+    const off = getDefaultConfig();
+    off.localAudioEnabled = false;
+    const users = createUserStore(botDb.db);
+    const sessions = createSessionStore(botDb.db);
+    const a2 = await users.createUser("admin2", "pw-admin2", "admin");
+    const c2 = `${SESSION_COOKIE_NAME}=${sessions.createSession(a2.id).token}`;
+    const app2 = express();
+    app2.use(cookieParser());
+    app2.use("/api", createRequireAuth(sessions, createPermissionStore(botDb.db), () => getDefaultConfig().guestMode));
+    app2.use("/api/music", createMusicRouter(
+      fakeProvider("netease"), fakeProvider("qq"), fakeProvider("bilibili"),
+      pino({ level: "silent" }),
+      { platform: "local", search: vi.fn(), uploadAudio } as unknown as MusicProvider, off,
+    ));
+    const res = await request(app2)
+      .post("/api/music/local/upload")
+      .set("Cookie", c2)
+      .set("Content-Type", "video/mp4")
+      .send(Buffer.from("bytes"));
+    expect(res.status).toBe(403);
+    expect(uploadAudio).not.toHaveBeenCalled();
   });
 });

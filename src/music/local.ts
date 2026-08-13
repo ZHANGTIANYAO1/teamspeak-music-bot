@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -33,6 +33,37 @@ const AUDIO_EXTENSIONS = new Set([
   ".aiff",
   ".ape",
 ]);
+
+/** Video containers accepted for upload (#149). Only the audio track is ever
+ *  used — the bot has no video output. Playback would work straight from the
+ *  container (ffmpeg selects the audio stream), but we extract the audio on
+ *  upload so a 200 MB clip does not sit on disk for a 3 MB song; see
+ *  extractAudioTrack. `.webm` is deliberately absent: it is already in
+ *  AUDIO_EXTENSIONS and both audio-only and video .webm are handled there. */
+const VIDEO_EXTENSIONS = new Set([
+  ".mp4",
+  ".mov",
+  ".avi",
+  ".mkv",
+  ".flv",
+  ".wmv",
+  ".m4v",
+  ".mpg",
+  ".mpeg",
+  ".3gp",
+  ".ts",
+  ".m2ts",
+  ".ogv",
+]);
+
+/** Container the extracted audio track is remuxed into. Matroska takes
+ *  essentially any audio codec, so `-c:a copy` works without knowing what the
+ *  source used — no re-encode, no quality loss, no codec/extension table. */
+const EXTRACTED_AUDIO_EXT = ".mka";
+
+function isSupportedUploadExt(ext: string): boolean {
+  return AUDIO_EXTENSIONS.has(ext) || VIDEO_EXTENSIONS.has(ext);
+}
 
 const DEFAULT_MAX_FILES = 200;
 const DEFAULT_MAX_TOTAL_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -71,37 +102,123 @@ function titleFromFileName(name: string): string {
   return safeFileName(name).replace(/\.[^.]+$/, "") || "本地音频";
 }
 
-async function probeDurationSeconds(filePath: string): Promise<number> {
+export interface MediaProbe {
+  /** Rounded seconds, 0 when the probe failed or the container has no duration. */
+  durationSeconds: number;
+  /** True when ffmpeg reported at least one audio stream. Only meaningful
+   *  together with `recognized` — see the comment there. */
+  hasAudio: boolean;
+  /**
+   * True when ffmpeg actually opened the container and printed its
+   * `Input #0, <format>, from '...'` header.
+   *
+   * This is what separates "ffmpeg looked inside and there is genuinely no
+   * audio track" from "ffmpeg could not make sense of these bytes at all".
+   * Both produce hasAudio === false, but only the first is a file we should
+   * refuse. Unreadable bytes have always been accepted here (a truncated mp3
+   * uploads fine and simply reports duration 0), and that stays true.
+   */
+  recognized: boolean;
+  /** False when ffmpeg could not be run or timed out, so nothing else in this
+   *  object is meaningful and the caller must not reject the file on it. */
+  probed: boolean;
+}
+
+/** Parse `Duration: HH:MM:SS.ss`, the `Input #0,` header and
+ *  `Stream #0:N...: Audio:` out of the banner ffmpeg prints on stderr when
+ *  asked to open a file with no output. */
+export function parseMediaProbe(stderr: string): Omit<MediaProbe, "probed"> {
+  const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  let durationSeconds = 0;
+  if (match) {
+    const total = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+    durationSeconds = Number.isFinite(total) ? Math.round(total) : 0;
+  }
+  // e.g. "  Stream #0:1[0x2](und): Audio: aac (LC) ..." — the stream index and
+  // the bracketed id/language vary, so match on the "Audio:" tag itself. An
+  // embedded cover image is a separate "Video: mjpeg ... [attached pic]" line
+  // and never matches this.
+  const hasAudio = /Stream #\d+:\d+[^\n]*:\s*Audio:/.test(stderr);
+  // "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'clip.mp4':" — absent entirely
+  // when ffmpeg bails with "Error opening input: Invalid data found ...".
+  const recognized = /^Input #\d+,/m.test(stderr);
+  return { durationSeconds, hasAudio, recognized };
+}
+
+async function probeMedia(filePath: string): Promise<MediaProbe> {
   return new Promise((resolve) => {
     const ffmpeg = spawn(ffmpegPath || "ffmpeg", ["-hide_banner", "-i", filePath], {
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";
+    let settled = false;
+    const done = (probe: MediaProbe) => {
+      if (settled) return;
+      settled = true;
+      resolve(probe);
+    };
+    // Video containers are much larger than the audio files this used to see,
+    // and the probe only reads headers — but a network/USB path can still be
+    // slow, so allow more than the old 5s before giving up.
     const timeout = setTimeout(() => {
       ffmpeg.kill("SIGKILL");
-      resolve(0);
-    }, 5000);
+      done({ durationSeconds: 0, hasAudio: false, recognized: false, probed: false });
+    }, 20000);
     ffmpeg.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
     });
     ffmpeg.on("error", () => {
       clearTimeout(timeout);
-      resolve(0);
+      done({ durationSeconds: 0, hasAudio: false, recognized: false, probed: false });
     });
     ffmpeg.on("close", () => {
       clearTimeout(timeout);
-      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-      if (!match) {
-        resolve(0);
-        return;
-      }
-      const hours = Number(match[1]);
-      const minutes = Number(match[2]);
-      const seconds = Number(match[3]);
-      const total = hours * 3600 + minutes * 60 + seconds;
-      resolve(Number.isFinite(total) ? Math.round(total) : 0);
+      done({ ...parseMediaProbe(stderr), probed: true });
     });
   });
+}
+
+/**
+ * Remux the first audio stream of `source` into `target` (#149).
+ *
+ * `-c:a copy` — the audio is moved bit-for-bit into a Matroska audio
+ * container, so this is fast, lossless, and codec-agnostic. Nothing is
+ * re-encoded, so a 200 MB .mp4 becomes a few MB .mka with the original audio
+ * intact. Video, subtitle and data streams are dropped.
+ *
+ * Returns true only if ffmpeg exited 0 AND produced a non-empty file, so a
+ * partial/zero-byte result can never be mistaken for a successful extraction.
+ * Callers fall back to keeping the original container, which plays fine.
+ */
+async function extractAudioTrack(source: string, target: string): Promise<boolean> {
+  const ok = await new Promise<boolean>((resolve) => {
+    const ffmpeg = spawn(
+      ffmpegPath || "ffmpeg",
+      ["-hide_banner", "-loglevel", "error", "-y", "-i", source,
+       "-vn", "-sn", "-dn", "-map", "0:a:0", "-c:a", "copy", target],
+      { stdio: ["ignore", "ignore", "ignore"] },
+    );
+    let settled = false;
+    const done = (v: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    // Remuxing is I/O bound, but a multi-GB input on a slow disk still takes
+    // a while. Cap it so a pathological file cannot wedge the upload request.
+    const timeout = setTimeout(() => {
+      ffmpeg.kill("SIGKILL");
+      done(false);
+    }, 120000);
+    ffmpeg.on("error", () => { clearTimeout(timeout); done(false); });
+    ffmpeg.on("close", (code) => { clearTimeout(timeout); done(code === 0); });
+  });
+  if (!ok) return false;
+  try {
+    return statSync(target).size > 0;
+  } catch {
+    return false;
+  }
 }
 
 export class LocalMusicProvider implements MusicProvider {
@@ -171,33 +288,75 @@ export class LocalMusicProvider implements MusicProvider {
     const ext = path.extname(originalName).toLowerCase();
     // Validate by the (sanitised) file extension only — never trust the
     // client-supplied Content-Type. This also guarantees the STORED extension
-    // is one of the known audio types, so a spoofed header cannot persist an
-    // arbitrary-extension blob on disk.
-    if (!AUDIO_EXTENSIONS.has(ext)) {
-      throw new Error("只支持常见音频文件，如 mp3、flac、wav、m4a、ogg、opus、aac、webm 等");
+    // is one of the known audio/video types, so a spoofed header cannot
+    // persist an arbitrary-extension blob on disk.
+    if (!isSupportedUploadExt(ext)) {
+      throw new Error(
+        "只支持常见音频文件（mp3、flac、wav、m4a、ogg、opus、aac、webm 等）" +
+        "和视频文件（mp4、mov、avi、mkv、flv、wmv 等，仅取其中的音轨播放）",
+      );
     }
     if (!input.buffer || input.buffer.length === 0) {
       throw new Error("上传文件为空");
     }
 
     const id = crypto.randomUUID();
-    const storedName = `${id}${ext}`;
-    const filePath = path.join(this.uploadDir, storedName);
+    const isVideo = VIDEO_EXTENSIONS.has(ext);
+    let filePath = path.join(this.uploadDir, `${id}${ext}`);
     writeFileSync(filePath, input.buffer);
 
-    const duration = await probeDurationSeconds(filePath);
+    let probe: MediaProbe;
+    try {
+      probe = await probeMedia(filePath);
+    } catch {
+      probe = { durationSeconds: 0, hasAudio: false, recognized: false, probed: false };
+    }
+
+    // Reject a video with no audio track up front (#149). Left to playback it
+    // would produce a silent, zero-byte stream that just looks like a broken
+    // song. Require `recognized` as well as `probed`: bytes ffmpeg cannot open
+    // at all report hasAudio false for a different reason, and those have
+    // always been accepted (a truncated upload lands with duration 0) — this
+    // change must not start rejecting them.
+    if (isVideo && probe.probed && probe.recognized && !probe.hasAudio) {
+      rmSync(filePath, { force: true });
+      throw new Error("这个视频里没有音轨，无法播放");
+    }
+
+    let size = input.buffer.length;
+    if (isVideo) {
+      // Keep only the audio. The video bytes are dead weight against the
+      // upload-directory quota and would never be used.
+      const extracted = path.join(this.uploadDir, `${id}${EXTRACTED_AUDIO_EXT}`);
+      if (await extractAudioTrack(filePath, extracted)) {
+        try {
+          size = statSync(extracted).size;
+          rmSync(filePath, { force: true });
+          filePath = extracted;
+        } catch {
+          // Could not stat/remove (Windows lock) — keep playing the original
+          // container and drop the half-finished extract.
+          rmSync(extracted, { force: true });
+        }
+      } else {
+        // Extraction failed (exotic codec Matroska won't take, timeout, …).
+        // The original container still plays: ffmpeg picks its audio stream.
+        rmSync(extracted, { force: true });
+      }
+    }
+
     const song: LocalSongRecord = {
       id,
       name: titleFromFileName(originalName),
       artist: "本地上传",
       album: "本地音乐",
-      duration,
+      duration: probe.durationSeconds,
       coverUrl: "",
       platform: "local",
       filePath,
       originalName,
       uploadedAt: new Date().toISOString(),
-      size: input.buffer.length,
+      size,
       mimeType: input.mimeType || "application/octet-stream",
     };
 
