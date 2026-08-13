@@ -145,3 +145,60 @@ describe("BotProfileManager custom avatar precedence", () => {
     expect(ts.clearCalls).toBe(0);
   });
 });
+
+// #148: the persisted avatar is loaded in the BotInstance constructor, before
+// tsClient.connect() has run. Loading it must not touch the wire at all.
+describe("BotProfileManager loadCustomAvatar (pre-connect load, #148)", () => {
+  let ts: ReturnType<typeof makeMockTs>;
+  beforeEach(() => { ts = makeMockTs(); });
+
+  it("does not upload or clear anything when called before connect", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgOn, "Bot");
+    pm.loadCustomAvatar(Buffer.from([7, 7, 7]));
+    await flush();
+    expect(ts.uploadCalls.length).toBe(0);
+    expect(ts.clearCalls).toBe(0);
+    expect(ts.fileTransferInitUpload).not.toHaveBeenCalled();
+  });
+
+  it("the loaded avatar is uploaded once onConnect fires", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgOn, "Bot");
+    pm.loadCustomAvatar(Buffer.from([7, 7, 7]));
+    await flush();
+    pm.onConnect();
+    await flush();
+    expect(ts.uploadCalls.length).toBe(1);
+    expect(ts.uploadCalls[0].equals(Buffer.from([7, 7, 7]))).toBe(true);
+  });
+
+  it("survives a reconnect: onConnect re-applies the loaded avatar every time", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgOn, "Bot");
+    pm.loadCustomAvatar(Buffer.from([8]));
+    pm.onConnect();
+    await flush();
+    pm.onConnect();
+    await flush();
+    expect(ts.uploadCalls.length).toBe(2);
+  });
+
+  it("loading null leaves the wire untouched and onConnect stays quiet", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgOn, "Bot");
+    pm.loadCustomAvatar(null);
+    pm.onConnect();
+    await flush();
+    expect(ts.uploadCalls.length).toBe(0);
+    expect(ts.clearCalls).toBe(0);
+  });
+
+  it("setCustomAvatar still uploads immediately after connect (post-connect edit unchanged)", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgOn, "Bot");
+    pm.loadCustomAvatar(Buffer.from([1]));
+    pm.onConnect();
+    await flush();
+    ts.uploadCalls.length = 0;
+    pm.setCustomAvatar(Buffer.from([2, 2]));
+    await flush();
+    expect(ts.uploadCalls.length).toBe(1);
+    expect(ts.uploadCalls[0].equals(Buffer.from([2, 2]))).toBe(true);
+  });
+});

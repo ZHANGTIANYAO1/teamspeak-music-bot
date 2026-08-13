@@ -66,6 +66,20 @@ export class BotProfileManager {
   // --- Public API ---
 
   /**
+   * Store a persisted custom avatar WITHOUT touching TeamSpeak (#148).
+   *
+   * Used during BotInstance construction, when the TS connection does not
+   * exist yet: setCustomAvatar would immediately fire the three-step file
+   * transfer (fileTransferInitUpload → uploadFileData → clientupdate) against
+   * a client that has not connected, so the upload always failed and the
+   * saved avatar never appeared. onConnect() re-applies this.customAvatar
+   * once the handshake completes, so loading it silently here loses nothing.
+   */
+  loadCustomAvatar(buffer: Buffer | null): void {
+    this.customAvatar = buffer;
+  }
+
+  /**
    * Set/clear the persistent idle avatar. Pass null to remove.
    *
    * If the bot is currently in an idle state (no song playing OR
