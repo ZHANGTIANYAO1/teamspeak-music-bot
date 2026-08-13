@@ -884,7 +884,26 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.12.0：网站图标 / 移动端交互 / 安装脚本按 ABI 自愈
+### 最新版本 — v1.13.0：本地视频上传播放 / 头像上传时机
+
+处理了 2 个社区反馈的 issue。**没有配置变化，升级无需任何操作**；原有的本地音频上传行为完全不变。
+
+**本地视频上传播放（[#149](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/149)，[PR #151](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/151)，感谢 [@LadenceE](https://github.com/LadenceE)）**
+
+- 搜索页的本地上传现在也收**视频文件**：mp4 / mov / avi / mkv / flv / wmv / m4v / mpg / mpeg / 3gp / ts / m2ts / ogv。上传后当普通歌曲用——直接播放、下一首播放、加入队列都一样。
+- 视频**只保留音轨**：上传后立刻把音频流原样搬进一个音频容器（不重编码、无损），再删掉原视频。720p 素材实测落盘只剩原文件的 14%，不然十几个视频就把 5 GiB 的上传目录配额占满了。
+- 没有音轨的视频会在**上传时**就被拒绝并说明原因，而不是排进队列后静默跳过。
+- 单文件上限从 200 MB 提到 **500 MB**；超限时的报错从 Express 默认的 HTML 错误页（带堆栈和服务器绝对路径）换成正常的中文提示，浏览器端也会在开传前就拦下超大文件。
+- 上传进度按文件显示百分比，传完切到「服务端处理中」——视频比音频大得多，原先那句静止的「正在上传」看着像卡死。
+- 说明：这里做的是「把你本地磁盘上的文件传上来播放」。让机器人直接读取**服务器**磁盘上任意路径的文件没有做——那等于开一个全盘任意文件读取的口子，而「播放服务器上已有的媒体库」用 Jellyfin 音源即可。
+
+**初始化阶段不再发起注定失败的头像上传（[#148](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/148)，[PR #150](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/150)，感谢 [@shenmu-rua](https://github.com/shenmu-rua)）**
+
+- 机器人构造阶段读出已保存的自定义头像后会立刻发起文件传输，但那时 TeamSpeak 还没连上，这次传输必定失败。现在构造阶段只把头像数据装入内存，实际上传交给连接成功后的 `onConnect()`。
+- **影响范围说明**：头像本身一直是能正常显示的（连接成功后本来就会重新应用一次），所以这不是「头像丢了」。真正的代价是每次启动 / 重启都会多一次注定失败的请求和一条 `Profile update failed` 警告日志——现在没有了。
+- 顺带修掉一个边角：头像文件写到一半崩溃会留下 0 字节文件，原先这会再触发两个同样注定失败的请求。
+
+### v1.12.0：网站图标 / 移动端交互 / 安装脚本按 ABI 自愈
 
 一次性处理了 6 个社区反馈的 issue。**没有配置变化，升级无需任何操作**；`!play id:<id>` 等旧写法全部继续可用。
 
