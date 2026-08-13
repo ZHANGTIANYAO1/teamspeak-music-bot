@@ -84,6 +84,7 @@ describe("LocalMusicProvider: source video cannot be deleted after extraction (#
     // Fell back to the original container — the extract was discarded.
     expect(resolved!.url.endsWith(".mp4")).toBe(true);
     expect(existsSync(resolved!.url)).toBe(true);
+    expect(existsSync(resolved!.url.replace(/\.mp4$/, ".m4a"))).toBe(false);
     expect(existsSync(resolved!.url.replace(/\.mp4$/, ".mka"))).toBe(false);
 
     const onDisk = statSync(resolved!.url).size;

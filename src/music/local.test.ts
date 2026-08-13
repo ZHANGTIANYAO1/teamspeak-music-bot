@@ -392,7 +392,9 @@ describe("LocalMusicProvider video upload, end to end (#149)", () => {
     const resolved = await p.getSongUrl(song.id);
     expect(resolved).not.toBeNull();
     // The video container is gone; what remains is the extracted audio track.
-    expect(resolved!.url.endsWith(".mka")).toBe(true);
+    // AAC (what libx264+aac mp4s carry) goes to .m4a so the encoder-priming
+    // edit list survives — see extractedAudioExt.
+    expect(resolved!.url.endsWith(".m4a")).toBe(true);
     expect(existsSync(join(dir, `${song.id}.mp4`))).toBe(false);
     expect(existsSync(resolved!.url)).toBe(true);
     expect(statSync(resolved!.url).size).toBeGreaterThan(0);
@@ -417,6 +419,36 @@ describe("LocalMusicProvider video upload, end to end (#149)", () => {
     // 2s of 48 kHz stereo s16le ≈ 384000 bytes; allow codec priming slack.
     expect(decoded.stdout.length).toBeGreaterThan(300000);
   }, 60000);
+
+  it.runIf(have)("aac extraction decodes bit-for-bit identically to the audio inside the video", async () => {
+    // The strongest statement of "lossless": decode the audio track straight
+    // out of the source mp4, decode the stored extract, compare the PCM.
+    // A Matroska remux would NOT pass this — it loses the MP4 edit list that
+    // discards AAC encoder priming, so it decodes ~23 ms longer.
+    const p = new LocalMusicProvider(dir);
+    const bytes = render("bitexact.mp4", withAudio(4, "libx264", "aac"));
+    const sourceCopy = join(dir, "source-kept.mp4");
+    writeFileSync(sourceCopy, bytes);
+
+    const song = await p.uploadAudio({
+      buffer: bytes, originalName: "bitexact.mp4", mimeType: "video/mp4",
+    });
+    const url = (await p.getSongUrl(song.id))!.url;
+
+    const toPcm = (input: string, pre: string[] = []) => spawnSync(
+      ffmpeg!,
+      ["-hide_banner", "-loglevel", "error", "-i", input, ...pre,
+       "-f", "s16le", "-ar", "48000", "-ac", "2", "-acodec", "pcm_s16le", "-"],
+      { maxBuffer: 128 * 1024 * 1024 },
+    );
+
+    const fromVideo = toPcm(sourceCopy, ["-vn", "-map", "0:a:0"]);
+    const fromExtract = toPcm(url);
+    expect(fromVideo.status).toBe(0);
+    expect(fromExtract.status).toBe(0);
+    expect(fromExtract.stdout.length).toBe(fromVideo.stdout.length);
+    expect(fromExtract.stdout.equals(fromVideo.stdout)).toBe(true);
+  }, 90000);
 
   it.runIf(have)("refuses a video that genuinely has no audio track", async () => {
     const p = new LocalMusicProvider(dir);

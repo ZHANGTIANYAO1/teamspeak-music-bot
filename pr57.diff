@@ -1,0 +1,591 @@
+diff --git a/src/music/netease.test.ts b/src/music/netease.test.ts
+index b2adb3d..ecc2202 100644
+--- a/src/music/netease.test.ts
++++ b/src/music/netease.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect } from "vitest";
+-import { parseLyrics } from "./netease.js";
++import { parseLyrics, mapNeteaseAlbums } from "./netease.js";
+ 
+ describe("NetEase adapter", () => {
+   it("parses LRC format lyrics", () => {
+@@ -28,4 +28,32 @@ describe("NetEase adapter", () => {
+     expect(lines[0].text).toBe("Hello world");
+     expect(lines[0].translation).toBe("你好世界");
+   });
++
++  it("mapNeteaseAlbums maps raw cloudsearch albums to Album shape", () => {
++    const raw = [
++      {
++        id: 42,
++        name: "Album A",
++        picUrl: "https://x/p.jpg",
++        artists: [{ name: "Artist X" }, { name: "Featured Y" }],
++        size: 12,
++      },
++      {
++        id: 99,
++        name: "Album B",
++        picUrl: "",
++        artists: [],
++      },
++    ];
++    expect(mapNeteaseAlbums(raw)).toEqual([
++      { id: "42", name: "Album A", artist: "Artist X / Featured Y", coverUrl: "https://x/p.jpg", songCount: 12, platform: "netease" },
++      { id: "99", name: "Album B", artist: "", coverUrl: "", songCount: 0, platform: "netease" },
++    ]);
++  });
++
++  it("mapNeteaseAlbums returns [] for empty/null input", () => {
++    expect(mapNeteaseAlbums([])).toEqual([]);
++    expect(mapNeteaseAlbums(null as any)).toEqual([]);
++    expect(mapNeteaseAlbums(undefined as any)).toEqual([]);
++  });
+ });
+diff --git a/src/music/netease.ts b/src/music/netease.ts
+index 8aaeab6..4a863db 100644
+--- a/src/music/netease.ts
++++ b/src/music/netease.ts
+@@ -8,6 +8,7 @@ import type {
+   SearchResult,
+   QrCodeResult,
+   AuthStatus,
++  Album,
+ } from "./provider.js";
+ 
+ export function parseLyrics(lrc: string, tlyric?: string): LyricLine[] {
+@@ -55,6 +56,18 @@ export function parseLyrics(lrc: string, tlyric?: string): LyricLine[] {
+   return lines.sort((a, b) => a.time - b.time);
+ }
+ 
++export function mapNeteaseAlbums(raw: any[] | null | undefined): Album[] {
++  if (!Array.isArray(raw)) return [];
++  return raw.map((a) => ({
++    id: String(a.id),
++    name: a.name ?? "",
++    artist: (a.artists ?? []).map((x: any) => x.name).join(" / "),
++    coverUrl: a.picUrl ?? "",
++    songCount: a.size ?? 0,
++    platform: "netease",
++  }));
++}
++
+ // NetEase quality levels: standard(128k) higher(192k) exhigh(320k) lossless(flac) hires(hi-res) jyeffect jymaster
+ export const NETEASE_QUALITY_LEVELS = [
+   { value: "standard", label: "标准 (128kbps)", bitrate: 128 },
+@@ -91,7 +104,7 @@ export class NeteaseProvider implements MusicProvider {
+   }
+ 
+   async search(query: string, limit = 20): Promise<SearchResult> {
+-    const [songRes, playlistRes] = await Promise.all([
++    const [songRes, playlistRes, albumRes] = await Promise.all([
+       this.api.get("/cloudsearch", {
+         params: { keywords: query, type: 1, limit, ...this.cookieParams },
+       }),
+@@ -103,6 +116,9 @@ export class NeteaseProvider implements MusicProvider {
+           ...this.cookieParams,
+         },
+       }),
++      this.api.get("/cloudsearch", {
++        params: { keywords: query, type: 10, limit: 5, ...this.cookieParams },
++      }),
+     ]);
+ 
+     const songs: Song[] = (songRes.data?.result?.songs ?? []).map(
+@@ -127,7 +143,9 @@ export class NeteaseProvider implements MusicProvider {
+       platform: "netease",
+     }));
+ 
+-    return { songs, playlists, albums: [] };
++    const albums = mapNeteaseAlbums(albumRes.data?.result?.albums);
++
++    return { songs, playlists, albums };
+   }
+ 
+   async getSongUrl(songId: string, quality?: string): Promise<string | null> {
+diff --git a/src/music/qq.test.ts b/src/music/qq.test.ts
+new file mode 100644
+index 0000000..4f606cf
+--- /dev/null
++++ b/src/music/qq.test.ts
+@@ -0,0 +1,43 @@
++import { describe, it, expect } from "vitest";
++import { mapQqAlbums } from "./qq.js";
++
++describe("QQ adapter", () => {
++  it("mapQqAlbums maps albumMID-style raw entries", () => {
++    const raw = [
++      {
++        albumMID: "abc",
++        albumName: "Aero",
++        singerName: "Singer A",
++      },
++      {
++        albumMID: "xyz",
++        albumName: "Beta",
++        singer: [{ name: "Singer B" }, { name: "Singer C" }],
++      },
++    ];
++    const out = mapQqAlbums(raw);
++    expect(out).toHaveLength(2);
++    expect(out[0]).toMatchObject({
++      id: "abc",
++      name: "Aero",
++      artist: "Singer A",
++      platform: "qq",
++    });
++    expect(out[0].coverUrl).toContain("T002R300x300M000abc.jpg");
++    expect(out[1].artist).toBe("Singer B / Singer C");
++    expect(out[1].coverUrl).toContain("xyz");
++  });
++
++  it("mapQqAlbums returns [] for empty/null input", () => {
++    expect(mapQqAlbums([])).toEqual([]);
++    expect(mapQqAlbums(null as any)).toEqual([]);
++    expect(mapQqAlbums(undefined as any)).toEqual([]);
++  });
++
++  it("mapQqAlbums falls back to albumPic when no albumMID", () => {
++    const raw = [{ albumName: "C", albumPic: "https://x/p.jpg", singerName: "S" }];
++    const out = mapQqAlbums(raw);
++    expect(out[0].coverUrl).toBe("https://x/p.jpg");
++    expect(out[0].id).toBe("");
++  });
++});
+diff --git a/src/music/qq.ts b/src/music/qq.ts
+index 9c0360d..1e7a8ae 100644
+--- a/src/music/qq.ts
++++ b/src/music/qq.ts
+@@ -8,6 +8,7 @@ import type {
+   SearchResult,
+   QrCodeResult,
+   AuthStatus,
++  Album,
+ } from "./provider.js";
+ import { parseLyrics } from "./netease.js";
+ 
+@@ -27,6 +28,26 @@ const qqFavApi = axios.create({
+   headers: { referer: "https://y.qq.com/" },
+ });
+ 
++export function mapQqAlbums(raw: any[] | null | undefined): Album[] {
++  if (!Array.isArray(raw)) return [];
++  return raw.map((a) => {
++    const id = String(a.albumMID ?? a.mid ?? a.albumID ?? "");
++    const artist = a.singerName
++      ?? (Array.isArray(a.singer) ? a.singer.map((s: any) => s.name).join(" / ") : "");
++    const coverUrl = id
++      ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${id}.jpg`
++      : (a.albumPic ?? "");
++    return {
++      id,
++      name: a.albumName ?? a.title ?? "",
++      artist,
++      coverUrl,
++      songCount: a.song_count ?? a.songCount ?? 0,
++      platform: "qq" as const,
++    };
++  });
++}
++
+ function computeGtk(pSkey: string): number {
+   let hash = 5381;
+   for (let i = 0; i < pSkey.length; i++) {
+@@ -65,11 +86,12 @@ export class QQMusicProvider implements MusicProvider {
+       req_0: {
+         module: "music.search.SearchCgiService",
+         method: "DoSearchForQQMusicDesktop",
+-        param: {
+-          searchid: "1",
+-          query,
+-          num_per_page: Math.min(limit, 50),
+-        },
++        param: { searchid: "1", query, num_per_page: Math.min(limit, 50), search_type: 0 },
++      },
++      req_album: {
++        module: "music.search.SearchCgiService",
++        method: "DoSearchForQQMusicDesktop",
++        param: { searchid: "1", query, num_per_page: 5, search_type: 8 },
+       },
+     });
+     const res = await qqDirectApi.get("/cgi-bin/musicu.fcg", {
+@@ -90,7 +112,10 @@ export class QQMusicProvider implements MusicProvider {
+       platform: "qq",
+     }));
+ 
+-    return { songs, playlists: [], albums: [] };
++    const albumList: any[] = res.data?.req_album?.data?.body?.album?.list ?? [];
++    const albums = mapQqAlbums(albumList);
++
++    return { songs, playlists: [], albums };
+   }
+ 
+   async getSongUrl(songId: string, quality?: string): Promise<string | null> {
+diff --git a/src/web/api/music.ts b/src/web/api/music.ts
+index b08f9a2..edf9c04 100644
+--- a/src/web/api/music.ts
++++ b/src/web/api/music.ts
+@@ -52,14 +52,20 @@ export function createMusicRouter(
+       ]);
+ 
+       const songs = [
+-        ...(neteaseResult.status === "fulfilled"
+-          ? neteaseResult.value.songs
+-          : []),
++        ...(neteaseResult.status === "fulfilled" ? neteaseResult.value.songs : []),
+         ...(qqResult.status === "fulfilled" ? qqResult.value.songs : []),
+         ...(bilibiliResult.status === "fulfilled" ? bilibiliResult.value.songs : []),
+       ];
++      const albums = [
++        ...(neteaseResult.status === "fulfilled" ? neteaseResult.value.albums : []),
++        ...(qqResult.status === "fulfilled" ? qqResult.value.albums : []),
++      ];
++      const playlists = [
++        ...(neteaseResult.status === "fulfilled" ? neteaseResult.value.playlists : []),
++        ...(qqResult.status === "fulfilled" ? qqResult.value.playlists : []),
++      ];
+ 
+-      res.json({ songs });
++      res.json({ songs, albums, playlists });
+     } catch (err) {
+       logger.error({ err }, "Unified search failed");
+       res.status(500).json({ error: (err as Error).message });
+diff --git a/src/web/api/player.ts b/src/web/api/player.ts
+index a9af600..4f0930b 100644
+--- a/src/web/api/player.ts
++++ b/src/web/api/player.ts
+@@ -313,6 +313,78 @@ export function createPlayerRouter(
+     }
+   });
+ 
++  // Play an album by ID — mirrors play-playlist but calls getAlbumSongs
++  router.post("/:botId/play-album", async (req, res) => {
++    try {
++      const bot = (req as any).bot;
++      const { albumId, platform } = req.body;
++      const provider = bot.getProviderFor(
++        platform === "bilibili" || platform === "qq" || platform === "youtube"
++          ? platform
++          : "netease"
++      );
++
++      // Stop current playback
++      bot.getPlayer().stop();
++      bot.getPlayer().resetFailures();
++
++      const songs = await provider.getAlbumSongs(albumId);
++      if (songs.length === 0) {
++        res.json({ message: "Album is empty" });
++        return;
++      }
++
++      // QQ-specific optimization: batch-resolve playable IDs to avoid
++      // wasting retries on region/copyright-restricted tracks.
++      let queueable: { id: string }[] = songs;
++      const totalCount = songs.length;
++      const qqLike = provider as { getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null> };
++      if (typeof qqLike.getPlayableSongIds === "function") {
++        const playable = await qqLike.getPlayableSongIds(songs.map((s: { id: string }) => s.id));
++        if (playable !== null) {
++          queueable = songs.filter((s: { id: string }) => playable.has(s.id));
++        }
++      }
++      if (queueable.length === 0) {
++        res.json({ ok: false, message: `专辑 ${totalCount} 首歌曲均无版权可播放（区域/版权限制）` });
++        return;
++      }
++
++      const queue = bot.getQueueManager();
++      queue.clear();
++      for (const song of queueable) {
++        queue.add({ ...song, platform: provider.platform });
++      }
++
++      const mode = queue.getMode();
++      let first;
++      if (mode === "random" || mode === "rloop") {
++        const idx = Math.floor(Math.random() * queue.size());
++        first = queue.playAt(idx);
++      } else {
++        first = queue.play();
++      }
++
++      let started = first ? await bot.resolveAndPlay(first) : false;
++      if (first && !started) {
++        started = await bot.playNext(20);
++      }
++
++      const playing = queue.current();
++      const loadedMsg = queueable.length < totalCount
++        ? `已加载 ${queueable.length}/${totalCount} 首（其余区域/版权限制）`
++        : `已加载 ${queueable.length} 首`;
++      if (started && playing) {
++        res.json({ ok: true, message: `${loadedMsg}，正在播放：${playing.name}` });
++      } else {
++        res.json({ ok: false, message: `${loadedMsg}，但无法开始播放。` });
++      }
++    } catch (err) {
++      logger.error({ err }, "play-album failed");
++      res.status(500).json({ error: (err as Error).message });
++    }
++  });
++
+   // Play a single song by ID — resolves URL on demand
+   router.post("/:botId/play-song", async (req, res) => {
+     try {
+diff --git a/web/src/router/index.ts b/web/src/router/index.ts
+index cc060f5..d62afcd 100644
+--- a/web/src/router/index.ts
++++ b/web/src/router/index.ts
+@@ -22,6 +22,13 @@ const router = createRouter({
+       path: '/playlist/:id',
+       name: 'playlist',
+       component: () => import('../views/Playlist.vue'),
++      meta: { kind: 'playlist' },
++    },
++    {
++      path: '/album/:id',
++      name: 'album',
++      component: () => import('../views/Playlist.vue'),
++      meta: { kind: 'album' },
+     },
+     {
+       path: '/lyrics',
+diff --git a/web/src/stores/player.ts b/web/src/stores/player.ts
+index 9bc817d..083262c 100644
+--- a/web/src/stores/player.ts
++++ b/web/src/stores/player.ts
+@@ -322,6 +322,16 @@ export const usePlayerStore = defineStore('player', {
+       this._syncAfterAction();
+     },
+ 
++    async playAlbum(albumId: string, platform = 'netease') {
++      if (!this.activeBotId) return;
++      const res = await axios.post(`/api/player/${this.activeBotId}/play-album`, { albumId, platform });
++      if (res.data?.message) {
++        this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
++      }
++      this._setTiming(this.activeBotId, { serverElapsed: 0 });
++      this._syncAfterAction();
++    },
++
+     async pause() {
+       if (!this.activeBotId) return;
+       // Freeze elapsed at current interpolated value
+diff --git a/web/src/views/Playlist.vue b/web/src/views/Playlist.vue
+index d5c9f8d..d00101d 100644
+--- a/web/src/views/Playlist.vue
++++ b/web/src/views/Playlist.vue
+@@ -38,7 +38,7 @@
+       </div>
+     </template>
+ 
+-    <div v-else class="loading">歌单不存在或加载失败</div>
++    <div v-else class="loading">{{ kind === 'album' ? '专辑' : '歌单' }}不存在或加载失败</div>
+   </div>
+ </template>
+ 
+@@ -64,6 +64,8 @@ interface PlaylistDetail {
+   songCount: number;
+ }
+ 
++const kind = (route.meta.kind as string) ?? 'playlist'; // 'playlist' | 'album'
++
+ const playlist = ref<PlaylistDetail | null>(null);
+ const songs = ref<Song[]>([]);
+ const loading = ref(true);
+@@ -71,20 +73,32 @@ const loading = ref(true);
+ async function playAll() {
+   const id = route.params.id as string;
+   const platform = (route.query.platform as string) || 'netease';
+-  await store.playPlaylist(id, platform);
++  if (kind === 'album') {
++    await store.playAlbum(id, platform);
++  } else {
++    await store.playPlaylist(id, platform);
++  }
+ }
+ 
+ onMounted(async () => {
+   const id = route.params.id as string;
+   const platform = (route.query.platform as string) || 'netease';
+ 
++  const detailUrl = kind === 'album'
++    ? `/api/music/album/${id}/detail`
++    : `/api/music/playlist/${id}/detail`;
++  const songsUrl = kind === 'album'
++    ? `/api/music/album/${id}`
++    : `/api/music/playlist/${id}`;
++
+   // allSettled, not Promise.all — if detail 404s but songs is fine
+   // (e.g., a QQ playlist whose detail endpoint flaked but the song
+   // list resolved), we still want to show the songs rather than
+-  // the "歌单不存在" empty state.
++  // the "不存在" empty state. For albums, detail always 404s — that
++  // is intentional; the fallback stub below handles it.
+   const [detailRes, songsRes] = await Promise.allSettled([
+-    axios.get(`/api/music/playlist/${id}/detail`, { params: { platform } }),
+-    axios.get(`/api/music/playlist/${id}`, { params: { platform } }),
++    axios.get(detailUrl, { params: { platform } }),
++    axios.get(songsUrl, { params: { platform } }),
+   ]);
+ 
+   const detail = detailRes.status === 'fulfilled' ? detailRes.value.data?.playlist : null;
+@@ -96,7 +110,7 @@ onMounted(async () => {
+     // Fall back to a stub built from the route + first song's cover.
+     playlist.value = {
+       id,
+-      name: '歌单',
++      name: kind === 'album' ? '专辑' : '歌单',
+       description: '',
+       coverUrl: songList[0]?.coverUrl ?? '',
+       songCount: songList.length,
+@@ -104,7 +118,7 @@ onMounted(async () => {
+   } else {
+     playlist.value = null;
+     if (detailRes.status === 'rejected') {
+-      console.error('Failed to load playlist detail:', (detailRes.reason as any)?.response?.status, (detailRes.reason as any)?.message);
++      console.error('Failed to load detail:', (detailRes.reason as any)?.response?.status, (detailRes.reason as any)?.message);
+     }
+   }
+   songs.value = songList;
+diff --git a/web/src/views/Search.vue b/web/src/views/Search.vue
+index 0536e36..8822277 100644
+--- a/web/src/views/Search.vue
++++ b/web/src/views/Search.vue
+@@ -20,22 +20,54 @@
+ 
+     <div v-if="loading" class="loading">搜索中...</div>
+ 
+-    <div v-else-if="results.length > 0" class="results">
+-      <SongCard
+-        v-for="(song, i) in results"
+-        :key="`${song.platform}-${song.id}`"
+-        :song="song"
+-        :index="i + 1"
+-        :active="store.currentSong?.id === song.id"
+-        @play="store.playSong(song)"
+-        @playNext="store.playNextSong(song)"
+-        @add="store.addSong(song)"
+-      />
+-    </div>
++    <template v-else-if="songs.length || albums.length || playlists.length">
++      <section v-if="albums.length" class="result-section">
++        <h2 class="section-title">专辑</h2>
++        <div class="card-grid">
++          <router-link
++            v-for="al in albums"
++            :key="`${al.platform}-${al.id}`"
++            :to="`/album/${al.id}?platform=${al.platform}`"
++            class="card hover-scale"
++          >
++            <CoverArt :url="al.coverUrl" :size="160" :radius="10" :show-shadow="true" />
++            <div class="card-name">{{ al.name }}</div>
++            <div class="card-sub">{{ al.artist }}</div>
++          </router-link>
++        </div>
++      </section>
++
++      <section v-if="playlists.length" class="result-section">
++        <h2 class="section-title">歌单</h2>
++        <div class="card-grid">
++          <router-link
++            v-for="pl in playlists"
++            :key="`${pl.platform}-${pl.id}`"
++            :to="`/playlist/${pl.id}?platform=${pl.platform}`"
++            class="card hover-scale"
++          >
++            <CoverArt :url="pl.coverUrl" :size="160" :radius="10" :show-shadow="true" />
++            <div class="card-name">{{ pl.name }}</div>
++          </router-link>
++        </div>
++      </section>
++
++      <section v-if="songs.length" class="result-section">
++        <h2 class="section-title">单曲</h2>
++        <SongCard
++          v-for="(song, i) in songs"
++          :key="`${song.platform}-${song.id}`"
++          :song="song"
++          :index="i + 1"
++          :active="store.currentSong?.id === song.id"
++          @play="store.playSong(song)"
++          @playNext="store.playNextSong(song)"
++          @add="store.addSong(song)"
++        />
++      </section>
++    </template>
+ 
+-    <div v-else-if="searched" class="empty">
+-      未找到相关结果
+-    </div>
++    <div v-else-if="searched" class="empty">未找到相关结果</div>
+   </div>
+ </template>
+ 
+@@ -45,15 +77,21 @@ import { useRoute } from 'vue-router';
+ import { Icon } from '@iconify/vue';
+ import axios from 'axios';
+ import { usePlayerStore } from '../stores/player.js';
++import type { Song } from '../stores/player.js';
+ import SongCard from '../components/SongCard.vue';
++import CoverArt from '../components/CoverArt.vue';
+ 
+ const store = usePlayerStore();
+ const route = useRoute();
+ 
+ const query = ref((route.query.q as string) || '');
+-import { Song } from '../stores/player.js';
+ 
+-const results = ref<Song[]>([]);
++interface Album { id: string; name: string; artist: string; coverUrl: string; songCount?: number; platform: string; }
++interface Playlist { id: string; name: string; coverUrl: string; songCount?: number; platform: string; }
++
++const songs = ref<Song[]>([]);
++const albums = ref<Album[]>([]);
++const playlists = ref<Playlist[]>([]);
+ const loading = ref(false);
+ const searched = ref(false);
+ 
+@@ -62,12 +100,12 @@ async function doSearch() {
+   loading.value = true;
+   searched.value = true;
+   try {
+-    const res = await axios.get('/api/music/search/all', {
+-      params: { q: query.value },
+-    });
+-    results.value = res.data.songs;
++    const res = await axios.get('/api/music/search/all', { params: { q: query.value } });
++    songs.value = res.data.songs ?? [];
++    albums.value = res.data.albums ?? [];
++    playlists.value = res.data.playlists ?? [];
+   } catch {
+-    results.value = [];
++    songs.value = []; albums.value = []; playlists.value = [];
+   } finally {
+     loading.value = false;
+   }
+@@ -141,4 +179,23 @@ onMounted(() => {
+   flex-direction: column;
+   gap: 2px;
+ }
++
++.result-section {
++  margin-bottom: 32px;
++  .section-title { font-size: 18px; margin: 0 0 12px; opacity: 0.85; }
++}
++.card-grid {
++  display: grid;
++  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
++  gap: 16px;
++}
++.card {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  text-decoration: none;
++  color: inherit;
++  .card-name { font-size: 14px; line-height: 1.3; max-height: 2.6em; overflow: hidden; }
++  .card-sub  { font-size: 12px; opacity: 0.6; }
++}
+ </style>

@@ -56,10 +56,29 @@ const VIDEO_EXTENSIONS = new Set([
   ".ogv",
 ]);
 
-/** Container the extracted audio track is remuxed into. Matroska takes
+/** Fallback container for an extracted audio track. Matroska takes
  *  essentially any audio codec, so `-c:a copy` works without knowing what the
- *  source used — no re-encode, no quality loss, no codec/extension table. */
+ *  source used — no re-encode, no codec/extension table. */
 const EXTRACTED_AUDIO_EXT = ".mka";
+
+/**
+ * Container to remux an extracted track into, chosen by its codec.
+ *
+ * AAC gets .m4a rather than the Matroska fallback. MP4 stores the AAC encoder
+ * priming (the ~1000 warm-up samples every AAC encoder emits) in an edit list,
+ * and that edit list does NOT survive into Matroska — so an aac→.mka remux
+ * decodes ~23 ms longer than the source, with the priming samples audible at
+ * the head instead of discarded. Measured: −66 dBFS, i.e. inaudible, but the
+ * track is then fractionally out of step with its own reported duration for
+ * no reason. Copying aac into .m4a keeps the edit list and decodes
+ * byte-for-byte identical to the audio inside the original video.
+ *
+ * AAC is worth special-casing because it is what mp4 / mov / m4v — the
+ * formats people actually upload — almost always carry.
+ */
+function extractedAudioExt(codec: string | null): string {
+  return codec === "aac" ? ".m4a" : EXTRACTED_AUDIO_EXT;
+}
 
 function isSupportedUploadExt(ext: string): boolean {
   return AUDIO_EXTENSIONS.has(ext) || VIDEO_EXTENSIONS.has(ext);
@@ -108,6 +127,9 @@ export interface MediaProbe {
   /** True when ffmpeg reported at least one audio stream. Only meaningful
    *  together with `recognized` — see the comment there. */
   hasAudio: boolean;
+  /** Lowercased codec name of the first audio stream ("aac", "mp3", "opus",
+   *  …), or null when there is none. Picks the remux container. */
+  audioCodec: string | null;
   /**
    * True when ffmpeg actually opened the container and printed its
    * `Input #0, <format>, from '...'` header.
@@ -138,11 +160,13 @@ export function parseMediaProbe(stderr: string): Omit<MediaProbe, "probed"> {
   // the bracketed id/language vary, so match on the "Audio:" tag itself. An
   // embedded cover image is a separate "Video: mjpeg ... [attached pic]" line
   // and never matches this.
-  const hasAudio = /Stream #\d+:\d+[^\n]*:\s*Audio:/.test(stderr);
+  const audioMatch = stderr.match(/Stream #\d+:\d+[^\n]*:\s*Audio:\s*([A-Za-z0-9_]+)/);
+  const hasAudio = audioMatch !== null;
+  const audioCodec = audioMatch ? audioMatch[1].toLowerCase() : null;
   // "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'clip.mp4':" — absent entirely
   // when ffmpeg bails with "Error opening input: Invalid data found ...".
   const recognized = /^Input #\d+,/m.test(stderr);
-  return { durationSeconds, hasAudio, recognized };
+  return { durationSeconds, hasAudio, audioCodec, recognized };
 }
 
 async function probeMedia(filePath: string): Promise<MediaProbe> {
@@ -162,14 +186,14 @@ async function probeMedia(filePath: string): Promise<MediaProbe> {
     // slow, so allow more than the old 5s before giving up.
     const timeout = setTimeout(() => {
       ffmpeg.kill("SIGKILL");
-      done({ durationSeconds: 0, hasAudio: false, recognized: false, probed: false });
+      done({ durationSeconds: 0, hasAudio: false, audioCodec: null, recognized: false, probed: false });
     }, 20000);
     ffmpeg.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
     });
     ffmpeg.on("error", () => {
       clearTimeout(timeout);
-      done({ durationSeconds: 0, hasAudio: false, recognized: false, probed: false });
+      done({ durationSeconds: 0, hasAudio: false, audioCodec: null, recognized: false, probed: false });
     });
     ffmpeg.on("close", () => {
       clearTimeout(timeout);
@@ -309,7 +333,7 @@ export class LocalMusicProvider implements MusicProvider {
     try {
       probe = await probeMedia(filePath);
     } catch {
-      probe = { durationSeconds: 0, hasAudio: false, recognized: false, probed: false };
+      probe = { durationSeconds: 0, hasAudio: false, audioCodec: null, recognized: false, probed: false };
     }
 
     // Reject a video with no audio track up front (#149). Left to playback it
@@ -327,8 +351,17 @@ export class LocalMusicProvider implements MusicProvider {
     if (isVideo) {
       // Keep only the audio. The video bytes are dead weight against the
       // upload-directory quota and would never be used.
-      const extracted = path.join(this.uploadDir, `${id}${EXTRACTED_AUDIO_EXT}`);
-      if (await extractAudioTrack(filePath, extracted)) {
+      // Preferred container first; if that remux fails (a codec the container
+      // will not take), retry into Matroska, which takes almost anything.
+      const preferredExt = extractedAudioExt(probe.audioCodec);
+      let extracted = path.join(this.uploadDir, `${id}${preferredExt}`);
+      let ok = await extractAudioTrack(filePath, extracted);
+      if (!ok && preferredExt !== EXTRACTED_AUDIO_EXT) {
+        rmSync(extracted, { force: true });
+        extracted = path.join(this.uploadDir, `${id}${EXTRACTED_AUDIO_EXT}`);
+        ok = await extractAudioTrack(filePath, extracted);
+      }
+      if (ok) {
         try {
           // Commit filePath and size TOGETHER, and only after the source is
           // actually gone. rmSync(force) still throws EBUSY/EPERM on Windows,
