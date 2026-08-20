@@ -103,8 +103,10 @@ export function buildFfmpegArgs(url: string, seekSeconds: number): string[] {
       "-reconnect_on_http_error", "4xx,5xx",
     );
   }
+  args.push("-i", url);
+  // Output-side seek (after -i): works on CDNs that reject Range/keyframe seeks (NetEase music.126.net).
   if (seekSeconds > 0) args.push("-ss", String(seekSeconds));
-  args.push("-i", url, "-f", "s16le", "-ar", "48000", "-ac", "2", "-acodec", "pcm_s16le", "-");
+  args.push("-f", "s16le", "-ar", "48000", "-ac", "2", "-acodec", "pcm_s16le", "-");
 
   return args;
 }
