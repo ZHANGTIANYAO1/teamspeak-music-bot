@@ -55,13 +55,13 @@ describe("buildFfmpegArgs", () => {
     expect(idx).toBeLessThan(args.indexOf("-i")); // input options must precede -i
   });
 
-  it("inserts -ss before -i when seekSeconds > 0", () => {
+  it("inserts -ss after -i when seekSeconds > 0", () => {
     const args = buildFfmpegArgs("https://example.com/song.mp3", 42);
     const ssIdx = args.indexOf("-ss");
     const iIdx = args.indexOf("-i");
     expect(ssIdx).toBeGreaterThan(-1);
     expect(args[ssIdx + 1]).toBe("42");
-    expect(ssIdx).toBeLessThan(iIdx);
+    expect(ssIdx).toBeGreaterThan(iIdx);
   });
 
   it("does not insert -ss when seekSeconds is 0", () => {
