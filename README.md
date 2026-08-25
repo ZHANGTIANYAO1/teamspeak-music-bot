@@ -76,11 +76,11 @@
 >
 > 之后 `setup.bat` 会运行 `npm install` 安装所有依赖（包括内置 FFmpeg），按当前 Node 版本准备好原生模块，最后构建项目。之后每次只需双击 `start.bat` 启动。
 >
-> 其他 Node 大版本也能用，但通常没有现成的预编译包，安装脚本会改用源码编译，需要 Python + C/C++ 构建工具且耗时更久：better-sqlite3 从 12.10.0 起不再提供 Node 20（ABI 115）的预编译包，@discordjs/opus 0.10.0 也没有 Node 24（ABI 137）的——所以推荐 22 LTS。**装好之后不要再换 Node 大版本**：原生模块只能在编译它的那个版本上加载，换版本后必须重新运行 `setup.bat`（脚本会自动检测并重装，见下方常见问题）。
+> **Node 20 已不再支持**：better-sqlite3 从 12.10.0 起不再发布它那个 ABI（115）的预编译包，装起来必须先备好 Python + C++ 构建工具（[#152](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/152)）。Node 24 及更新的大版本能用，但 @discordjs/opus 0.10.0 同样没有 Node 24（ABI 137）的预编译包，安装脚本会改用源码编译，需要构建工具且耗时更久——所以推荐 22 LTS。**装好之后不要再换 Node 大版本**：原生模块只能在编译它的那个版本上加载，换版本后必须重新运行 `setup.bat`（脚本会自动检测并重装，见下方常见问题）。
 
 ### 方式二：手动安装（所有系统）
 
-**前置条件：** [Node.js 22 LTS](https://nodejs.org/)（推荐；Node 20 / 24 等其他大版本可用，但需要源码编译原生模块）和一个 TeamSpeak 服务器（TS3/TS5/TS6 均可）。
+**前置条件：** [Node.js 22 LTS](https://nodejs.org/)（Node 24 及更新版本也能用，但需要源码编译原生模块；Node 20 已不再支持）和一个 TeamSpeak 服务器（TS3/TS5/TS6 均可）。
 FFmpeg **已自动内置**，无需手动安装。
 
 ```bash

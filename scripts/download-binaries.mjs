@@ -417,11 +417,12 @@ function buildFromSource(command) {
 /**
  * A 404 from the CDN is not a mirror outage: it means this exact package
  * version publishes no prebuilt binary for the running Node ABI at all.
- * better-sqlite3 dropped its Node 20 (ABI 115) builds in 12.10.0, and
- * @discordjs/opus 0.10.0 has none for Node 24 (ABI 137) - so a user on either
- * of those majors lands in the source-build fallback below and is told to
- * install Python and a C++ toolchain. Switching Node major is the far cheaper
- * fix, and nothing else in this output points at it. See issue #152.
+ * @discordjs/opus 0.10.0 has no build for Node 24 (ABI 137), so a user on that
+ * major lands in the source-build fallback below and is told to install Python
+ * and a C++ toolchain. Switching Node major is the far cheaper fix, and nothing
+ * else in this output points at it. (better-sqlite3 dropping its Node 20 / ABI
+ * 115 builds in 12.10.0 is why Node 20 is no longer accepted at all.)
+ * See issue #152.
  */
 function explainMissingPrebuild(name, version, err) {
   if (!/HTTP 404/.test(err.message)) return;
@@ -694,10 +695,9 @@ try {
   // that same loop. Run these concurrently and the first module to fall back to
   // a source build kills every download still in flight — the connection is
   // healthy, the timer just never got a chance to be reset. That is not a rare
-  // race: npmmirror has no opus prebuild for ABI 137 (Node 24) and no
-  // better-sqlite3 prebuild for ABI 115 (Node 20), so on both of the Node
-  // versions this project supports, one module 404s within ~100ms and starts
-  // building while ffmpeg's ~80MB download is still going. ffmpeg is optional,
+  // race: @discordjs/opus 0.10.0 has no prebuild for ABI 137, so on Node 24 that
+  // module 404s within ~100ms and starts building while ffmpeg's ~80MB download
+  // is still going. ffmpeg is optional,
   // so the spurious failure used to be swallowed as a WARN and setup still
   // reported success — leaving the user with no ffmpeg and no working playback.
   // Nothing here benefits from overlap anyway: every probe is execFileSync.

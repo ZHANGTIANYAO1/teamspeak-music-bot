@@ -4,7 +4,7 @@
 # ==========================================
 
 # --- Stage 1: Build backend + frontend ---
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 
 # Install build tools for native modules (opus, better-sqlite3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,7 +30,7 @@ RUN npm run build
 RUN rm -rf node_modules && npm ci --production && npm cache clean --force
 
 # --- Stage 2: Production image ---
-FROM node:20-slim
+FROM node:22-slim
 
 # Install system FFmpeg — the ffmpeg-static npm package bundles a pre-compiled
 # binary that can SIGSEGV inside Docker (incompatible glibc / missing libs).
@@ -51,6 +51,8 @@ COPY --from=builder /app/node_modules ./node_modules
 # goes through npm, but an interactive `docker exec ... npm start` would
 # otherwise die on a missing script rather than starting the bot.
 COPY --from=builder /app/scripts/check-native.mjs ./scripts/check-native.mjs
+# ...and the module it imports for crash-proof logging.
+COPY --from=builder /app/scripts/lib/console-log.mjs ./scripts/lib/console-log.mjs
 
 # Data directory for database, cookies, logs
 RUN mkdir -p /app/data
