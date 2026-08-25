@@ -51,6 +51,7 @@ import { Readable } from "node:stream";
 import { execFileSync, execSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { createLineWriter } from "./lib/console-log.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_MODULES = join(ROOT, "node_modules");
@@ -61,6 +62,11 @@ const CDN = process.argv[2] || "https://cdn.npmmirror.com/binaries";
 const PLATFORM = process.platform;
 const ARCH = process.arch;
 const NODE_ABI = process.versions.modules;
+const NODE_MAJOR = Number(process.versions.node.split(".")[0]);
+/** The newest Node major this project is regularly tested against, and the one
+ *  every required addon currently ships a prebuild for. Keep in sync with
+ *  TESTED_NODE_MAJOR in scripts/setup.bat. */
+const TESTED_NODE_MAJOR = 22;
 
 /** Modules the bot cannot start without. ffmpeg-static is optional: a system
  *  ffmpeg on PATH is a documented fallback, so it only ever produces a WARN. */
@@ -79,10 +85,17 @@ const FFMPEG_MIN_BYTES = 20 * 1024 * 1024;
 // log keeps the full transcript too.
 const ECHO_STDOUT = process.env.TSMB_BINARY_LOG_STDOUT === "1";
 
+// Both writers swallow a failed write instead of letting it become an uncaught
+// 'error' event: a console that cannot print the Chinese half of a line (issue
+// #152) must not be able to abort a whole setup run. The two streams degrade
+// independently, so setup.log keeps the full bilingual transcript either way.
+const writeErr = createLineWriter(process.stderr);
+const writeOut = createLineWriter(process.stdout);
+
 function log(msg) {
   const line = msg === "" ? "" : `  [binary] ${msg}`;
-  process.stderr.write(`${line}\n`);
-  if (ECHO_STDOUT) process.stdout.write(`${line}\n`);
+  writeErr(line);
+  if (ECHO_STDOUT) writeOut(line);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +414,24 @@ function buildFromSource(command) {
   execSync(command, { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"] });
 }
 
+/**
+ * A 404 from the CDN is not a mirror outage: it means this exact package
+ * version publishes no prebuilt binary for the running Node ABI at all.
+ * better-sqlite3 dropped its Node 20 (ABI 115) builds in 12.10.0, and
+ * @discordjs/opus 0.10.0 has none for Node 24 (ABI 137) - so a user on either
+ * of those majors lands in the source-build fallback below and is told to
+ * install Python and a C++ toolchain. Switching Node major is the far cheaper
+ * fix, and nothing else in this output points at it. See issue #152.
+ */
+function explainMissingPrebuild(name, version, err) {
+  if (!/HTTP 404/.test(err.message)) return;
+  log(`${name}: ${name}@${version} ships no prebuilt binary for Node ${NODE_MAJOR} (ABI ${NODE_ABI})`);
+  log(
+    `${name}: Node ${TESTED_NODE_MAJOR} LTS has one — switching Node is usually much quicker than ` +
+      `setting up a compiler (换用 Node ${TESTED_NODE_MAJOR} LTS 通常比装编译环境快得多)`,
+  );
+}
+
 function buildToolsHint() {
   log("Install build tools first:");
   log("  Windows: npm install --global windows-build-tools  (或安装 Visual Studio Build Tools + Python)");
@@ -521,6 +552,7 @@ async function ensureOpus() {
       log(`${name}: prebuilt binary installed`);
     } catch (cdnErr) {
       log(`${name}: CDN install failed (${cdnErr.message})`);
+      explainMissingPrebuild(name, version, cdnErr);
       log(`${name}: falling back to a source build — 'npm rebuild ${name}' (可能需要几分钟)`);
       buildFromSource(`npm rebuild ${name}`);
     }
@@ -591,6 +623,7 @@ async function ensureBetterSqlite3() {
       log(`${name}: prebuilt binary installed (${humanSize(dest)})`);
     } catch (cdnErr) {
       log(`${name}: CDN install failed (${cdnErr.message})`);
+      explainMissingPrebuild(name, version, cdnErr);
       log(`${name}: falling back to a source build — 'npm rebuild ${name} --build-from-source' (可能需要几分钟)`);
       buildFromSource(`npm rebuild ${name} --build-from-source`);
     }
