@@ -23,6 +23,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createLineWriter } from "./lib/console-log.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_MODULES = join(ROOT, "node_modules");
@@ -106,7 +107,11 @@ for (const spec of REQUIRED) {
 function report() {
   const stamp = readStamp();
   const mismatch = broken.find((b) => b.abiMismatch);
-  const out = (line) => process.stderr.write(`${line}\n`);
+  // Never let a failed console write become an uncaught error and replace this
+  // report with a stack trace - the console that cannot print the Chinese half
+  // of these lines is exactly the one a user needs the English half from.
+  // See scripts/lib/console-log.mjs and issue #152.
+  const out = createLineWriter(process.stderr);
 
   out("");
   out("============================================================");

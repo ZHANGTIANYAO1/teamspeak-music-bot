@@ -4,7 +4,7 @@
   "description": "TeamSpeak music bot with NetEase Cloud Music and QQ Music support",
   "type": "module",
   "engines": {
-    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+    "node": "^22.12.0 || >=24.0.0"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
