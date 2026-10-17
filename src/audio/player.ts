@@ -206,6 +206,14 @@ export class AudioPlayer extends EventEmitter {
   private duckingRampStartedAt = 0;
   private duckingRampDurationMs = 0;
   private pcmBuffer: Buffer = Buffer.alloc(0);
+  private transitionSilence = false;
+  private pauseFrames = 0;
+  private resumeSilenceFrames = 0;
+  private stopAfterPauseTail = false;
+  private transportRampStart: number | null = null;
+  private transportRampEnd: number | null = null;
+  private transportRampFrom = 1;
+  private transportRampTo = 1;
   private logger: Logger;
   private frameLoopRunning = false;
   private nextFrameTime = 0;
@@ -256,7 +264,7 @@ export class AudioPlayer extends EventEmitter {
 
   play(url: string, seekSeconds = 0, songDuration = 0): void {
     // 1. 停止当前所有播放，自增 sessionId 屏蔽旧回调 （
-    this.stop();
+    this.stop(true);
 
     const currentSessionId = this.sessionId; 
     this.currentUrl = url;
@@ -270,7 +278,7 @@ export class AudioPlayer extends EventEmitter {
 
     if (this.consecutiveFailures >= AudioPlayer.MAX_CONSECUTIVE_FAILURES) {
       this.logger.error({ failures: this.consecutiveFailures }, "FFmpeg failures limit reached");
-      this.state = "idle";
+      this.stop();
       this.emit("error", new Error("ffmpeg unavailable"));
       return;
     }
@@ -497,7 +505,7 @@ export class AudioPlayer extends EventEmitter {
   playPcmStream(readable: Readable, opts: { onExternalEnd?: () => void } = {}): void {
     // 1. Fence current playback: stop() bumps sessionId, clears pcmBuffer, kills
     //    any ffmpeg, and DETACHES (never destroys) any prior external stream.
-    this.stop();
+    this.stop(true);
 
     const currentSessionId = this.sessionId;
     this.externalMode = true;
@@ -587,7 +595,26 @@ export class AudioPlayer extends EventEmitter {
     this.onExternalEnd = null;
   }
 
-  stop(): void {
+  stopWithFade(): void {
+    if (this.externalMode || this.state === "idle") {
+      this.stop();
+      return;
+    }
+    this.stopAfterPauseTail = true;
+    if (this.state === "playing") {
+      this.pauseFrames = 9;
+      this.setTransportRamp(0, 0, 5);
+      this.state = "paused";
+    } else if (this.pauseFrames === 0) {
+      this.stop();
+    }
+  }
+
+  stop(keepAlive = false): void {
+    const wasRunning = this.frameLoopRunning;
+    const deadline = this.nextFrameTime;
+    this.transitionSilence = keepAlive;
+    this.stopAfterPauseTail = false;
     // 3. 递增 ID 是最有效的逻辑“隔离墙”
     this.sessionId++; 
     this.frameLoopRunning = false;
@@ -630,6 +657,17 @@ export class AudioPlayer extends EventEmitter {
     this.seekOffset = 0;
     this.framesPlayed = 0;
     this.healthyFrames = 0;
+    this.pauseFrames = 0;
+    this.resumeSilenceFrames = 0;
+    this.transportRampStart = null;
+    this.transportRampEnd = null;
+    this.transportRampFrom = 1;
+    this.transportRampTo = 1;
+    if (keepAlive) {
+      this.frameLoopRunning = true;
+      this.nextFrameTime = wasRunning ? Math.max(performance.now(), deadline - FRAME_DURATION_MS) : performance.now();
+      this.scheduleNextFrame();
+    }
   }
 
   private forceCleanup(proc: ChildProcess, pid: number): void {
@@ -675,8 +713,25 @@ export class AudioPlayer extends EventEmitter {
       if (loopSessionId !== this.sessionId || !this.frameLoopRunning) return;
 
       const framesBeforeTick = this.framesPlayed;
-      if (this.state === "playing") this.sendNextFrame();
-      else if (this.state === "paused") this.nextFrameTime = performance.now();
+      if (this.state === "paused") {
+        if (this.pauseFrames > 0) {
+          this.pauseFrames--;
+          if (this.pauseFrames > 3) this.sendNextFrame();
+          else this.emitSilenceFrame(false);
+        } else {
+          this.nextFrameTime = performance.now();
+          if (this.stopAfterPauseTail) {
+            this.stop();
+            return;
+          }
+        }
+      }
+      else if (this.state === "idle" && this.transitionSilence) this.emitSilenceFrame(false);
+      else if (this.state === "playing" && this.resumeSilenceFrames > 0) {
+        this.resumeSilenceFrames--;
+        this.emitSilenceFrame(false);
+      }
+      else if (this.state === "playing") this.sendNextFrame();
       const frameSent = this.framesPlayed > framesBeforeTick;
 
       // 检测pcmBuffer不足PCM_FRAME_BYTES导致连续循环卡死：
@@ -748,7 +803,7 @@ export class AudioPlayer extends EventEmitter {
 
       // R3-4: likewise gated on state==="playing" — a drained/EOF'd stream must
       // not emit trackEnd while paused; end-detection resumes on resume().
-      if (this.state === "playing" && !this.externalMode && !this.ffmpeg && this.pcmBuffer.length < PCM_FRAME_BYTES) {
+      if (this.state === "playing" && !this.externalMode && !this.ffmpeg && !this.downloader && this.pcmBuffer.length < PCM_FRAME_BYTES) {
         this.frameLoopRunning = false;
         // Outer gate guarantees state==="playing"; end directly (no !=="idle" guard).
         this.state = "idle";
@@ -764,12 +819,12 @@ export class AudioPlayer extends EventEmitter {
 
   private sendNextFrame(): void {
     if (this.pcmBuffer.length < PCM_FRAME_BYTES) {
-      // External mode: the sidecar PCM stream is long-lived and must NOT end on
-      // a transient underrun. Emit an encoded silence frame so the 20ms voice
-      // timeline stays continuous instead of returning (which would desync TS).
-      if (this.externalMode) this.emitSilenceFrame();
+      // Keep the voice timeline continuous while the source is preparing/stalled.
+      // URL silence must not advance elapsed time or hide the stall watchdog.
+      if (this.externalMode || this.ffmpeg || this.downloader || this.transitionSilence) this.emitSilenceFrame(this.externalMode);
       return;
     }
+    this.transitionSilence = false;
     const pcmFrame = this.pcmBuffer.subarray(0, PCM_FRAME_BYTES);
     this.pcmBuffer = this.pcmBuffer.subarray(PCM_FRAME_BYTES);
 
@@ -798,11 +853,11 @@ export class AudioPlayer extends EventEmitter {
     }
   }
 
-  private emitSilenceFrame(): void {
+  private emitSilenceFrame(advanceTimeline = true): void {
     try {
       const opusFrame = this.encoder.encode(Buffer.alloc(PCM_FRAME_BYTES));
       this.emit("frame", opusFrame);
-      this.framesPlayed++;
+      if (advanceTimeline) this.framesPlayed++;
     } catch (err) {
       this.emit("error", err as Error);
     }
@@ -813,8 +868,10 @@ export class AudioPlayer extends EventEmitter {
     const now = performance.now();
     const startDuckingGain = this.duckingGainAt(now);
     const endDuckingGain = this.duckingGainAt(now + FRAME_DURATION_MS);
-    const startFactor = baseFactor * startDuckingGain;
-    const endFactor = baseFactor * endDuckingGain;
+    const startTransportGain = this.transportGainAt(now);
+    const endTransportGain = this.transportGainAt(now + FRAME_DURATION_MS);
+    const startFactor = baseFactor * startDuckingGain * startTransportGain;
+    const endFactor = baseFactor * endDuckingGain * endTransportGain;
 
     if (startFactor >= 1 && endFactor >= 1) {
       return Buffer.from(pcm);
@@ -844,6 +901,25 @@ export class AudioPlayer extends EventEmitter {
     return out;
   }
 
+  private setTransportRamp(target: number, delayFrames = 0, durationFrames = 3): void {
+    const now = performance.now();
+    const from = this.transportGainAt(now);
+    this.transportRampStart = now + FRAME_DURATION_MS * delayFrames;
+    this.transportRampEnd = this.transportRampStart + FRAME_DURATION_MS * durationFrames;
+    this.transportRampFrom = from;
+    this.transportRampTo = target;
+  }
+
+  private transportGainAt(at: number): number {
+    if (this.transportRampStart === null || this.transportRampEnd === null) return this.transportRampTo;
+    const progress = Math.max(0, Math.min(1, (at - this.transportRampStart) / (this.transportRampEnd - this.transportRampStart)));
+    if (progress >= 1) {
+      this.transportRampStart = null;
+      this.transportRampEnd = null;
+    }
+    return this.transportRampFrom + (this.transportRampTo - this.transportRampFrom) * progress;
+  }
+
   private duckingGainAt(at: number): number {
     if (this.duckingRampDurationMs <= 0) return this.duckingTargetGain;
 
@@ -868,11 +944,19 @@ export class AudioPlayer extends EventEmitter {
     // transport is delegated to the SpotifyController by the caller (Task 7).
     if (this.externalMode) return;
     if (this.currentUrl && Number.isFinite(seconds) && seconds >= 0) {
+      const paused = this.state === "paused";
       this.play(this.currentUrl, seconds, this.currentSongDuration);
+      if (paused && this.state === "playing") this.pause();
     }
   }
-  pause(): void { if (this.state === "playing") this.state = "paused"; }
-  resume(): void { if (this.state === "paused") { this.state = "playing"; this.nextFrameTime = performance.now(); } }
+  pause(): void {
+    if (this.state === "playing") {
+      this.pauseFrames = 9;
+      this.setTransportRamp(0, 0, 5);
+      this.state = "paused";
+    }
+  }
+  resume(): void { if (this.state === "paused") { this.pauseFrames = 0; this.resumeSilenceFrames = 3; this.setTransportRamp(1, 3, 5); this.state = "playing"; } }
   resetFailures(): void { this.consecutiveFailures = 0; }
   setVolume(vol: number): void { this.volume = Math.max(0, Math.min(100, vol)); }
   getVolume(): number { return this.volume; }
