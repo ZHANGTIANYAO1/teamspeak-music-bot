@@ -1780,6 +1780,10 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     player.getPlaybackSessionId = AudioPlayer.prototype.getPlaybackSessionId;
     player.pause = AudioPlayer.prototype.pause;
     player.resume = AudioPlayer.prototype.resume;
+    // The real pause()/resume() drive the de-click transport ramp
+    // (a0f0b49..6f165b5). A stub player must expose it too, or the prototype
+    // methods throw "setTransportRamp is not a function".
+    player.setTransportRamp = vi.fn();
     player.play = vi.fn(() => { player.sessionId++; player.state = "playing"; });
     const provider = { getSongUrl: vi.fn(async () => ({ url: "fresh" })) };
     const advances: string[] = [];

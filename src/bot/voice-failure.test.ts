@@ -65,9 +65,17 @@ describe("BotInstance persistent voice send failure", () => {
       expect(frames).toBe(50);
       h.tsClient.emit("voiceSendFailed", { consecutiveFailures: 100, durationMs: 2000 });
       vi.advanceTimersByTime(3000);
-      expect(frames).toBe(50);
-      expect(h.player.getElapsed()).toBe(1);
+      // Pausing emits a short de-click fade tail (pauseFrames) so the last
+      // audible frames ramp down instead of cutting off (a0f0b49). What this
+      // test guards is what happens AFTER that: the scheduler must go quiet
+      // and elapsed must stop advancing.
       expect(h.player.getState()).toBe("paused");
+      const framesAfterFade = frames;
+      const elapsedAfterFade = h.player.getElapsed();
+      expect(framesAfterFade).toBeLessThan(50 + 20);
+      vi.advanceTimersByTime(3000);
+      expect(frames).toBe(framesAfterFade);
+      expect(h.player.getElapsed()).toBe(elapsedAfterFade);
     } finally { h.player.stop(); }
   });
 
