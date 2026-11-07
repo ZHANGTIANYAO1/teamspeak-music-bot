@@ -805,6 +805,9 @@ export function createPlayerRouter(
     const limit = parseInt(req.query.limit as string) || 50;
     const records = database.getPlayHistory(req.params.botId, limit);
     const history = records.map((r) => ({
+      // rowId is the history row primary key — needed to delete a single record.
+      // `id` stays the platform song id so existing players keep working.
+      rowId: r.id,
       id: r.songId,
       name: r.songName,
       artist: r.artist,
@@ -817,6 +820,53 @@ export function createPlayerRouter(
     }));
     res.json({ history });
   });
+
+  // Delete one history record: /:botId/history/:rowId
+  router.delete(
+    "/:botId/history/:rowId",
+    authorize({ capability: "player.queue", guestFlag: "removeClear" }),
+    (req, res) => {
+      if (!database) {
+        res.status(404).json({ error: "history unavailable" });
+        return;
+      }
+      const rowId = Number.parseInt(req.params.rowId, 10);
+      if (!Number.isInteger(rowId) || rowId <= 0) {
+        res.status(400).json({ error: "invalid rowId" });
+        return;
+      }
+      const deleted = database.deletePlayHistory(req.params.botId, [rowId]);
+      res.json({ deleted });
+    }
+  );
+
+  // Batch delete / clear all: body { ids: number[] } or { all: true }
+  router.delete(
+    "/:botId/history",
+    authorize({ capability: "player.queue", guestFlag: "removeClear" }),
+    (req, res) => {
+      if (!database) {
+        res.status(404).json({ error: "history unavailable" });
+        return;
+      }
+      const body = (req.body ?? {}) as { ids?: unknown; all?: unknown };
+      if (body.all === true) {
+        const deleted = database.clearPlayHistory(req.params.botId);
+        res.json({ deleted });
+        return;
+      }
+      const ids = Array.isArray(body.ids)
+        ? body.ids.filter((v): v is number => Number.isInteger(v) && (v as number) > 0)
+        : [];
+      if (ids.length === 0) {
+        res.status(400).json({ error: "ids[] or all:true required" });
+        return;
+      }
+      // Cap the batch so a hostile payload cannot lock the DB for long.
+      const deleted = database.deletePlayHistory(req.params.botId, ids.slice(0, 500));
+      res.json({ deleted });
+    }
+  );
 
   return router;
 }
