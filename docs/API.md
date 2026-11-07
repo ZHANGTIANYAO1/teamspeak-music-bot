@@ -225,7 +225,9 @@ interface BotStatus {
 | GET | `/queue` | `{ queue: QueuedSong[], status: BotStatus }` |
 | GET | `/elapsed` | `{ elapsed: 42.5 }` |
 | DELETE | `/queue/:index` | `{ message }`(移除指定下标,能力 `player.queue`) |
-| GET | `/history?limit=50` | `{ history: [{ id, name, artist, album, coverUrl, platform, playedAt, requestedBy }] }` |
+| GET | `/history?limit=50` | `{ history: [{ rowId, id, name, artist, album, coverUrl, platform, playedAt, requestedBy }] }` |
+| DELETE | `/history/:rowId` | `{ deleted }`(删除单条记录,能力 `player.queue`) |
+| DELETE | `/history` | `{ deleted }`(请求体 `{ ids: number[] }` 批量删除或 `{ all: true }` 清空,能力 `player.queue`) |
 | GET | `/profile` | ProfileConfig |
 | PUT | `/profile` | ProfileConfig(能力 `bot.manage`) |
 
