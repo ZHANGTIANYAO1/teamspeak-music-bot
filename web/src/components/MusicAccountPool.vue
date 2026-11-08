@@ -140,7 +140,9 @@ const users = ref<AssignableUser[]>([]);
 const platforms = ref<Array<{ platform: string; playbackSupported: boolean }>>([]);
 const creating = ref(false);
 const error = ref('');
-const draft = reactive({ platform: 'netease', label: '', cookie: '', capacity: 0 });
+// Default to exclusive: sharing one login between members mixes their
+// playback history and recommendations, which is almost never intended.
+const draft = reactive({ platform: 'netease', label: '', cookie: '', capacity: 1 });
 const cookieDraft = reactive<Record<string, string>>({});
 const probeResult = ref<Record<string, { loggedIn: boolean; nickname?: string } | undefined>>({});
 
@@ -192,7 +194,7 @@ async function create() {
     });
     draft.label = '';
     draft.cookie = '';
-    draft.capacity = 0;
+    draft.capacity = 1;
     await load();
   } catch (err) {
     error.value = errText(err, '添加失败');
