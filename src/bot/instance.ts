@@ -7,8 +7,9 @@ import {
   type TS3VoiceSendFailure,
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
+import { resolveUrlWithRetry } from "./url-retry.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
-import type { MusicProvider, Platform, Song } from "../music/provider.js";
+import type { MusicProvider, Platform, Song, SongUrlResult } from "../music/provider.js";
 import {
   parseCommand,
   canRunCommand,
@@ -1022,8 +1023,7 @@ export class BotInstance extends EventEmitter {
   }
 
   /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
-  async resolveAndPlay(song: QueuedSong): Promise<boolean> {
-    if (!this.connected) {
+  async resolveAndPlay(song: QueuedSong): Promise<boolean> {    if (!this.connected) {
       this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
       return false;
     }
@@ -1045,9 +1045,36 @@ export class BotInstance extends EventEmitter {
           song.id = detail.id;
         }
       }
-      const result = await provider.getSongUrl(song.id);
+      // Retries live in resolveUrlWithRetry so the whole queue path (web click,
+      // chat !play, auto-advance, FM) benefits from the same budget, and the
+      // failure is logged once there instead of once per attempt.
+      // Retries happen here (not in the provider) so every queue path — web
+      // click, chat !play, auto-advance, FM — shares the same budget. The
+      // policy lives in url-retry.ts so it is unit tested without a bot; a
+      // config without the field means 0 retries, i.e. the previous behaviour.
+      const result = await resolveUrlWithRetry({
+        retries: this.config?.playUrlRetries,
+        resolve: (quality) => provider.getSongUrl(song.id, quality),
+        // NetEase's quality ladder is not continuous: a track can play at 192k
+        // while both 320k and 128k return null, so every lower level is tried.
+        // Providers without a quality knob return [] and keep one attempt.
+        fallbacks: provider.getFallbackQualities?.() ?? [],
+        // Stop / disconnect must abort the budget: retrying into a dead
+        // connection only delays the queue.
+        isCancelled: () => !this.connected,
+        onAttemptFailed: ({ attempt, total, quality, error }) => {
+          const fields = { songId: song.id, name: song.name, attempt, total, quality };
+          if (error) {
+            this.logger.warn({ ...fields, err: error }, "URL resolve threw — retrying");
+          } else if (attempt < total) {
+            this.logger.debug(fields, "URL resolve returned no URL — retrying");
+          } else {
+            // Once per track, after the budget is spent — not once per attempt.
+            this.logger.warn(fields, "No URL available after retries, skipping");
+          }
+        },
+      });
       if (!result?.url) {
-        this.logger.warn({ songId: song.id, name: song.name }, "No URL available, skipping");
         return false;
       }
       // Re-check connection state AFTER the network round-trip — the URL

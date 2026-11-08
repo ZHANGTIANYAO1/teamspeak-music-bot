@@ -137,6 +137,19 @@ export interface BotConfig {
    * keeps today's clear-and-play behavior.
    */
   playKeepsQueue: boolean;
+  /**
+   * Extra attempts to re-resolve a playable URL before a track is reported as
+   * unplayable.
+   *
+   * NetEase intermittently answers `url: null` for a song that resolves fine a
+   * second later (upstream risk-control / edge jitter), which users experienced
+   * as "click once → 无法播放（区域/版权限制）, click again → works". Retrying
+   * silently inside one request turns that into a normal play.
+   *
+   * 0 disables retries (fail fast, pre-existing behaviour). Clamped to 0..5 so
+   * a hand-edited config cannot turn every failed track into a long stall.
+   */
+  playUrlRetries: number;
   // Public base URL used when generating share links (e.g. the bot专属链接).
   // Leave empty to use the browser's current origin. Example:
   //   "https://music.example.com" or "http://1.2.3.4:3000"
@@ -192,6 +205,9 @@ export function getDefaultConfig(): BotConfig {
     localAudioEnabled: true,
     savedQueuesEnabled: false,
     playKeepsQueue: false,
+    // Two extra attempts: enough to ride out a transient NetEase hiccup without
+    // making a genuinely unlicensed track feel stuck (~1s of backoff total).
+    playUrlRetries: 2,
     publicUrl: "",
     trustProxy: false,
     guestMode: {
@@ -395,6 +411,16 @@ export function loadConfig(path: string): BotConfig {
     const savedQueuesEnabled = partial.savedQueuesEnabled === true;
     const playKeepsQueue = partial.playKeepsQueue === true;
 
+    // Play-URL retry budget. Anything non-numeric (legacy config, `"3"`,
+    // `null`) falls back to the default instead of disabling the retry, because
+    // "no retries" is the surprising outcome here — the feature exists to hide
+    // upstream flakiness from users.
+    const rawRetries = partial.playUrlRetries;
+    const playUrlRetries =
+      typeof rawRetries === "number" && Number.isFinite(rawRetries)
+        ? Math.min(5, Math.max(0, Math.trunc(rawRetries)))
+        : defaults.playUrlRetries;
+
     // Voice ducking is opt-in and the retained-volume percentage is consumed
     // directly by the audio path. Only a plain-object block with correctly
     // typed, finite and in-range fields may override the safe defaults.
@@ -457,6 +483,7 @@ export function loadConfig(path: string): BotConfig {
       enabledProviders,
       savedQueuesEnabled,
       playKeepsQueue,
+      playUrlRetries,
       voiceDucking,
       defaultPlatform: defaultPlatformPref,
     };

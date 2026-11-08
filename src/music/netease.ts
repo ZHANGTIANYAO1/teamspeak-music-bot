@@ -206,6 +206,24 @@ export class NeteaseProvider implements MusicProvider {
     return { url, trialDuration: parseNeteaseTrial(item) };
   }
 
+  /**
+   * Levels to fall back to when the configured one returns no URL.
+   *
+   * NetEase does not offer a continuous quality ladder per track: measured on a
+   * real library, a track can be available at "higher" (192k) while BOTH
+   * "exhigh" (320k) and "standard" (128k) answer `url: null`. So the caller must
+   * sweep every level BELOW the current one instead of assuming "just drop to
+   * the cheapest".
+   */
+  getFallbackQualities(): string[] {
+    const order = NETEASE_QUALITY_LEVELS.map((l) => l.value as string);
+    const index = order.indexOf(this.quality);
+    if (index <= 0) return [];
+    // order is low→high, so everything before the current level reversed gives
+    // best→worst below it (exhigh → ["higher", "standard"]).
+    return order.slice(0, index).reverse();
+  }
+
   async getSongDetail(songId: string): Promise<Song | null> {
     const res = await this.api.get("/song/detail", {
       params: { ids: songId, ...this.cookieParams },

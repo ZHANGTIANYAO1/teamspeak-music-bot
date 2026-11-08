@@ -134,6 +134,17 @@ export interface MusicProvider {
   setCookie(cookie: string): void;
   getCookie(): string;
   getAuthStatus(): Promise<AuthStatus>;
+  /**
+   * Lower quality levels to try when the configured one has no URL, ordered
+   * best→worst.
+   *
+   * NetEase does not publish a uniform ladder: a track can be playable at 192k
+   * ("higher") while BOTH 320k ("exhigh") and 128k ("standard") return null —
+   * so the list has to contain every level below the current one, not just the
+   * cheapest. Sources whose quality is not a user-selectable knob (Bilibili,
+   * local files, Jellyfin) omit this and the caller keeps its single attempt.
+   */
+  getFallbackQualities?(): string[];
   getPersonalFm?(): Promise<Song[]>;
   getDailyRecommendSongs?(): Promise<Song[]>;
   getUserPlaylists?(): Promise<Playlist[]>;

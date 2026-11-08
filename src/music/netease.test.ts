@@ -314,3 +314,32 @@ describe("NeteaseProvider.getArtistAllSongs (全部歌曲 paging)", () => {
     expect(page.hasMore).toBe(false);
   });
 });
+
+describe("NetEase quality fallback ladder", () => {
+  it("offers every lower level, best-first, for the default 320k setting", () => {
+    const p = new NeteaseProvider("http://x");
+    // Default quality is exhigh (320k) → 192k then 128k.
+    expect(p.getFallbackQualities()).toEqual(["higher", "standard"]);
+  });
+
+  // The real-world case that produced «点四五次才能播»: a track playable at
+  // 192k while BOTH 320k and 128k return null. Dropping only to the cheapest
+  // level would still fail, so 192k has to be in the list.
+  it("includes intermediate levels, not just the cheapest", () => {
+    const p = new NeteaseProvider("http://x");
+    p.setQuality("lossless");
+    expect(p.getFallbackQualities()).toEqual(["exhigh", "higher", "standard"]);
+  });
+
+  it("has nothing to offer once already at the lowest level", () => {
+    const p = new NeteaseProvider("http://x");
+    p.setQuality("standard");
+    expect(p.getFallbackQualities()).toEqual([]);
+  });
+
+  it("never proposes a level above the configured one", () => {
+    const p = new NeteaseProvider("http://x");
+    p.setQuality("higher");
+    expect(p.getFallbackQualities()).toEqual(["standard"]);
+  });
+});
