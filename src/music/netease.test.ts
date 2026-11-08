@@ -485,3 +485,73 @@ describe("NetEase — why a track has no URL", () => {
     expect(err.failure.upstream).toMatchObject({ fee: 8, payed: 0, level: "higher", br: 192000 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Outbound proxy
+//
+// On a cloud host NetEase answers -460 by IP, so the request has to leave from
+// somewhere else. The sidecar (NeteaseCloudMusicApi) supports this natively via
+// a `proxy` request parameter — no new dependency, no global-agent patching.
+// These tests pin that it is carried on EVERY call and that the default stays
+// exactly as before.
+// ---------------------------------------------------------------------------
+describe("NetEase — outbound proxy", () => {
+  function capture() {
+    const seen: Array<Record<string, unknown>> = [];
+    const p = new NeteaseProvider("http://127.0.0.1:3001");
+    (p as unknown as { api: { get: (u: string, c: any) => Promise<unknown> } }).api = {
+      get: async (_url: string, cfg: any) => {
+        seen.push({ ...cfg?.params });
+        return { data: { result: {}, data: [{ url: null, code: 200, fee: 8, level: "exhigh" }] } };
+      },
+    };
+    return { p, seen };
+  }
+
+  it("sends no proxy parameter by default — behaviour is unchanged", async () => {
+    const { p, seen } = capture();
+    await p.search("x").catch(() => {});
+    expect(seen.length).toBeGreaterThan(0);
+    for (const params of seen) expect(params.proxy).toBeUndefined();
+  });
+
+  it("carries the proxy on every call once configured", async () => {
+    const { p, seen } = capture();
+    p.setProxy("http://192.168.1.9:8118");
+    await p.search("x").catch(() => {});
+    expect(seen.length).toBeGreaterThan(0);
+    for (const params of seen) expect(params.proxy).toBe("http://192.168.1.9:8118");
+  });
+
+  it("carries it on the playback call too — that is the one that gets -460", async () => {
+    const { p, seen } = capture();
+    p.setProxy("http://192.168.1.9:8118");
+    await p.getSongUrl("1", "standard").catch(() => {});
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ id: "1", level: "standard", proxy: "http://192.168.1.9:8118" });
+  });
+
+  it("keeps the cookie alongside the proxy", async () => {
+    const { p, seen } = capture();
+    p.setCookie("MUSIC_U=abc");
+    p.setProxy("http://h:1");
+    await p.getSongUrl("1").catch(() => {});
+    // cookie is normalised on the way in, so compare loosely.
+    expect(String(seen[0].cookie)).toContain("MUSIC_U=abc");
+    expect(seen[0].proxy).toBe("http://h:1");
+  });
+
+  it("treats a blank value as direct service", async () => {
+    const { p, seen } = capture();
+    p.setProxy("   ");
+    await p.search("x").catch(() => {});
+    for (const params of seen) expect(params.proxy).toBeUndefined();
+    expect(p.getProxy()).toBe("");
+  });
+
+  it("trims the value it is given", () => {
+    const p = new NeteaseProvider("http://x");
+    p.setProxy("  http://h:1  ");
+    expect(p.getProxy()).toBe("http://h:1");
+  });
+});

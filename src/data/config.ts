@@ -150,6 +150,18 @@ export interface BotConfig {
    * a hand-edited config cannot turn every failed track into a long stall.
    */
   playUrlRetries: number;
+  /**
+   * Outbound HTTP proxy for the NetEase sidecar, e.g. `http://192.168.1.2:8118`.
+   *
+   * NetEase rejects cloud-datacenter IPs with `-460` ("网络环境存在风险") no matter
+   * which account is used, so on a VPS the only fix is to send the request out
+   * through somewhere else. Empty (the default) = direct, i.e. unchanged.
+   *
+   * Only `http://` proxies are supported — the sidecar implements this with a
+   * CONNECT tunnel. When left empty, `HTTPS_PROXY`/`HTTP_PROXY` from the
+   * environment is used as a fallback (see index.ts).
+   */
+  musicProxy: string;
   // Public base URL used when generating share links (e.g. the bot专属链接).
   // Leave empty to use the browser's current origin. Example:
   //   "https://music.example.com" or "http://1.2.3.4:3000"
@@ -208,6 +220,7 @@ export function getDefaultConfig(): BotConfig {
     // Two extra attempts: enough to ride out a transient NetEase hiccup without
     // making a genuinely unlicensed track feel stuck (~1s of backoff total).
     playUrlRetries: 2,
+    musicProxy: "",
     publicUrl: "",
     trustProxy: false,
     guestMode: {
@@ -421,6 +434,15 @@ export function loadConfig(path: string): BotConfig {
         ? Math.min(5, Math.max(0, Math.trunc(rawRetries)))
         : defaults.playUrlRetries;
 
+    // Outbound proxy for the NetEase sidecar. Only http(s) URLs are kept: a
+    // stray value here would silently break every music request, so anything
+    // unparseable is dropped back to "direct" instead of being passed through.
+    const rawMusicProxy = partial.musicProxy;
+    const musicProxy =
+      typeof rawMusicProxy === "string" && /^https?:\/\/[^\s]+$/i.test(rawMusicProxy.trim())
+        ? rawMusicProxy.trim()
+        : defaults.musicProxy;
+
     // Voice ducking is opt-in and the retained-volume percentage is consumed
     // directly by the audio path. Only a plain-object block with correctly
     // typed, finite and in-range fields may override the safe defaults.
@@ -484,6 +506,7 @@ export function loadConfig(path: string): BotConfig {
       savedQueuesEnabled,
       playKeepsQueue,
       playUrlRetries,
+      musicProxy,
       voiceDucking,
       defaultPlatform: defaultPlatformPref,
     };
