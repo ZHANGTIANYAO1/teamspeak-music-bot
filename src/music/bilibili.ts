@@ -464,6 +464,27 @@ export class BiliBiliProvider implements MusicProvider {
     this.cookie = cookie;
   }
 
+  /**
+   * A view of the same provider logged in as another account (#164 follow-up):
+   * a web user's own B站 login instead of the bot's shared one. Mirrors
+   * NeteaseProvider.withCookie so the web layer can treat every platform the
+   * same way.
+   *
+   * The anonymous buvid3 identity and the WBI signing key are carried over —
+   * both are account-independent caches, and re-fetching them per request would
+   * add two extra round-trips to every search.
+   */
+  withCookie(cookie: string): BiliBiliProvider {
+    const view = new BiliBiliProvider();
+    view.quality = this.quality;
+    view.buvidCookie = this.buvidCookie;
+    view.buvidInitialized = this.buvidInitialized;
+    view.wbiMixinKey = this.wbiMixinKey;
+    view.wbiKeyFetchedAt = this.wbiKeyFetchedAt;
+    view.setCookie(cookie);
+    return view;
+  }
+
   getCookie(): string {
     return this.cookie;
   }

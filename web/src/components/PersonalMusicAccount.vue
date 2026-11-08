@@ -1,30 +1,67 @@
 <template>
-  <!-- The signed-in user's own NetEase account, used for THEIR 私人FM instead
-       of the bot's shared login (#164). -->
+  <!-- The signed-in user's own music accounts (#164 + #164 follow-up).
+       Two ways an account can apply to this user:
+         - 自己扫码绑定 (source = personal)   → they may unlink it
+         - 管理员分配 (source = granted)     → only the admin can revoke it
+       Everything is read from /api/me/music/<platform>/status; the cookie never
+       reaches the browser. -->
   <div class="account-card">
     <div class="account-header">
-      <Icon icon="mdi:radio" class="account-icon" />
+      <Icon icon="mdi:account-music" class="account-icon" />
       <div class="account-info">
-        <div class="account-name">我的网易云账号（私人FM）</div>
-        <div class="account-status" :class="{ logged: status.loggedIn }">
-          <template v-if="status.loggedIn">已绑定: {{ status.nickname }}</template>
+        <div class="account-name">我的音乐账号</div>
+        <div class="account-status" :class="{ logged: status.loggedIn, granted: status.source === 'granted' }">
+          <template v-if="status.source === 'granted'">
+            由管理员分配：{{ status.label || '已分配的账号' }}
+            <template v-if="status.loggedIn && status.nickname">（{{ status.nickname }}）</template>
+            <template v-else-if="!status.loggedIn">，但登录已失效，请联系管理员</template>
+          </template>
+          <template v-else-if="status.loggedIn">已绑定：{{ status.nickname }}</template>
           <template v-else-if="status.linked">已绑定，但登录已失效，请重新扫码</template>
-          <template v-else>未绑定 — 私人FM使用机器人的共享账号</template>
+          <template v-else>未绑定 — 使用机器人的共享账号</template>
         </div>
       </div>
     </div>
 
+    <!-- Platform switch: only the sources this instance has enabled. -->
+    <div v-if="platforms.length > 1" class="platform-tabs">
+      <button
+        v-for="p in platforms"
+        :key="p"
+        class="platform-tab"
+        :class="{ active: p === current }"
+        @click="selectPlatform(p)"
+      >
+        {{ PLATFORM_LABEL[p] ?? p }}
+      </button>
+    </div>
+
     <p class="hint">
-      绑定后，你在网页端开启的网易云私人FM会按你自己的口味推荐；其他人不受影响。
-      仅保存在服务器上，不会显示给任何人。
+      <template v-if="status.source === 'granted'">
+        这个账号是管理员分配给你的，搜索、歌单、每日推荐和播放都会用它。想换成自己的账号，直接扫码绑定即可 — 自己的账号优先。
+      </template>
+      <template v-else-if="status.supportsQrLogin">
+        绑定后，{{ PLATFORM_LABEL[current] ?? current }}的搜索、歌单、每日推荐和播放地址都按你自己的账号获取，
+        看不到管理员的歌单和收藏。仅保存在服务器上，不会显示给任何人。
+      </template>
+      <template v-else>
+        该平台暂不支持在网页端自助绑定，需要账号请联系管理员分配。
+      </template>
     </p>
 
     <div class="login-methods">
-      <button class="login-btn" :disabled="qr.loading" @click="startQrLogin">
+      <button
+        v-if="status.supportsQrLogin"
+        class="login-btn"
+        :disabled="qr.loading"
+        @click="startQrLogin"
+      >
         <Icon icon="mdi:qrcode" />
         {{ status.linked ? '重新扫码绑定' : '扫码绑定' }}
       </button>
-      <button v-if="status.linked" class="login-btn" @click="unlink">
+      <!-- Only the user's OWN login can be removed here; an admin-granted one
+           is managed from Settings → 音乐账号分配. -->
+      <button v-if="status.canUnlink" class="login-btn" @click="unlink">
         <Icon icon="mdi:link-off" />
         解除绑定
       </button>
@@ -38,7 +75,7 @@
       <img :src="qr.dataUrl" class="qr-image" alt="QR Code" />
       <div class="qr-status" :class="qr.status">
         <template v-if="qr.status === 'waiting'">
-          <Icon icon="mdi:cellphone" /> 请使用网易云音乐APP扫码
+          <Icon icon="mdi:cellphone" /> 请使用{{ PLATFORM_LABEL[current] ?? '' }}APP扫码
         </template>
         <template v-else-if="qr.status === 'scanned'">
           <Icon icon="mdi:check" /> 已扫码，请在手机上确认
@@ -57,14 +94,32 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from 'vue';
+import { onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { Icon } from '@iconify/vue';
 import axios from 'axios';
 import QRCode from 'qrcode';
 
-const BASE = '/api/me/music/netease';
+const props = withDefaults(defineProps<{ platforms?: string[] }>(), {
+  platforms: () => ['netease'],
+});
 
-const status = reactive({ linked: false, loggedIn: false, nickname: '' });
+const PLATFORM_LABEL: Record<string, string> = {
+  netease: '网易云',
+  qq: 'QQ音乐',
+  kugou: '酷狗',
+  bilibili: 'B站',
+};
+
+const current = ref(props.platforms[0] ?? 'netease');
+const status = reactive({
+  linked: false,
+  loggedIn: false,
+  nickname: '',
+  label: '',
+  source: 'none' as 'none' | 'personal' | 'granted',
+  canUnlink: false,
+  supportsQrLogin: false,
+});
 const qr = reactive({
   loading: false,
   dataUrl: '',
@@ -74,6 +129,8 @@ const qr = reactive({
 const error = ref('');
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+const base = () => `/api/me/music/${current.value}`;
+
 function stopPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
@@ -81,13 +138,32 @@ function stopPolling() {
 
 async function refreshStatus() {
   try {
-    const res = await axios.get(`${BASE}/status`);
+    const res = await axios.get(`${base()}/status`);
     status.linked = Boolean(res.data?.linked);
     status.loggedIn = Boolean(res.data?.loggedIn);
     status.nickname = res.data?.nickname ?? '';
+    status.label = res.data?.label ?? '';
+    status.source = res.data?.source ?? 'none';
+    status.canUnlink = Boolean(res.data?.canUnlink);
+    status.supportsQrLogin = Boolean(res.data?.supportsQrLogin);
   } catch {
     // Leave the last known state
   }
+}
+
+function resetQr() {
+  stopPolling();
+  qr.dataUrl = '';
+  qr.key = '';
+  qr.status = 'waiting';
+}
+
+function selectPlatform(p: string) {
+  if (p === current.value) return;
+  current.value = p;
+  error.value = '';
+  resetQr();
+  void refreshStatus();
 }
 
 async function startQrLogin() {
@@ -97,7 +173,7 @@ async function startQrLogin() {
   qr.dataUrl = '';
   qr.status = 'waiting';
   try {
-    const res = await axios.post(`${BASE}/qrcode`);
+    const res = await axios.post(`${base()}/qrcode`);
     const { qrUrl, qrImg, key } = res.data;
     qr.key = key;
     // Dark-on-light only: many in-app scanners can't read an inverted code.
@@ -108,7 +184,10 @@ async function startQrLogin() {
     }));
     pollTimer = setInterval(pollQrStatus, 2000);
   } catch (err: any) {
-    error.value = err?.response?.data?.error ?? '二维码生成失败';
+    const code = err?.response?.status;
+    error.value = code === 501
+      ? '该平台暂不支持自助绑定，请联系管理员分配账号'
+      : (err?.response?.data?.error ?? '二维码生成失败');
   } finally {
     qr.loading = false;
   }
@@ -117,7 +196,7 @@ async function startQrLogin() {
 async function pollQrStatus() {
   if (!qr.key) return;
   try {
-    const res = await axios.get(`${BASE}/qrcode/status`, { params: { key: qr.key } });
+    const res = await axios.get(`${base()}/qrcode/status`, { params: { key: qr.key } });
     qr.status = res.data.status;
     if (qr.status === 'confirmed') {
       stopPolling();
@@ -133,14 +212,24 @@ async function pollQrStatus() {
 async function unlink() {
   error.value = '';
   try {
-    await axios.delete(BASE);
-    stopPolling();
-    qr.dataUrl = '';
+    await axios.delete(base());
+    resetQr();
     await refreshStatus();
   } catch (err: any) {
     error.value = err?.response?.data?.error ?? '解除绑定失败';
   }
 }
+
+// Settings can render before the provider list is known; follow it if it changes.
+watch(
+  () => props.platforms,
+  (list) => {
+    if (list.length > 0 && !list.includes(current.value)) {
+      current.value = list[0];
+      void refreshStatus();
+    }
+  },
+);
 
 onMounted(refreshStatus);
 onUnmounted(stopPolling);
@@ -174,6 +263,29 @@ onUnmounted(stopPolling);
   font-size: 12px;
   color: var(--text-tertiary);
   &.logged { color: var(--color-online); }
+  &.granted { color: var(--text-secondary); }
+}
+
+.platform-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.platform-tab {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  &.active {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
 }
 
 .hint {

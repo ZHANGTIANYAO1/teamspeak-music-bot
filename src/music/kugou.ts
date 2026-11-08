@@ -468,6 +468,27 @@ export class KugouProvider implements MusicProvider {
     return this.quality;
   }
 
+  /**
+   * A view of the same provider logged in as another account (#164 follow-up):
+   * a web user's own 酷狗 login instead of the bot's shared one.
+   *
+   * Kugou signs every request with the device identity (guid/mid) and binds the
+   * session token to it, so the view MUST reuse this instance's device instead
+   * of generating a fresh one — otherwise the installed cookie is rejected as
+   * coming from an unknown device.
+   */
+  withCookie(cookie: string): KugouProvider {
+    const view = new KugouProvider();
+    view.guid = this.guid;
+    view.mid = this.mid;
+    // Share the in-flight dfid registration: it is device-scoped, not account-
+    // scoped, and sharing avoids a duplicate /register/dev per request.
+    view.dfidPromise = this.dfidPromise;
+    view.quality = this.quality;
+    view.setCookie(cookie);
+    return view;
+  }
+
   // --- Shared signed request pipeline (mirrors util/request.js) --------------
   private async request(opts: {
     method: "GET" | "POST";
