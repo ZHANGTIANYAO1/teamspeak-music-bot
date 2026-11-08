@@ -42,10 +42,15 @@ export const QUALITY_SWITCH_BACKOFF_MS = 120;
  * This is the one failure mode where the delay is NOT cosmetic: the upstream
  * has decided the caller's address looks risky and will keep answering 400 for
  * a few seconds no matter what we ask. Re-poking after 250ms just burns the
- * budget. 800ms × attempt (800, 1600, …) covers roughly the window users
- * reported clicking through by hand, without stalling the queue for long.
+ * budget.
+ *
+ * Sized against the manual workaround users reported: the first click fails, the
+ * toast sits there for ~2-3s, and the very next click succeeds. So the window is
+ * a couple of seconds, not a couple hundred milliseconds. 2500ms × attempt puts
+ * the second attempt at 2.5s and the third at ~7.5s, which is reliably outside
+ * it; anything shorter just spends the retry budget inside the window.
  */
-export const RISK_CONTROL_BACKOFF_MS = 800;
+export const RISK_CONTROL_BACKOFF_MS = 2500;
 
 /**
  * Normalise a config value into a usable retry count.
