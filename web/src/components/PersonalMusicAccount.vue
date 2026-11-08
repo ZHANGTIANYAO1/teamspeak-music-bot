@@ -57,7 +57,7 @@
       role="radiogroup"
       aria-label="播放使用哪个账号"
     >
-      <div class="account-choice-title">播放使用哪个账号</div>
+      <div class="account-choice-title">网页端播放使用哪个账号</div>
 
       <div
         class="account-choice-option"
@@ -94,6 +94,11 @@
           <strong>共享账号（管理员的）</strong>
           <em>会员曲目可以完整播放，但播放记录会记到管理员账号名下</em>
         </span>
+      </div>
+
+      <div class="account-choice-note">
+        这个选择只影响本站的搜索、歌单和试听。房间里播歌
+        （网页点歌后由机器人播放、<code>!play</code>）一直用共享账号，无论这里怎么选。
       </div>
     </div>
 
@@ -450,6 +455,25 @@ onUnmounted(stopPolling);
     font-style: normal;
     color: var(--text-secondary);
     font-size: 12px;
+  }
+}
+
+/* Scope disclaimer: the radio above governs the web player only. Members were
+   reading "共享账号" as "房间里也用这个" — which is true, but for the opposite
+   reason, so it needs saying. */
+.account-choice-note {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color, rgba(128, 128, 128, 0.2));
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+
+  code {
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--hover-bg-strong, rgba(128, 128, 128, 0.12));
   }
 }
 
