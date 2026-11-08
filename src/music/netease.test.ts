@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { RiskControlError } from "./provider.js";
+import { RiskControlError, SongUrlUnavailable } from "./provider.js";
 import {
   parseLyrics,
   mapNeteaseAlbums,
@@ -401,9 +401,13 @@ describe("NetEase risk control (-460)", () => {
     await expect(p.getSongUrl("1")).rejects.not.toBeInstanceOf(RiskControlError);
   });
 
-  it("still returns null for a 200 that carries no url", async () => {
+  // A 200 with no url is not "the track does not exist" — it is one of five
+  // different things, and this used to collapse all of them into a bare null.
+  it("names the cause for a 200 that carries no url", async () => {
     const p = providerWithApi(async () => ({ data: { data: [{ url: null, code: 404 }] } }));
-    expect(await p.getSongUrl("1")).toBeNull();
+    await expect(p.getSongUrl("1")).rejects.toMatchObject({
+      failure: { code: "no_copyright" },
+    });
   });
 
   it("returns the url and the trial window on success", async () => {
@@ -413,5 +417,71 @@ describe("NetEase risk control (-460)", () => {
     const r = await p.getSongUrl("1");
     expect(r?.url).toBe("http://cdn.example/x.mp3");
     expect(r?.trialDuration).toBe(60);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Naming the cause of a 200-with-no-URL
+//
+// `/song/url/v1` says "no URL here" for at least four unrelated reasons and the
+// fix differs for each: open a membership, pick another track, drop the quality,
+// or wait. Collapsing them into `null` is what produced the catch-all
+// 「无法播放（区域/版权限制）」 for a problem that was usually not about copyright.
+// ---------------------------------------------------------------------------
+describe("NetEase — why a track has no URL", () => {
+  /** Resolve and return the thrown error; fails loudly if it does not throw. */
+  async function miss(item: Record<string, unknown> | undefined): Promise<any> {
+    const p = new NeteaseProvider("http://127.0.0.1:3001");
+    (p as unknown as { api: { get: () => Promise<unknown> } }).api = {
+      get: async () => ({ data: { data: item ? [item] : [] } }),
+    };
+    try {
+      await p.getSongUrl("1");
+    } catch (err) {
+      return err;
+    }
+    throw new Error("expected getSongUrl to throw for a URL-less response");
+  }
+
+  it("fee=1 未购买 → 需要会员", async () => {
+    const err = await miss({ url: null, code: 200, fee: 1, payed: 0, level: "exhigh" });
+    expect(err.failure.code).toBe("vip_required");
+    expect(err.failure.message).toMatch(/需要会员/);
+  });
+
+  it("fee=4 未购买 → 需要购买专辑（不是「会员」）", async () => {
+    const err = await miss({ url: null, code: 200, fee: 4, payed: 0, level: "exhigh" });
+    expect(err.failure.code).toBe("vip_required");
+    expect(err.failure.message).toMatch(/专辑/);
+  });
+
+  it("已付款的曲目不算会员问题", async () => {
+    const err = await miss({ url: null, code: 200, fee: 1, payed: 1, level: "exhigh" });
+    expect(err.failure.code).toBe("quality_denied");
+  });
+
+  it("upstream code 404 → 无版权", async () => {
+    const err = await miss({ url: null, code: 404, level: "exhigh" });
+    expect(err.failure.code).toBe("no_copyright");
+    expect(err.failure.message).toMatch(/无版权|下架/);
+  });
+
+  // The measured case that broke the old single-message assumption: a free
+  // track (fee=8) with no URL at exhigh that plays fine at higher.
+  it("fee=8 且无 URL → 音质受限，而不是版权", async () => {
+    const err = await miss({ url: null, code: 200, fee: 8, level: "exhigh" });
+    expect(err.failure.code).toBe("quality_denied");
+    expect(err.failure.message).toMatch(/音质/);
+  });
+
+  it("空 data 数组 → 未知，但仍带得出上游字段", async () => {
+    const err = await miss(undefined);
+    expect(err.failure.code).toBe("unknown");
+    expect(err.failure.upstream).toBeDefined();
+  });
+
+  it("把 fee / payed / level 留在 upstream 里供日志使用", async () => {
+    const err = await miss({ url: null, code: 200, fee: 8, payed: 0, level: "higher", br: 192000 });
+    expect(err.failure.upstream).toMatchObject({ fee: 8, payed: 0, level: "higher", br: 192000 });
   });
 });

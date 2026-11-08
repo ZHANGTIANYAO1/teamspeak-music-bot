@@ -77,6 +77,15 @@ export interface ResolveUrlWithRetryOptions {
     quality?: string;
     error?: unknown;
   }) => void;
+  /**
+   * Called once when the budget is spent — never on cancellation, because
+   * "the user pressed stop" is not a failure worth reporting.
+   *
+   * Carries the last attempt's error so the caller can turn it into a message
+   * that names the cause (missing membership, delisted, blocked quality) rather
+   * than the old catch-all 「区域/版权限制」.
+   */
+  onExhausted?: (info: { quality?: string; error: unknown }) => void;
   /** Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
 }
@@ -106,6 +115,11 @@ export async function resolveUrlWithRetry(
   // Set when the previous attempt failed with -460. Risk control ignores the
   // quality we ask for, so a level switch does not get to use its short delay.
   let riskControlled = false;
+  // The last failure, kept so the caller can explain the outcome. A `null`
+  // result (no throw) counts too — it is the providers that have not adopted
+  // SongUrlUnavailable yet.
+  let lastError: unknown;
+  let lastQuality: string | undefined;
 
   for (let i = 0; i < plan.length; i++) {
     const step = plan[i];
@@ -130,10 +144,13 @@ export async function resolveUrlWithRetry(
       error = err;
     }
     riskControlled = error instanceof RiskControlError;
+    lastError = error;
+    lastQuality = step.quality;
     opts.onAttemptFailed?.({ attempt: i + 1, total: plan.length, quality: step.quality, error });
     // Only same-quality attempts grow the backoff; a level switch resets it.
     sameQualityAttempt = step.fallback ? 0 : sameQualityAttempt + 1;
   }
 
+  opts.onExhausted?.({ quality: lastQuality, error: lastError });
   return null;
 }

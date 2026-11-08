@@ -8,7 +8,8 @@ import {
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { resolveUrlWithRetry } from "./url-retry.js";
-import { RISK_CONTROL_CODE, RiskControlError } from "../music/provider.js";
+import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
+import type { PlayFailure } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Platform, Song, SongUrlResult } from "../music/provider.js";
 import {
@@ -203,6 +204,14 @@ export class BotInstance extends EventEmitter {
   private fmRequesterName: string | undefined;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
+  /**
+   * Why the most recent resolveAndPlay produced nothing, or null.
+   *
+   * Kept as an instance field rather than a second return value: `resolveAndPlay`
+   * has ~20 call sites and its boolean is load-bearing in tests, while only the
+   * web routes need the explanation. They read this right after a false.
+   */
+  private lastPlayFailure: PlayFailure | null = null;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
@@ -1023,8 +1032,19 @@ export class BotInstance extends EventEmitter {
     return requestedBy ? { ...song, requestedBy } : { ...song };
   }
 
+  /**
+   * Why the last `resolveAndPlay(false)` produced nothing, or null after a
+   * success. Web routes read this to say what actually went wrong instead of
+   * the old catch-all 「区域/版权限制」.
+   */
+  getLastPlayFailure(): PlayFailure | null {
+    return this.lastPlayFailure;
+  }
+
   /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
-  async resolveAndPlay(song: QueuedSong): Promise<boolean> {    if (!this.connected) {
+  async resolveAndPlay(song: QueuedSong): Promise<boolean> {
+    this.lastPlayFailure = null;
+    if (!this.connected) {
       this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
       return false;
     }
@@ -1046,9 +1066,6 @@ export class BotInstance extends EventEmitter {
           song.id = detail.id;
         }
       }
-      // Retries live in resolveUrlWithRetry so the whole queue path (web click,
-      // chat !play, auto-advance, FM) benefits from the same budget, and the
-      // failure is logged once there instead of once per attempt.
       // Retries happen here (not in the provider) so every queue path — web
       // click, chat !play, auto-advance, FM — shares the same budget. The
       // policy lives in url-retry.ts so it is unit tested without a bot; a
@@ -1077,10 +1094,33 @@ export class BotInstance extends EventEmitter {
             this.logger.warn({ ...fields, err: error }, "URL resolve threw — retrying");
           } else if (attempt < total) {
             this.logger.debug(fields, "URL resolve returned no URL — retrying");
-          } else {
-            // Once per track, after the budget is spent — not once per attempt.
-            this.logger.warn(fields, "No URL available after retries, skipping");
           }
+        },
+        // Once per track, and with the reason named. The old log line was
+        // `No URL available` with no cause, which is what sent three separate
+        // investigations after a copyright problem that was never there.
+        onExhausted: ({ quality, error }) => {
+          const failure = error
+            ? toPlayFailure(provider.platform, song.id, error)
+            : {
+                platform: provider.platform,
+                songId: song.id,
+                code: "unknown" as const,
+                message: `没有拿到播放地址（${quality ?? "默认音质"}）`,
+              };
+          this.lastPlayFailure = failure;
+          this.logger.warn(
+            {
+              songId: song.id,
+              name: song.name,
+              platform: provider.platform,
+              code: failure.code,
+              quality: quality ?? "default",
+              upstream: failure.upstream,
+              reason: failure.message,
+            },
+            "No URL available, skipping",
+          );
         },
       });
       if (!result?.url) {

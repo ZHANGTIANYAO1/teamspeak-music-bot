@@ -62,6 +62,91 @@ export class RiskControlError extends Error {
   }
 }
 
+/**
+ * Why a track could not be turned into a playable URL.
+ *
+ * Every one of these used to reach the user as the same string —
+ * 「无法播放（区域/版权限制）」 — which is why a genuine -460, a lapsed membership
+ * and a delisted track were indistinguishable for weeks of debugging. Naming
+ * the cause is the whole point of this type.
+ */
+export type PlayFailureCode =
+  /** Upstream refused the caller's IP (-460). Transient by nature. */
+  | "risk_control"
+  /** Paid track with no entitlement on the account (NetEase fee=1 VIP / fee=4). */
+  | "vip_required"
+  /** Delisted, region-blocked, or the id no longer resolves (upstream 404). */
+  | "no_copyright"
+  /** The track exists, but this quality level is not ours to serve. */
+  | "quality_denied"
+  /** 200 with no URL and nothing that explains why. */
+  | "unknown";
+
+export interface PlayFailure {
+  platform: string;
+  songId: string;
+  code: PlayFailureCode;
+  /** One short line in the UI's language — safe to render as-is. */
+  message: string;
+  /** Raw upstream fields (fee / payed / code / level). Logs only, never shown. */
+  upstream?: Record<string, unknown>;
+}
+
+/**
+ * Thrown when a provider knows *why* no URL came back.
+ *
+ * `resolveUrlWithRetry` still runs the full budget on it — a lower level can
+ * genuinely help, and "deterministic" judgements about this API have been wrong
+ * before — but it remembers the last one so the eventual message can name the
+ * cause instead of falling back to a guess.
+ */
+export class SongUrlUnavailable extends Error {
+  readonly failure: PlayFailure;
+  constructor(failure: PlayFailure) {
+    super(failure.message);
+    this.name = "SongUrlUnavailable";
+    this.failure = failure;
+  }
+}
+
+/** Build the -460 flavour. Kept here so every provider names it identically. */
+export function riskControlFailure(
+  platform: string,
+  songId: string,
+  detail?: string,
+): PlayFailure {
+  return {
+    platform,
+    songId,
+    code: "risk_control",
+    message: "被音源风控拦截（-460），请稍后重试",
+    upstream: detail ? { detail } : undefined,
+  };
+}
+
+/**
+ * Normalise anything a failed attempt threw into a `PlayFailure`, so callers
+ * never have to pattern-match on error classes themselves.
+ *
+ * The `unknown` branch truncates the message: axios errors carry the whole
+ * request config (including the cookie) and would otherwise put kilobytes into
+ * a UI toast and the log.
+ */
+export function toPlayFailure(platform: string, songId: string, error: unknown): PlayFailure {
+  if (error instanceof SongUrlUnavailable) return error.failure;
+  if (error instanceof RiskControlError) {
+    return riskControlFailure(platform, songId, error.message);
+  }
+  const raw = error instanceof Error ? error.message : "";
+  const short = raw.replace(/\s+/g, " ").trim().slice(0, 120);
+  return {
+    platform,
+    songId,
+    code: "unknown",
+    message: short ? `解析播放地址失败：${short}` : "解析播放地址失败",
+  };
+}
+
 export interface Playlist {
   id: string;
   name: string;
@@ -69,6 +154,7 @@ export interface Playlist {
   songCount: number;
   platform: Platform;
 }
+
 
 export interface PlaylistDetail {
   id: string;

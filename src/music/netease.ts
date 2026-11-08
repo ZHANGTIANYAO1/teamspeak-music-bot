@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance } from "axios";
-import { RISK_CONTROL_CODE, RiskControlError } from "./provider.js";
+import { RISK_CONTROL_CODE, RiskControlError, SongUrlUnavailable } from "./provider.js";
+import type { PlayFailure } from "./provider.js";
 import type {
   MusicProvider,
   Song,
@@ -130,6 +131,69 @@ function riskControlFrom(err: unknown): RiskControlError | null {
   return null;
 }
 
+/**
+ * Classify a 200-with-no-URL answer.
+ *
+ * `/song/url/v1` reports "no URL here" for at least four unrelated reasons, and
+ * they need different fixes: open a membership, pick another track, drop the
+ * quality, or just wait. The response does carry enough to tell them apart
+ * (`code`, `fee`, `payed`, `level`), and not reading those fields is exactly
+ * why every one of them reached the user as 「区域/版权限制」.
+ *
+ * Field meanings (NetEase):
+ *   fee 0 = free, 1 = VIP, 4 = album-only purchase, 8 = free / low quality
+ *   payed 1 = this account already paid for it
+ *   code 404 on the item = the id does not resolve to a playable track
+ */
+export function diagnoseNeteaseMiss(
+  songId: string,
+  level: string,
+  item: Record<string, any> | undefined,
+  body: Record<string, any> | undefined,
+): PlayFailure {
+  const upstream = {
+    code: item?.code ?? body?.code,
+    fee: item?.fee,
+    payed: item?.payed,
+    level: item?.level ?? level,
+    br: item?.br,
+    freeTrial: Boolean(item?.freeTrialInfo),
+  };
+  const suffix = `（${String(upstream.level)}）`;
+  const base = { platform: "netease" as const, songId, upstream };
+
+  if (!item) {
+    return {
+      ...base,
+      code: "unknown",
+      message: `音源没有返回该曲目${suffix}`,
+    };
+  }
+  if (upstream.code === 404) {
+    return {
+      ...base,
+      code: "no_copyright",
+      message: `无版权或已下架${suffix}`,
+    };
+  }
+  const fee = typeof upstream.fee === "number" ? upstream.fee : -1;
+  if ((fee === 1 || fee === 4) && !upstream.payed) {
+    return {
+      ...base,
+      code: "vip_required",
+      message: fee === 4 ? `需要购买该专辑${suffix}` : `需要会员${suffix}`,
+    };
+  }
+  // Everything else that has the track but no URL is a per-level restriction:
+  // the same id often plays at another level (measured: 192k OK while both
+  // 320k and 128k returned null).
+  return {
+    ...base,
+    code: "quality_denied",
+    message: `当前音质无播放权限${suffix}`,
+  };
+}
+
 // NetEase quality levels: standard(128k) higher(192k) exhigh(320k) lossless(flac) hires(hi-res) jyeffect jymaster
 export const NETEASE_QUALITY_LEVELS = [
   { value: "standard", label: "标准 (128kbps)", bitrate: 128 },
@@ -228,7 +292,12 @@ export class NeteaseProvider implements MusicProvider {
     }
     const item = res.data?.data?.[0];
     const url = item?.url;
-    if (!url) return null;
+    // A bare `null` here forced every caller to invent an explanation, and the
+    // one they invented was 「区域/版权限制」 — wrong for a lapsed membership, for
+    // a delisted track, and for a quality the account cannot stream. Throw the
+    // reason instead; the retry layer still spends its budget, it just stops
+    // lying about why nothing worked.
+    if (!url) throw new SongUrlUnavailable(diagnoseNeteaseMiss(songId, level, item, res.data));
     return { url, trialDuration: parseNeteaseTrial(item) };
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { RiskControlError } from "../music/provider.js";
+import { RiskControlError, SongUrlUnavailable, toPlayFailure } from "../music/provider.js";
 import type { SongUrlResult } from "../music/provider.js";
 import {
   MAX_URL_RETRIES,
@@ -400,5 +400,113 @@ describe("resolveUrlWithRetry — risk control backoff", () => {
       },
     });
     expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reporting why the budget ran out
+//
+// The caller needs a cause, not just `null`: the web layer used to print
+// 「无法播放（区域/版权限制）」 for every outcome, including a lapsed membership and
+// a quality the account cannot stream. `onExhausted` is how the cause survives
+// the retry loop.
+// ---------------------------------------------------------------------------
+describe("resolveUrlWithRetry — reporting the cause", () => {
+  function unavailable(code: any, message = "某原因") {
+    return new SongUrlUnavailable({ platform: "netease", songId: "1", code, message });
+  }
+
+  it("hands back the last error once the budget is spent", async () => {
+    const seen: Array<{ quality?: string; error: unknown }> = [];
+    const err = unavailable("vip_required");
+    const { sleep } = recordingSleep();
+
+    const result = await resolveUrlWithRetry({
+      retries: 2,
+      resolve: async () => {
+        throw err;
+      },
+      sleep,
+      onExhausted: (info) => seen.push(info),
+    });
+
+    expect(result).toBeNull();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].error).toBe(err);
+    expect(toPlayFailure("netease", "1", seen[0].error).code).toBe("vip_required");
+  });
+
+  it("reports the level it gave up on, not the first one", async () => {
+    const seen: Array<{ quality?: string; error: unknown }> = [];
+    const { sleep } = recordingSleep();
+
+    await resolveUrlWithRetry({
+      retries: 0,
+      resolve: async (quality) => {
+        if (quality === "standard") throw unavailable("quality_denied");
+        return null;
+      },
+      fallbacks: ["higher", "standard"],
+      sleep,
+      onExhausted: (info) => seen.push(info),
+    });
+
+    expect(seen[0].quality).toBe("standard");
+  });
+
+  it("stays silent when a level finally works", async () => {
+    const seen: unknown[] = [];
+    const { sleep } = recordingSleep();
+
+    const result = await resolveUrlWithRetry({
+      retries: 1,
+      resolve: async (quality) => {
+        if (quality === "higher") return ok();
+        throw unavailable("quality_denied");
+      },
+      fallbacks: ["higher"],
+      sleep,
+      onExhausted: (info) => seen.push(info),
+    });
+
+    expect(result?.url).toBeTruthy();
+    expect(seen).toHaveLength(0);
+  });
+
+  // Pressing stop is not a failure. Reporting one would flash an error toast at
+  // a user who just changed their mind.
+  it("stays silent when the caller cancels", async () => {
+    const seen: unknown[] = [];
+    let cancelled = false;
+
+    await resolveUrlWithRetry({
+      retries: 3,
+      resolve: async () => {
+        throw unavailable("risk_control");
+      },
+      isCancelled: () => cancelled,
+      sleep: async () => {
+        cancelled = true;
+      },
+      onExhausted: (info) => seen.push(info),
+    });
+
+    expect(seen).toHaveLength(0);
+  });
+
+  // Providers that have not adopted SongUrlUnavailable still return null.
+  it("still reports for a provider that returns null without throwing", async () => {
+    const seen: Array<{ quality?: string; error: unknown }> = [];
+    const { sleep } = recordingSleep();
+
+    await resolveUrlWithRetry({
+      retries: 0,
+      resolve: async () => null,
+      sleep,
+      onExhausted: (info) => seen.push(info),
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].error).toBeUndefined();
   });
 });
