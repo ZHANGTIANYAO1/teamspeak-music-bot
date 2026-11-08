@@ -1,3 +1,4 @@
+import { normalizeCookie } from "./cookie-normalize.js";
 import axios, { type AxiosInstance } from "axios";
 import type {
   MusicProvider,
@@ -390,7 +391,9 @@ export class NeteaseProvider implements MusicProvider {
   }
 
   setCookie(cookie: string): void {
-    this.cookie = cookie;
+    // Normalised so a pasted `Set-Cookie` line cannot put Max-Age/Expires/Path
+    // into the query string — that is what made the sidecar answer 400.
+    this.cookie = normalizeCookie(cookie);
   }
 
   getCookie(): string {
