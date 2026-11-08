@@ -34,6 +34,34 @@ export interface SongUrlResult {
   trialDuration?: number;
 }
 
+/**
+ * NetEase rate-limits by IP, not by request shape. When it decides the caller's
+ * network looks risky it answers **HTTP 400** with
+ *
+ *   {"code":-460,"message":"检测到您的网络环境存在风险，请稍后再试"}
+ *
+ * Cloud-host IPs hit this constantly; it clears up on its own after a few
+ * seconds. Because it is a 4xx, axios reports `ERR_BAD_REQUEST` — identical to
+ * a genuinely malformed request — so the only way to tell them apart is to read
+ * the response body. The distinction matters: -460 is worth retrying, a bad
+ * request never is.
+ *
+ * Measured on a live host: the anonymous call `?id=…&level=exhigh` answered
+ * 400/-460 every time, while the same call with the account cookie answered 200
+ * and returned a full 320k URL. Intermittently, the cookie version is also
+ * rejected — which is exactly the "click play five times until it works"
+ * behaviour users report.
+ */
+export const RISK_CONTROL_CODE = -460;
+
+export class RiskControlError extends Error {
+  readonly code: number = RISK_CONTROL_CODE;
+  constructor(message: string) {
+    super(message);
+    this.name = "RiskControlError";
+  }
+}
+
 export interface Playlist {
   id: string;
   name: string;

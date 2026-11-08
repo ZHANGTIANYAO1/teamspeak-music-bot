@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { RiskControlError } from "./provider.js";
 import {
   parseLyrics,
   mapNeteaseAlbums,
@@ -341,5 +342,76 @@ describe("NetEase quality fallback ladder", () => {
     const p = new NeteaseProvider("http://x");
     p.setQuality("higher");
     expect(p.getFallbackQualities()).toEqual(["standard"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Risk control (-460)
+//
+// Live measurement on a cloud host, same song, same second:
+//   GET /song/url/v1?id=1827600686&level=exhigh                  → 400 {"code":-460}
+//   GET …&cookie=<account cookie>                                → 200, 320k url
+// axios reports both 400s and 200s alike as ERR_BAD_REQUEST when it fails, so
+// the body has to be inspected to know whether retrying is worthwhile.
+// ---------------------------------------------------------------------------
+describe("NetEase risk control (-460)", () => {
+  /** Swap the axios instance for a stub — no module mocking needed. */
+  function providerWithApi(get: (url: string, cfg: unknown) => Promise<unknown>) {
+    const p = new NeteaseProvider("http://127.0.0.1:3001");
+    (p as unknown as { api: { get: typeof get } }).api = { get };
+    return p;
+  }
+
+  function httpError(status: number, data: unknown) {
+    const err = new Error(`Request failed with status code ${status}`) as Error & {
+      response: unknown;
+    };
+    err.response = { status, data };
+    return err;
+  }
+
+  it("turns 400 + code -460 into a RiskControlError", async () => {
+    const p = providerWithApi(async () => {
+      throw httpError(400, {
+        code: -460,
+        message: "检测到您的网络环境存在风险，请稍后再试",
+      });
+    });
+    await expect(p.getSongUrl("1827600686")).rejects.toBeInstanceOf(RiskControlError);
+  });
+
+  it("keeps the upstream message so the log says what happened", async () => {
+    const p = providerWithApi(async () => {
+      throw httpError(400, { code: -460, message: "检测到您的网络环境存在风险，请稍后再试" });
+    });
+    await expect(p.getSongUrl("1827600686")).rejects.toThrow(/风险/);
+  });
+
+  it("does not disguise a genuine bad request", async () => {
+    const p = providerWithApi(async () => {
+      throw httpError(400, { code: 400, msg: "参数错误" });
+    });
+    await expect(p.getSongUrl("1")).rejects.not.toBeInstanceOf(RiskControlError);
+  });
+
+  it("does not disguise an unrelated 400 without a body code", async () => {
+    const p = providerWithApi(async () => {
+      throw httpError(400, "<html>Bad Request</html>");
+    });
+    await expect(p.getSongUrl("1")).rejects.not.toBeInstanceOf(RiskControlError);
+  });
+
+  it("still returns null for a 200 that carries no url", async () => {
+    const p = providerWithApi(async () => ({ data: { data: [{ url: null, code: 404 }] } }));
+    expect(await p.getSongUrl("1")).toBeNull();
+  });
+
+  it("returns the url and the trial window on success", async () => {
+    const p = providerWithApi(async () => ({
+      data: { data: [{ url: "http://cdn.example/x.mp3", freeTrialInfo: { start: 0, end: 60 } }] },
+    }));
+    const r = await p.getSongUrl("1");
+    expect(r?.url).toBe("http://cdn.example/x.mp3");
+    expect(r?.trialDuration).toBe(60);
   });
 });

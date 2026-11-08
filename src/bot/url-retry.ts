@@ -1,3 +1,4 @@
+import { RiskControlError } from "../music/provider.js";
 import type { SongUrlResult } from "../music/provider.js";
 
 /**
@@ -34,6 +35,17 @@ export const DEFAULT_URL_RETRY_BACKOFF_MS = 250;
  * the same one, so it does not need to wait out the same jitter window.
  */
 export const QUALITY_SWITCH_BACKOFF_MS = 120;
+
+/**
+ * Delay after a -460 (NetEase IP risk control) failure.
+ *
+ * This is the one failure mode where the delay is NOT cosmetic: the upstream
+ * has decided the caller's address looks risky and will keep answering 400 for
+ * a few seconds no matter what we ask. Re-poking after 250ms just burns the
+ * budget. 800ms × attempt (800, 1600, …) covers roughly the window users
+ * reported clicking through by hand, without stalling the queue for long.
+ */
+export const RISK_CONTROL_BACKOFF_MS = 800;
 
 /**
  * Normalise a config value into a usable retry count.
@@ -91,13 +103,20 @@ export async function resolveUrlWithRetry(
   for (const quality of opts.fallbacks ?? []) plan.push({ quality, fallback: true });
 
   let sameQualityAttempt = 0;
+  // Set when the previous attempt failed with -460. Risk control ignores the
+  // quality we ask for, so a level switch does not get to use its short delay.
+  let riskControlled = false;
 
   for (let i = 0; i < plan.length; i++) {
     const step = plan[i];
     if (opts.isCancelled?.()) return null;
 
     if (i > 0) {
-      const wait = step.fallback ? QUALITY_SWITCH_BACKOFF_MS : backoffMs * sameQualityAttempt;
+      const wait = riskControlled
+        ? RISK_CONTROL_BACKOFF_MS * Math.max(1, sameQualityAttempt)
+        : step.fallback
+          ? QUALITY_SWITCH_BACKOFF_MS
+          : backoffMs * sameQualityAttempt;
       if (wait > 0) await sleep(wait);
       // The user may have stopped or switched tracks while we waited.
       if (opts.isCancelled?.()) return null;
@@ -110,6 +129,7 @@ export async function resolveUrlWithRetry(
     } catch (err) {
       error = err;
     }
+    riskControlled = error instanceof RiskControlError;
     opts.onAttemptFailed?.({ attempt: i + 1, total: plan.length, quality: step.quality, error });
     // Only same-quality attempts grow the backoff; a level switch resets it.
     sameQualityAttempt = step.fallback ? 0 : sameQualityAttempt + 1;

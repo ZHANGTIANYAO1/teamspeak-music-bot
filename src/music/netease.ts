@@ -1,4 +1,5 @@
 import axios, { type AxiosInstance } from "axios";
+import { RISK_CONTROL_CODE, RiskControlError } from "./provider.js";
 import type {
   MusicProvider,
   Song,
@@ -114,6 +115,21 @@ export function parseNeteaseTrial(item: any): number | undefined {
   return Math.round(secs);
 }
 
+/**
+ * Recognise NetEase's IP risk control inside an axios error. The status alone
+ * is not enough — axios reports every 4xx as ERR_BAD_REQUEST — so the body has
+ * to be read. See RiskControlError for the measured behaviour.
+ */
+function riskControlFrom(err: unknown): RiskControlError | null {
+  const e = err as {
+    response?: { status?: number; data?: { code?: number; message?: string } };
+  };
+  if (e?.response?.status === 400 && e.response.data?.code === RISK_CONTROL_CODE) {
+    return new RiskControlError(e.response.data.message ?? "网络环境风险 (-460)");
+  }
+  return null;
+}
+
 // NetEase quality levels: standard(128k) higher(192k) exhigh(320k) lossless(flac) hires(hi-res) jyeffect jymaster
 export const NETEASE_QUALITY_LEVELS = [
   { value: "standard", label: "标准 (128kbps)", bitrate: 128 },
@@ -197,9 +213,19 @@ export class NeteaseProvider implements MusicProvider {
 
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
     const level = quality ?? this.quality;
-    const res = await this.api.get("/song/url/v1", {
-      params: { id: songId, level, ...this.cookieParams },
-    });
+    let res;
+    try {
+      res = await this.api.get("/song/url/v1", {
+        params: { id: songId, level, ...this.cookieParams },
+      });
+    } catch (err) {
+      // -460 arrives as HTTP 400, and left as-is it looks like "this track is
+      // unavailable" to every caller. Surface it as its own error type so the
+      // retry layer can wait out the risk-control window instead of giving up.
+      const risk = riskControlFrom(err);
+      if (risk) throw risk;
+      throw err;
+    }
     const item = res.data?.data?.[0];
     const url = item?.url;
     if (!url) return null;

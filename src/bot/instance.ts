@@ -8,6 +8,7 @@ import {
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { resolveUrlWithRetry } from "./url-retry.js";
+import { RISK_CONTROL_CODE, RiskControlError } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Platform, Song, SongUrlResult } from "../music/provider.js";
 import {
@@ -1064,7 +1065,15 @@ export class BotInstance extends EventEmitter {
         isCancelled: () => !this.connected,
         onAttemptFailed: ({ attempt, total, quality, error }) => {
           const fields = { songId: song.id, name: song.name, attempt, total, quality };
-          if (error) {
+          if (error instanceof RiskControlError) {
+            // -460 is NetEase refusing the IP, not this track. Say so, otherwise
+            // the log reads like the song is unavailable and people go hunting
+            // for a copyright problem that does not exist.
+            this.logger.warn(
+              { ...fields, code: RISK_CONTROL_CODE, reason: error.message },
+              "URL resolve hit NetEase risk control (-460) — backing off",
+            );
+          } else if (error) {
             this.logger.warn({ ...fields, err: error }, "URL resolve threw — retrying");
           } else if (attempt < total) {
             this.logger.debug(fields, "URL resolve returned no URL — retrying");

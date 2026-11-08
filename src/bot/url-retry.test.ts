@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { RiskControlError } from "../music/provider.js";
 import type { SongUrlResult } from "../music/provider.js";
 import {
   MAX_URL_RETRIES,
   DEFAULT_URL_RETRY_BACKOFF_MS,
   QUALITY_SWITCH_BACKOFF_MS,
+  RISK_CONTROL_BACKOFF_MS,
   normalizeRetryCount,
   resolveUrlWithRetry,
 } from "./url-retry.js";
@@ -307,5 +309,96 @@ describe("resolveUrlWithRetry — quality fallback", () => {
 
     expect(result).toBeNull();
     expect(resolve).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NetEase risk control (-460)
+//
+// Measured against a live host: `GET /song/url/v1?id=…&level=exhigh` without
+// the account cookie answers 400 `{"code":-460,"message":"检测到您的网络环境存在
+// 风险，请稍后再试"}` every single time, while the same call WITH the cookie
+// answers 200. Intermittently it also rejects the cookie call — that is the
+// "click play five times until it works" report.
+//
+// Because -460 is a 400, the normal 250ms re-poke lands inside the same risk
+// window and the whole budget is wasted. These tests pin the longer wait.
+// ---------------------------------------------------------------------------
+describe("resolveUrlWithRetry — risk control backoff", () => {
+  it("grows the wait from RISK_CONTROL_BACKOFF_MS instead of 250ms", async () => {
+    const { sleep, delays } = recordingSleep();
+    const result = await resolveUrlWithRetry({
+      retries: 2,
+      resolve: async () => {
+        throw new RiskControlError("网络环境风险 (-460)");
+      },
+      sleep,
+    });
+
+    expect(result).toBeNull();
+    expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS, RISK_CONTROL_BACKOFF_MS * 2]);
+    // Every one of them is longer than a plain transient retry would have been.
+    for (const d of delays) expect(d).toBeGreaterThan(DEFAULT_URL_RETRY_BACKOFF_MS);
+  });
+
+  it("does not fall back to the fast level-switch delay while risk controlled", async () => {
+    const { sleep, delays } = recordingSleep();
+    await resolveUrlWithRetry({
+      retries: 0,
+      resolve: async () => {
+        throw new RiskControlError("网络环境风险 (-460)");
+      },
+      fallbacks: ["higher", "standard"],
+      sleep,
+    });
+
+    // -460 ignores which quality we ask for, so 120ms would just burn attempts.
+    expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS, RISK_CONTROL_BACKOFF_MS]);
+    expect(delays).not.toContain(QUALITY_SWITCH_BACKOFF_MS);
+  });
+
+  it("recovers as soon as the window passes, and stops spending", async () => {
+    let attempts = 0;
+    const { sleep, delays } = recordingSleep();
+    const result = await resolveUrlWithRetry({
+      retries: 3,
+      resolve: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new RiskControlError("网络环境风险 (-460)");
+        return ok("https://cdn.example/after-window.mp3");
+      },
+      sleep,
+    });
+
+    expect(result?.url).toBe("https://cdn.example/after-window.mp3");
+    expect(attempts).toBe(3);
+    expect(delays).toHaveLength(2);
+  });
+
+  it("still uses the short delay for a plain error", async () => {
+    const { sleep, delays } = recordingSleep();
+    await resolveUrlWithRetry({
+      retries: 1,
+      resolve: async () => {
+        throw new Error("boom");
+      },
+      sleep,
+    });
+    expect(delays).toEqual([DEFAULT_URL_RETRY_BACKOFF_MS]);
+  });
+
+  it("cancels during a risk-control wait", async () => {
+    let cancelled = false;
+    const result = await resolveUrlWithRetry({
+      retries: 3,
+      resolve: async () => {
+        throw new RiskControlError("网络环境风险 (-460)");
+      },
+      isCancelled: () => cancelled,
+      sleep: async () => {
+        cancelled = true;
+      },
+    });
+    expect(result).toBeNull();
   });
 });
