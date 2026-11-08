@@ -197,6 +197,9 @@ export interface BotDatabase {
   getUserMusicCookie(userId: string, platform: string): string | null;
   setUserMusicCookie(userId: string, platform: string, cookie: string): void;
   deleteUserMusicCookie(userId: string, platform: string): boolean;
+  /** null when the member never chose; callers treat that as "prefer own". */
+  getUserMusicPreference(userId: string, platform: string): { preferShared: boolean } | null;
+  setUserMusicPreference(userId: string, platform: string, preferShared: boolean): void;
   // Admin-owned account pool + assignments (#164 follow-up).
   listMusicAccounts(platform?: string): MusicAccount[];
   getMusicAccount(id: string): MusicAccount | null;
@@ -453,6 +456,20 @@ function initTables(db: Database.Database): void {
       FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    -- Which login a member wants to use for a platform (#164 follow-up).
+    -- preferShared = 1 means "ignore my own / assigned account and play
+    -- through the bot's shared login", which is how someone whose own account
+    -- has no membership still gets to play paid tracks. Default 0 keeps the
+    -- privacy-first behaviour (own account wins).
+    CREATE TABLE IF NOT EXISTS user_music_prefs (
+      userId       TEXT NOT NULL,
+      platform     TEXT NOT NULL,
+      preferShared INTEGER NOT NULL DEFAULT 0,
+      updatedAt    TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (userId, platform),
+      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     -- Admin-owned music logins that can be handed out to members (#164
     -- follow-up). Separate from user_music_cookies so a member's own QR login
     -- and an admin's assignment never overwrite each other.
@@ -619,6 +636,14 @@ export function createDatabase(dbPath: string): BotDatabase {
   const deleteUserMusicCookieStmt = db.prepare(
     `DELETE FROM user_music_cookies WHERE userId = ? AND platform = ?`,
   );
+
+  const selectUserMusicPref = db.prepare(
+    `SELECT preferShared FROM user_music_prefs WHERE userId = ? AND platform = ?`,
+  );
+  const upsertUserMusicPref = db.prepare(`
+    INSERT INTO user_music_prefs (userId, platform, preferShared) VALUES (?, ?, ?)
+    ON CONFLICT(userId, platform) DO UPDATE SET preferShared = excluded.preferShared, updatedAt = datetime('now')
+  `);
 
   // ---- Admin-owned account pool (#164 follow-up) -------------------------
   const MUSIC_ACCOUNT_GRANT_SELECT = `
@@ -923,6 +948,18 @@ export function createDatabase(dbPath: string): BotDatabase {
 
     deleteUserMusicCookie(userId, platform) {
       return deleteUserMusicCookieStmt.run(userId, platform).changes > 0;
+    },
+
+    getUserMusicPreference(userId, platform) {
+      const row = selectUserMusicPref.get(userId, platform) as
+        | { preferShared: number }
+        | undefined;
+      if (!row) return null;
+      return { preferShared: Number(row.preferShared) === 1 };
+    },
+
+    setUserMusicPreference(userId, platform, preferShared) {
+      upsertUserMusicPref.run(userId, platform, preferShared ? 1 : 0);
     },
 
     listMusicAccounts(platform) {

@@ -49,6 +49,54 @@
       </template>
     </p>
 
+    <!-- 播放用哪个账号。只有真的持有个人/分配账号、且管理员开了这个功能时
+         才有得选；否则本来就走共享账号。 -->
+    <div
+      v-if="status.featureEnabled && status.linked"
+      class="account-choice"
+      role="radiogroup"
+      aria-label="播放使用哪个账号"
+    >
+      <div class="account-choice-title">播放使用哪个账号</div>
+
+      <div
+        class="account-choice-option"
+        :class="{ active: !status.preferShared }"
+        role="radio"
+        :aria-checked="!status.preferShared"
+        tabindex="0"
+        @click="setPreference(false)"
+        @keydown.enter.prevent="setPreference(false)"
+        @keydown.space.prevent="setPreference(false)"
+      >
+        <span class="account-choice-dot" :class="{ on: !status.preferShared }" />
+        <span class="account-choice-text">
+          <strong>我的账号</strong>
+          <em>
+            {{ status.source === 'granted' ? '管理员分配给我的那个' : '我自己扫码绑定的' }}；
+            播放不了时自动改用共享账号
+          </em>
+        </span>
+      </div>
+
+      <div
+        class="account-choice-option"
+        :class="{ active: status.preferShared }"
+        role="radio"
+        :aria-checked="status.preferShared"
+        tabindex="0"
+        @click="setPreference(true)"
+        @keydown.enter.prevent="setPreference(true)"
+        @keydown.space.prevent="setPreference(true)"
+      >
+        <span class="account-choice-dot" :class="{ on: status.preferShared }" />
+        <span class="account-choice-text">
+          <strong>共享账号（管理员的）</strong>
+          <em>会员曲目可以完整播放，但播放记录会记到管理员账号名下</em>
+        </span>
+      </div>
+    </div>
+
     <div class="login-methods">
       <button
         v-if="status.supportsQrLogin"
@@ -119,6 +167,8 @@ const status = reactive({
   source: 'none' as 'none' | 'personal' | 'granted',
   canUnlink: false,
   supportsQrLogin: false,
+  preferShared: false,
+  featureEnabled: false,
 });
 const qr = reactive({
   loading: false,
@@ -146,6 +196,8 @@ async function refreshStatus() {
     status.source = res.data?.source ?? 'none';
     status.canUnlink = Boolean(res.data?.canUnlink);
     status.supportsQrLogin = Boolean(res.data?.supportsQrLogin);
+    status.preferShared = Boolean(res.data?.preferShared);
+    status.featureEnabled = Boolean(res.data?.featureEnabled);
   } catch {
     // Leave the last known state
   }
@@ -206,6 +258,30 @@ async function pollQrStatus() {
     }
   } catch {
     // Ignore poll errors
+  }
+}
+
+/**
+ * Switch which login playback uses.
+ *
+ * `true` = the bot's shared account (usually the admin's, usually the one with
+ * a membership), `false` = my own / the assigned one. Nothing is unlinked, so
+ * switching back restores the personal account exactly as it was.
+ */
+async function setPreference(preferShared: boolean) {
+  if (preferShared === status.preferShared) return;
+  error.value = '';
+  const previous = status.preferShared;
+  status.preferShared = preferShared; // optimistic — the radio must feel instant
+  try {
+    await axios.put(`${base()}/preference`, { preferShared });
+  } catch (err: any) {
+    status.preferShared = previous;
+    const code = err?.response?.status;
+    error.value =
+      code === 409
+        ? '管理员未开启「每用户独立账号」，暂时无法切换'
+        : (err?.response?.data?.error ?? '切换失败');
   }
 }
 
@@ -293,6 +369,88 @@ onUnmounted(stopPolling);
   color: var(--text-tertiary);
   margin: 0 0 12px;
   line-height: 1.5;
+}
+
+.account-choice {
+  margin: 12px 0 16px;
+  padding: 12px;
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
+  border-radius: var(--radius-sm, 8px);
+}
+
+.account-choice-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.account-choice-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 8px);
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+
+  & + & {
+    margin-top: 4px;
+  }
+
+  &:hover {
+    background: var(--hover-bg-strong, rgba(128, 128, 128, 0.08));
+  }
+
+  &.active {
+    background: var(--hover-bg-strong, rgba(128, 128, 128, 0.1));
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+}
+
+.account-choice-dot {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 2px solid var(--text-secondary, #888);
+  position: relative;
+
+  &.on {
+    border-color: var(--color-primary);
+
+    &::after {
+      content: '';
+      position: absolute;
+      inset: 2px;
+      border-radius: 50%;
+      background: var(--color-primary);
+    }
+  }
+}
+
+.account-choice-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 1.45;
+
+  strong {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  em {
+    font-style: normal;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
 }
 
 .login-methods {

@@ -102,6 +102,25 @@ export function grantedAccountFor(
   return deps.database.getGrantedMusicAccount(user.id!, platform);
 }
 
+/**
+ * Whether the member explicitly asked to play through the shared login.
+ *
+ * This exists for one concrete case: their own account has no membership, the
+ * admin's does, and they would rather hear the paid tracks than their own
+ * recommendations. Choosing it overrides BOTH their own link and any admin
+ * assignment — it is an explicit instruction, not a fallback.
+ */
+export function preferSharedFor(
+  req: Request | undefined,
+  platform: string,
+  deps: MusicScopeDeps,
+): boolean {
+  if (!perUserMusicEnabled(deps)) return false;
+  const user = scopedUser(req, deps);
+  if (!user || !deps.database) return false;
+  return deps.database.getUserMusicPreference(user.id!, platform)?.preferShared === true;
+}
+
 /** Where the cookie driving this request came from. */
 export interface ResolvedMusicCookie {
   source: "personal" | "granted";
@@ -122,6 +141,10 @@ export function resolveMusicCookie(
   deps: MusicScopeDeps,
   options: { alwaysPersonal?: boolean } = {},
 ): ResolvedMusicCookie | null {
+  // An explicit "use the shared account" outranks everything, including the
+  // `alwaysPersonal` escape hatch: someone who chose membership over their own
+  // recommendations wants the shared login for FM too.
+  if (preferSharedFor(req, platform, deps)) return null;
   const own = personalCookieFor(req, platform, deps, options.alwaysPersonal);
   if (own) return { source: "personal", cookie: own };
   const granted = grantedAccountFor(req, platform, deps);
@@ -137,6 +160,39 @@ export function resolveMusicCookie(
 }
 
 /**
+ * Give `view` a single-shot fallback to the shared login when its own playback
+ * attempt comes up empty.
+ *
+ * The case this exists for: the member's own account is real but has no
+ * membership, so `/song/url/v1` answers `url: null` (or 400 for the paid track)
+ * while the admin's account plays it fine. Without this the member has to go
+ * into settings and switch manually before every such track.
+ *
+ * Only `getSongUrl` is wrapped — search, playlists and FM stay on the member's
+ * own account, which is the whole point of per-user logins. The wrapper keeps
+ * the shared instance untouched, so nothing leaks between callers.
+ */
+function withSharedPlaybackFallback(view: MusicProvider, shared: MusicProvider): MusicProvider {
+  // Guard for partial implementations (and for test doubles): without both
+  // sides resolvable there is nothing to fall back to.
+  if (typeof view.getSongUrl !== "function" || typeof shared.getSongUrl !== "function") {
+    return view;
+  }
+  const ownResolve = view.getSongUrl.bind(view);
+  view.getSongUrl = async (songId: string, quality?: string) => {
+    try {
+      const result = await ownResolve(songId, quality);
+      if (result?.url) return result;
+    } catch {
+      // A failure on the personal side (no membership, -460, expired cookie)
+      // is not a reason for this track to go grey — try the shared login.
+    }
+    return shared.getSongUrl(songId, quality);
+  };
+  return view;
+}
+
+/**
  * Wrap `shared` in a per-account view when the request carries a usable login;
  * otherwise return `shared` untouched.
  *
@@ -149,14 +205,19 @@ export function resolveProviderForRequest(
   platform: string,
   shared: MusicProvider,
   deps: MusicScopeDeps,
-  options: { alwaysPersonal?: boolean } = {},
+  options: { alwaysPersonal?: boolean; fallbackToShared?: boolean } = {},
 ): MusicProvider {
   const resolved = resolveMusicCookie(req, platform, deps, options);
   if (!resolved) return shared;
   if (typeof shared.withCookie !== "function") return shared;
+  let view: MusicProvider;
   try {
-    return shared.withCookie(resolved.cookie);
+    view = shared.withCookie(resolved.cookie);
   } catch {
     return shared;
   }
+  // On by default: the common complaint is "my account has no membership, the
+  // admin's does". Set false to keep playback strictly on the member's account.
+  if (options.fallbackToShared === false) return view;
+  return withSharedPlaybackFallback(view, shared);
 }

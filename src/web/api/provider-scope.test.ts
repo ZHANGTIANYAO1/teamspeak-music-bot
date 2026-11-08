@@ -25,10 +25,16 @@ function fakeProvider(opts: {
  * `own` is the member's self-linked cookie, `granted` an admin assignment.
  * Both default to null so a test only states the state it cares about.
  */
-function fakeDb(own: string | null, granted: GrantedMusicAccount | null = null): BotDatabase {
+function fakeDb(
+  own: string | null,
+  granted: GrantedMusicAccount | null = null,
+  preferShared = false,
+): BotDatabase {
   return {
     getUserMusicCookie: () => own,
     getGrantedMusicAccount: () => granted,
+    getUserMusicPreference: () =>
+      preferShared ? { preferShared: true } : null,
   } as unknown as BotDatabase;
 }
 
@@ -296,5 +302,159 @@ describe("provider-scope", () => {
       );
       expect(scoped).toBe(shared);
     });
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// "Play through the shared account" preference
+//
+// The real case: the member's own NetEase login has no VIP, the admin's does.
+// Switching to shared must override BOTH their own link and any assignment —
+// it is an explicit instruction, not a fallback.
+// ---------------------------------------------------------------------------
+describe("provider-scope — shared-account preference", () => {
+  it("ignores the member's own cookie when they chose the shared login", () => {
+    const resolved = resolveMusicCookie(
+      fakeReq({ id: "u1", role: "member" }),
+      "netease",
+      {
+        database: fakeDb("MUSIC_U=mine", null, true),
+        config: { perUserMusicAccounts: true },
+      },
+    );
+    expect(resolved).toBeNull();
+  });
+
+  it("also overrides an admin assignment", () => {
+    const resolved = resolveMusicCookie(
+      fakeReq({ id: "u1", role: "member" }),
+      "netease",
+      {
+        database: fakeDb(null, GRANTED, true),
+        config: { perUserMusicAccounts: true },
+      },
+    );
+    expect(resolved).toBeNull();
+  });
+
+  it("outranks alwaysPersonal, so personal FM follows the choice too", () => {
+    const resolved = resolveMusicCookie(
+      fakeReq({ id: "u1", role: "member" }),
+      "netease",
+      {
+        database: fakeDb("MUSIC_U=mine", null, true),
+        config: { perUserMusicAccounts: true },
+      },
+      { alwaysPersonal: true },
+    );
+    expect(resolved).toBeNull();
+  });
+
+  it("hands the untouched shared provider back", () => {
+    const shared = fakeProvider({ withCookie: () => fakeProvider() });
+    const scoped = resolveProviderForRequest(
+      fakeReq({ id: "u1", role: "member" }),
+      "netease",
+      shared,
+      {
+        database: fakeDb("MUSIC_U=mine", null, true),
+        config: { perUserMusicAccounts: true },
+      },
+    );
+    expect(scoped).toBe(shared);
+  });
+
+  it("is ignored while the admin has the feature off", () => {
+    const shared = fakeProvider({ withCookie: () => fakeProvider() });
+    const scoped = resolveProviderForRequest(
+      fakeReq({ id: "u1", role: "member" }),
+      "netease",
+      shared,
+      {
+        database: fakeDb("MUSIC_U=mine", null, true),
+        config: { perUserMusicAccounts: false },
+      },
+    );
+    expect(scoped).toBe(shared);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Automatic playback fallback
+//
+// Same scenario, minus an explicit choice: keep the member's own account for
+// search / playlists, but when THIS track cannot be resolved on it, try the
+// shared login instead of greying the track out.
+// ---------------------------------------------------------------------------
+describe("provider-scope — playback falls back to the shared login", () => {
+  function view(
+    getSongUrl: (songId: string, quality?: string) => Promise<{ url: string } | null>,
+  ): MusicProvider {
+    return { platform: "netease", getSongUrl } as unknown as MusicProvider;
+  }
+
+  function scopeWith(
+    personal: MusicProvider,
+    sharedUrl: () => Promise<{ url: string } | null>,
+    options: { fallbackToShared?: boolean } = {},
+  ) {
+    const shared = view(sharedUrl);
+    (shared as Partial<MusicProvider>).withCookie = () => personal;
+    return resolveProviderForRequest(
+      fakeReq({ id: "u1", role: "member" }),
+      "netease",
+      shared,
+      {
+        database: fakeDb("MUSIC_U=mine"),
+        config: { perUserMusicAccounts: true },
+      },
+      options,
+    );
+  }
+
+  it("uses the shared login when the personal account returns no url", async () => {
+    const scoped = scopeWith(view(async () => null), async () => ({ url: "https://shared/x.mp3" }));
+    expect((await scoped.getSongUrl("1"))?.url).toBe("https://shared/x.mp3");
+  });
+
+  it("uses the shared login when the personal account throws", async () => {
+    const scoped = scopeWith(
+      view(async () => {
+        throw new Error("no membership");
+      }),
+      async () => ({ url: "https://shared/x.mp3" }),
+    );
+    expect((await scoped.getSongUrl("1"))?.url).toBe("https://shared/x.mp3");
+  });
+
+  it("keeps the personal result when it works", async () => {
+    const scoped = scopeWith(
+      view(async () => ({ url: "https://mine/x.mp3" })),
+      async () => ({ url: "https://shared/x.mp3" }),
+    );
+    expect((await scoped.getSongUrl("1"))?.url).toBe("https://mine/x.mp3");
+  });
+
+  it("can be switched off so playback stays on the member's account", async () => {
+    const scoped = scopeWith(
+      view(async () => null),
+      async () => ({ url: "https://shared/x.mp3" }),
+      { fallbackToShared: false },
+    );
+    expect(await scoped.getSongUrl("1")).toBeNull();
+  });
+
+  it("leaves the shared instance itself untouched", async () => {
+    const shared = view(async () => ({ url: "https://shared/x.mp3" }));
+    (shared as Partial<MusicProvider>).withCookie = () => view(async () => null);
+    resolveProviderForRequest(
+      fakeReq({ id: "u1", role: "member" }),
+      "netease",
+      shared,
+      { database: fakeDb("MUSIC_U=mine"), config: { perUserMusicAccounts: true } },
+    );
+    // Calling the shared provider directly must still hit its own implementation.
+    expect((await shared.getSongUrl("1"))?.url).toBe("https://shared/x.mp3");
   });
 });

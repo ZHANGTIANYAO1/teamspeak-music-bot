@@ -85,6 +85,13 @@ export function createPersonalMusicRouter(
     // Lets the member UI hide "扫码绑定" on platforms that only accept an
     // admin-assigned account (qq / kugou / bilibili today).
     const supportsQrLogin = supportsPersonalLogin(provider);
+    // The member's explicit "play through the shared login" choice, so the UI
+    // can render the radio without a second round-trip.
+    const preferShared =
+      database.getUserMusicPreference(req.user!.id, platform)?.preferShared === true;
+    // The choice only exists while the admin has per-user accounts on; with it
+    // off everyone is already on the shared login and the radio is meaningless.
+    const featureEnabled = perUserMusicEnabled({ database, config });
 
     if (!account.cookie) {
       res.json({
@@ -93,6 +100,8 @@ export function createPersonalMusicRouter(
         source: "none",
         canUnlink: false,
         supportsQrLogin,
+        preferShared,
+        featureEnabled,
       });
       return;
     }
@@ -105,6 +114,8 @@ export function createPersonalMusicRouter(
         label: account.label,
         canUnlink: account.canUnlink,
         supportsQrLogin,
+        preferShared,
+        featureEnabled,
         unsupported: true,
       });
       return;
@@ -117,6 +128,8 @@ export function createPersonalMusicRouter(
         label: account.label,
         canUnlink: account.canUnlink,
         supportsQrLogin,
+        preferShared,
+        featureEnabled,
         ...status,
       });
     } catch (err) {
@@ -128,6 +141,8 @@ export function createPersonalMusicRouter(
         label: account.label,
         canUnlink: account.canUnlink,
         supportsQrLogin,
+        preferShared,
+        featureEnabled,
       });
     }
   });
@@ -197,6 +212,40 @@ export function createPersonalMusicRouter(
       // What playback falls back to now — the member UI shows the right hint.
       fallback: remaining.source === "granted" ? "granted" : "shared",
     });
+  });
+
+  /**
+   * Which login this member plays through.
+   *
+   * `preferShared: true` = ignore my own (and any assigned) account and use the
+   * bot's shared login — the admin's, usually the one with a membership. It is
+   * the answer to "my NetEase account has no VIP, the admin's does, and I want
+   * the paid track". Nothing is deleted: flipping it back restores the personal
+   * account exactly as it was.
+   */
+  router.put("/:platform/preference", (req, res) => {
+    const platform = req.params.platform;
+    const { preferShared } = req.body ?? {};
+    if (typeof preferShared !== "boolean") {
+      res.status(400).json({ error: "preferShared must be a boolean" });
+      return;
+    }
+    // With the feature off there is nothing to choose between — everything
+    // already runs on the shared login. Refuse instead of storing a value that
+    // would silently do nothing.
+    if (!perUserMusicEnabled({ database, config })) {
+      res.status(409).json({ error: "per_user_accounts_disabled" });
+      return;
+    }
+    database.setUserMusicPreference(req.user!.id, platform, preferShared);
+    logger.info({ userId: req.user!.id, platform, preferShared }, "Music account preference set");
+    res.json({ platform, preferShared });
+  });
+
+  router.get("/:platform/preference", (req, res) => {
+    const platform = req.params.platform;
+    const pref = database.getUserMusicPreference(req.user!.id, platform);
+    res.json({ platform, preferShared: pref?.preferShared === true });
   });
 
   return router;

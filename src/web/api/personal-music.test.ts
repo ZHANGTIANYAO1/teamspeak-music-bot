@@ -60,6 +60,7 @@ describe("personal music account router (#164)", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       linked: false, loggedIn: false, source: "none", canUnlink: false, supportsQrLogin: true,
+      preferShared: false, featureEnabled: false,
     });
   });
 
@@ -93,6 +94,8 @@ describe("personal music account router (#164)", () => {
       source: "personal",
       canUnlink: true,
       supportsQrLogin: true,
+      preferShared: false,
+      featureEnabled: false,
       loggedIn: true,
       nickname: "Alice163",
     });
@@ -131,6 +134,8 @@ describe("personal music account router (#164)", () => {
         label: "网易云-主号",
         canUnlink: false,
         supportsQrLogin: true,
+        preferShared: false,
+        featureEnabled: true,
         loggedIn: true,
         nickname: "Alice163",
       });
@@ -143,6 +148,7 @@ describe("personal music account router (#164)", () => {
       const res = await request(app).get("/api/me/music/netease/status");
       expect(res.body).toEqual({
       linked: false, loggedIn: false, source: "none", canUnlink: false, supportsQrLogin: true,
+      preferShared: false, featureEnabled: false,
     });
     });
 
@@ -205,5 +211,75 @@ describe("web FM uses the caller's linked NetEase account (#164)", () => {
   it("leaves other platforms alone", async () => {
     const { bot, qq } = await startFm({ linked: true, platform: "qq" });
     expect(bot.startFm.mock.calls[0][0]).toBe(qq);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Play through the shared account" preference (#164 follow-up)
+//
+// The case this exists for: the member's own NetEase login has no VIP, the
+// admin's does. The preference is per-platform and per-user, and it must not
+// touch either stored login.
+// ---------------------------------------------------------------------------
+describe("personal music — shared-account preference", () => {
+  const ON = { config: { perUserMusicAccounts: true } };
+
+  it("defaults to the member's own account", async () => {
+    const { app } = mount(ON);
+    const res = await request(app).get("/api/me/music/netease/preference");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ platform: "netease", preferShared: false });
+  });
+
+  it("stores the choice and reports it back", async () => {
+    const { app } = mount(ON);
+    const put = await request(app).put("/api/me/music/netease/preference").send({ preferShared: true });
+    expect(put.status).toBe(200);
+    expect(put.body).toEqual({ platform: "netease", preferShared: true });
+
+    const get = await request(app).get("/api/me/music/netease/preference");
+    expect(get.body.preferShared).toBe(true);
+  });
+
+  it("keeps the choice per platform", async () => {
+    const { app } = mount({
+      ...ON,
+      extraProviders: { qq: { platform: "qq", withCookie: () => ({ getAuthStatus: async () => ({ loggedIn: true }) }) } },
+    });
+    await request(app).put("/api/me/music/netease/preference").send({ preferShared: true });
+    const qq = await request(app).get("/api/me/music/qq/preference");
+    expect(qq.body.preferShared).toBe(false);
+  });
+
+  it("does not touch the stored login", async () => {
+    const { app, db } = mount(ON);
+    db.setUserMusicCookie("u1", "netease", "MUSIC_U=mine");
+    await request(app).put("/api/me/music/netease/preference").send({ preferShared: true });
+
+    expect(db.getUserMusicCookie("u1", "netease")).toBe("MUSIC_U=mine");
+    expect(db.getUserMusicPreference("u1", "netease")).toEqual({ preferShared: true });
+  });
+
+  it("surfaces the choice on the status payload the UI already reads", async () => {
+    const { app, db } = mount(ON);
+    db.setUserMusicCookie("u1", "netease", "MUSIC_U=mine");
+    await request(app).put("/api/me/music/netease/preference").send({ preferShared: true });
+
+    const res = await request(app).get("/api/me/music/netease/status");
+    expect(res.body.preferShared).toBe(true);
+    expect(res.body.featureEnabled).toBe(true);
+  });
+
+  it("rejects a non-boolean", async () => {
+    const { app } = mount(ON);
+    const res = await request(app).put("/api/me/music/netease/preference").send({ preferShared: "yes" });
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses when the admin has the feature off", async () => {
+    const { app } = mount({ config: { perUserMusicAccounts: false } });
+    const res = await request(app).put("/api/me/music/netease/preference").send({ preferShared: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("per_user_accounts_disabled");
   });
 });
