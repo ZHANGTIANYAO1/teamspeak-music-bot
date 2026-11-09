@@ -130,6 +130,14 @@ export async function resolveUrlWithRetry(
     const step = plan[i];
     if (opts.isCancelled?.()) return null;
 
+    // -460 is an IP-level refusal, not a property of this track: the quality we
+    // ask for is irrelevant to it, so stepping down the ladder cannot succeed
+    // and each extra step costs another RISK_CONTROL_BACKOFF_MS. With the
+    // default budget that turned a blocked host into 17s of silence before the
+    // failure message — worse than the instant error it replaced. Give up as
+    // soon as the phase changes rather than when the plan runs out.
+    if (step.fallback && riskControlled) break;
+
     if (i > 0) {
       const wait = riskControlled
         ? RISK_CONTROL_BACKOFF_MS * Math.max(1, sameQualityAttempt)

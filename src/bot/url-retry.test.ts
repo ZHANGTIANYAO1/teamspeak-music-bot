@@ -341,20 +341,47 @@ describe("resolveUrlWithRetry — risk control backoff", () => {
     for (const d of delays) expect(d).toBeGreaterThan(DEFAULT_URL_RETRY_BACKOFF_MS);
   });
 
-  it("does not fall back to the fast level-switch delay while risk controlled", async () => {
+  it("gives up instead of stepping down the ladder while risk controlled", async () => {
+    let attempts = 0;
     const { sleep, delays } = recordingSleep();
-    await resolveUrlWithRetry({
-      retries: 0,
+    const result = await resolveUrlWithRetry({
+      retries: 1,
       resolve: async () => {
+        attempts += 1;
         throw new RiskControlError("网络环境风险 (-460)");
       },
       fallbacks: ["higher", "standard"],
       sleep,
     });
 
-    // -460 ignores which quality we ask for, so 120ms would just burn attempts.
-    expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS, RISK_CONTROL_BACKOFF_MS]);
-    expect(delays).not.toContain(QUALITY_SWITCH_BACKOFF_MS);
+    expect(result).toBeNull();
+    // 1 + retries attempts at the configured quality, then stop. -460 ignores
+    // which level we ask for, so each ladder step would only add another
+    // RISK_CONTROL_BACKOFF_MS of silence before the same failure surfaces.
+    expect(attempts).toBe(2);
+    expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS]);
+  });
+
+  it("still walks the ladder when the risk control clears on a retry", async () => {
+    // First attempt blocked by the IP, second one just has no URL — the cause
+    // changed, so a lower level is worth trying again.
+    let attempts = 0;
+    const result = await resolveUrlWithRetry({
+      retries: 1,
+      resolve: async (quality) => {
+        attempts += 1;
+        if (attempts === 1) throw new RiskControlError("网络环境风险 (-460)");
+        if (quality === "standard") return ok("https://cdn.example/128k.mp3");
+        return null;
+      },
+      fallbacks: ["higher", "standard"],
+      sleep: async () => {},
+    });
+
+    expect(result?.url).toBe("https://cdn.example/128k.mp3");
+    // 2 same-quality attempts, then both ladder steps — the second attempt was a
+    // plain miss, not -460, so the ladder keeps its normal cost.
+    expect(attempts).toBe(4);
   });
 
   it("recovers as soon as the window passes, and stops spending", async () => {
