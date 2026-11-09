@@ -6,6 +6,8 @@ import { createLogger } from "./logger.js";
 import { createApiServerManager } from "./music/api-server.js";
 import { NeteaseProvider } from "./music/netease.js";
 import { QQMusicProvider } from "./music/qq.js";
+import { createQqLoginClient } from "./music/qq-login.js";
+import { createQqSessionStore, QQManagedSession } from "./music/qq-session.js";
 import { BiliBiliProvider } from "./music/bilibili.js";
 import { LocalMusicProvider } from "./music/local.js";
 import { KugouProvider } from "./music/kugou.js";
@@ -66,7 +68,6 @@ async function main() {
   await apiServer.start();
 
   const neteaseProvider = new NeteaseProvider(apiServer.getNeteaseBaseUrl());
-  const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl());
   const bilibiliProvider = new BiliBiliProvider();
   const localProvider = new LocalMusicProvider(LOCAL_AUDIO_DIR);
   const kugouProvider = new KugouProvider();
@@ -84,7 +85,11 @@ async function main() {
   const neteaseCookie = cookieStore.load("netease");
   if (neteaseCookie) neteaseProvider.setCookie(neteaseCookie);
   const qqCookie = cookieStore.load("qq");
-  if (qqCookie) qqProvider.setCookie(qqCookie);
+  const qqSession = (process.env.QQ_MUSIC_MANAGED_SESSION ?? "1") === "1" && isProviderEnabled(config, "qq")
+    ? new QQManagedSession(createQqLoginClient(), createQqSessionStore(path.join(COOKIE_DIR, "qq-session.json")), logger, qqCookie)
+    : undefined;
+  const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl(), qqSession);
+  if (!qqSession && qqCookie) qqProvider.setCookie(qqCookie);
   const bilibiliCookie = cookieStore.load("bilibili");
   if (bilibiliCookie) bilibiliProvider.setCookie(bilibiliCookie);
   const kugouCookie = cookieStore.load("kugou");
@@ -175,6 +180,7 @@ async function main() {
 
   const shutdown = () => {
     logger.info("Shutting down...");
+    qqSession?.stop();
     botManager.shutdown();
     webServer.stop();
     apiServer.stop();

@@ -15,6 +15,7 @@ import type {
   ArtistSongPage,
 } from "./provider.js";
 import { parseLyrics } from "./netease.js";
+import type { QQManagedSession } from "./qq-session.js";
 
 // Primary search client: u.y.qq.com/cgi-bin/musicu.fcg (JSON sub-request
 // batch). Was broken ca. 2026-05 due to two upstream API changes:
@@ -171,15 +172,19 @@ function computeGtk(pSkey: string): number {
 export class QQMusicProvider implements MusicProvider {
   readonly platform = "qq" as const;
   private api: AxiosInstance;
-  private cookie = "";
+  private legacyCookie = "";
   private quality = "exhigh";
   private radarPage = 1;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, readonly managedSession?: QQManagedSession) {
     this.api = axios.create({
       baseURL: baseUrl,
       timeout: 10000,
     });
+  }
+
+  private get cookie(): string {
+    return this.managedSession?.getCookie() ?? this.legacyCookie;
   }
 
   setQuality(quality: string): void {
@@ -768,6 +773,7 @@ export class QQMusicProvider implements MusicProvider {
   }
 
   async getQrCode(): Promise<QrCodeResult> {
+    if (this.managedSession) return this.managedSession.getQrCode();
     // @sansenjian/qq-music-api 2.x returns { img, qrsig, ptqrtoken } via
     // customResponse (no { response: ... } wrapping). /checkQQLoginQr
     // requires BOTH qrsig AND ptqrtoken — passing only one gives a 400
@@ -787,6 +793,12 @@ export class QQMusicProvider implements MusicProvider {
   async checkQrCodeStatus(
     key: string
   ): Promise<"waiting" | "scanned" | "confirmed" | "expired"> {
+    if (this.managedSession) {
+      const previous = this.cookie;
+      const status = await this.managedSession.checkQrCodeStatus(key);
+      if (status === "confirmed" && this.cookie !== previous) this.radarPage = 1;
+      return status;
+    }
     const [qrsig, ptqrtoken] = key.split("|");
     if (!qrsig || !ptqrtoken) return "expired";
 
@@ -808,7 +820,7 @@ export class QQMusicProvider implements MusicProvider {
     const body = res.data;
     if (body?.isOk === true) {
       const cookie: string = body.session?.cookie ?? "";
-      if (cookie) this.cookie = cookie;
+      if (cookie) this.legacyCookie = cookie;
       return "confirmed";
     }
     if (body?.refresh === true) return "expired";
@@ -818,7 +830,8 @@ export class QQMusicProvider implements MusicProvider {
   }
 
   setCookie(cookie: string): void {
-    this.cookie = cookie;
+    if (this.managedSession) this.managedSession.setCookie(cookie);
+    else this.legacyCookie = cookie;
     // Reset radar pagination so a re-login (different account) starts from the
     // first page rather than inheriting the previous account's cursor.
     this.radarPage = 1;
