@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { isIP } from "node:net";
 import type { BotManager } from "../../bot/manager.js";
 import type { BotConfig, GuestModeConfig, SpotifyConfig, JellyfinConfig, GateableProvider } from "../../data/config.js";
 import { saveConfig, GATEABLE_PROVIDERS } from "../../data/config.js";
@@ -81,6 +82,7 @@ export function createBotRouter(
       jellyfin: maskedJellyfin(),
       enabledProviders: config.enabledProviders,
       defaultPlatform: config.defaultPlatform,
+      neteaseRealIP: config.neteaseRealIP,
     });
   });
 
@@ -105,6 +107,16 @@ export function createBotRouter(
     const hasAutoPause = typeof autoPauseOnEmpty === "boolean";
     const hasLocalAudioEnabled = typeof localAudioEnabled === "boolean";
 
+    const hasNeteaseRealIP = "neteaseRealIP" in req.body;
+    const neteaseRealIP = typeof req.body.neteaseRealIP === "string"
+      ? req.body.neteaseRealIP.trim()
+      : null;
+    if (hasNeteaseRealIP && (neteaseRealIP === null || (neteaseRealIP !== "" && !isIP(neteaseRealIP)))) {
+      res.status(400).json({ error: "网易云请求 IP 必须是有效的 IPv4 或 IPv6 地址，或留空恢复默认" });
+      return;
+    }
+
+    if (hasNeteaseRealIP) config.neteaseRealIP = neteaseRealIP!;
     if (hasIdle) config.idleTimeoutMinutes = idleTimeoutMinutes;
     if (hasAutoPause) config.autoPauseOnEmpty = autoPauseOnEmpty;
     if (hasLocalAudioEnabled) config.localAudioEnabled = localAudioEnabled;
@@ -289,6 +301,7 @@ export function createBotRouter(
       jellyfin: maskedJellyfin(),
       enabledProviders: config.enabledProviders,
       defaultPlatform: config.defaultPlatform,
+      neteaseRealIP: config.neteaseRealIP,
     });
   });
 

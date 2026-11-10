@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import {
   parseLyrics,
   mapNeteaseAlbums,
@@ -7,6 +10,53 @@ import {
   parseNeteaseTrial,
   NeteaseProvider,
 } from "./netease.js";
+
+describe("NeteaseProvider realIP", () => {
+  it("applies live IP changes to search, login, playback and existing personal views", async () => {
+    const requests: URL[] = [];
+    const server = createServer((req, res) => {
+      requests.push(new URL(req.url!, "http://localhost"));
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ code: 200, data: [{ url: "https://example.com/song.mp3" }] }));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      let realIP = "";
+      const provider = new NeteaseProvider(baseUrl, () => realIP);
+      provider.setCookie("MUSIC_U=shared");
+      const personal = provider.withCookie("MUSIC_U=personal");
+      await provider.getSongUrl("1");
+      expect(requests.at(-1)!.searchParams.has("realIP")).toBe(false);
+
+      requests.length = 0;
+      realIP = "203.0.113.10";
+      await provider.search("hello");
+      await provider.getQrCode();
+      await provider.sendSmsCode("13800000000");
+      await provider.getSongUrl("2");
+      expect(requests).toHaveLength(8);
+      expect(requests.every((url) => url.searchParams.get("realIP") === realIP)).toBe(true);
+      expect(requests.at(-1)!.searchParams.get("cookie")).toBe("MUSIC_U=shared");
+
+      realIP = "2001:db8::1";
+      await personal.getSongUrl("3");
+      expect(requests.at(-1)!.searchParams.get("realIP")).toBe(realIP);
+      expect(requests.at(-1)!.searchParams.get("cookie")).toBe("MUSIC_U=personal");
+      expect(provider.getCookie()).toBe("MUSIC_U=shared");
+
+      realIP = "";
+      await personal.getSongUrl("4");
+      expect(requests.at(-1)!.searchParams.has("realIP")).toBe(false);
+      await new NeteaseProvider(baseUrl).getSongUrl("5");
+      expect(requests.at(-1)!.searchParams.has("realIP")).toBe(false);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+});
 
 describe("NetEase adapter", () => {
   it("parses LRC format lyrics", () => {

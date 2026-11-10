@@ -131,11 +131,17 @@ export class NeteaseProvider implements MusicProvider {
   private quality = "exhigh";
   private readonly baseUrl: string;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, private readonly getRealIP?: () => string) {
     this.baseUrl = baseUrl;
     this.api = axios.create({
       baseURL: baseUrl,
       timeout: 10000,
+    });
+    // Read the live setting for every request, including login and personal views.
+    this.api.interceptors.request.use((request) => {
+      const realIP = this.getRealIP?.();
+      if (realIP) request.params = { ...request.params, realIP };
+      return request;
     });
   }
 
@@ -366,7 +372,7 @@ export class NeteaseProvider implements MusicProvider {
    * a web user's personal FM uses their own taste instead of the shared login.
    */
   withCookie(cookie: string): NeteaseProvider {
-    const view = new NeteaseProvider(this.baseUrl);
+    const view = new NeteaseProvider(this.baseUrl, this.getRealIP);
     view.setQuality(this.quality);
     view.setCookie(cookie);
     return view;

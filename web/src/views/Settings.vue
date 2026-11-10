@@ -642,6 +642,26 @@
       </div>
     </section>
 
+    <section v-if="can('bot.manage') && providerOn('netease')" class="settings-section" v-show="activeCategory === 'music'">
+      <h2 class="section-title">网易云请求 IP</h2>
+      <p class="profile-section-hint">
+        设置网易云 API 使用的 IP 请求头（realIP）。支持 IPv4 / IPv6，留空使用默认处理；保存后立即生效。
+      </p>
+      <form class="form-row" @submit.prevent="saveNeteaseRealIP">
+        <input
+          v-model="neteaseRealIP"
+          class="input"
+          aria-label="网易云请求 IP"
+          placeholder="留空使用默认 IP"
+          :disabled="!neteaseRealIPLoaded || neteaseRealIPSaving"
+        />
+        <button class="btn-primary" type="submit" :disabled="!neteaseRealIPLoaded || neteaseRealIPSaving">
+          {{ neteaseRealIPSaving ? '保存中…' : '保存' }}
+        </button>
+      </form>
+      <p v-if="neteaseRealIPMessage" class="spotify-message" :class="`tone-${neteaseRealIPMessageTone}`">{{ neteaseRealIPMessage }}</p>
+    </section>
+
     <!-- Default music source (issue #126): the source used by chat commands
          (!play/!add …) and the WebUI when no platform flag is given. Saving is a
          global bot setting, so gate on bot.manage like the other behavior rows. -->
@@ -1805,6 +1825,29 @@ async function savePrefix() {
   // Prefix is saved client-side for now
 }
 
+const neteaseRealIP = ref('');
+const neteaseRealIPLoaded = ref(false);
+const neteaseRealIPSaving = ref(false);
+const neteaseRealIPMessage = ref('');
+const neteaseRealIPMessageTone = ref<'ok' | 'warn'>('ok');
+
+async function saveNeteaseRealIP() {
+  if (!neteaseRealIPLoaded.value || neteaseRealIPSaving.value) return;
+  neteaseRealIPSaving.value = true;
+  neteaseRealIPMessage.value = '';
+  try {
+    const res = await axios.post('/api/bot/settings', { neteaseRealIP: neteaseRealIP.value.trim() });
+    neteaseRealIP.value = res.data.neteaseRealIP;
+    neteaseRealIPMessageTone.value = 'ok';
+    neteaseRealIPMessage.value = '已保存，后续网易云请求立即生效';
+  } catch (err: any) {
+    neteaseRealIPMessageTone.value = 'warn';
+    neteaseRealIPMessage.value = err?.response?.data?.error || '保存失败，请稍后重试';
+  } finally {
+    neteaseRealIPSaving.value = false;
+  }
+}
+
 // Idle timeout
 const idleTimeout = ref(0);
 // Defaults OFF to match the backend default (config.ts getDefaultConfig).
@@ -1853,6 +1896,8 @@ async function loadIdleTimeout() {
   const voiceDuckingLoadRevision = voiceDuckingRequestRevision;
   try {
     const res = await axios.get('/api/bot/settings');
+    neteaseRealIP.value = res.data.neteaseRealIP ?? '';
+    neteaseRealIPLoaded.value = true;
     idleTimeout.value = res.data.idleTimeoutMinutes ?? 0;
     autoPauseOnEmpty.value = res.data.autoPauseOnEmpty ?? false;
     // A later save owns the state. Do not let an older GET response overwrite
@@ -1878,6 +1923,10 @@ async function loadIdleTimeout() {
     // null (unset) → "" so the select shows "自动（按优先级）".
     defaultPlatformForm.value = res.data.defaultPlatform ?? '';
   } catch {
+    if (!neteaseRealIPLoaded.value) {
+      neteaseRealIPMessageTone.value = 'warn';
+      neteaseRealIPMessage.value = '网易云请求 IP 设置加载失败，请刷新页面重试';
+    }
     if (!voiceDuckingLoaded.value) {
       voiceDuckingMessageTone.value = 'warn';
       voiceDuckingMessage.value = '语音闪避设置加载失败，请刷新页面重试';
@@ -2224,7 +2273,7 @@ const categoryHeader = ref<HTMLElement | null>(null);
 const visibleCategories = computed(() => settingsCategories.filter((category) => {
   if (session.isGuest.value) return category.id === 'appearance';
   if (category.id === 'bots') return can('bot.manage');
-  if (category.id === 'music') return can('platform.auth');
+  if (category.id === 'music') return can('platform.auth') || can('bot.manage');
   if (category.id === 'playback') return can('bot.manage') || can('quality');
   if (category.id === 'access' || category.id === 'audit') return session.isAdmin.value;
   return true;

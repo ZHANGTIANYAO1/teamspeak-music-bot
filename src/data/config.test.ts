@@ -48,6 +48,21 @@ describe("config", () => {
     expect(config).toEqual(getDefaultConfig());
   });
 
+  it("persists a NetEase realIP override and sanitizes legacy/invalid settings", () => {
+    const path = join(makeTmpDir(), "config.json");
+    expect(getDefaultConfig().neteaseRealIP).toBe("");
+    const config = { ...getDefaultConfig(), neteaseRealIP: "203.0.113.10" };
+    saveConfig(path, config);
+    expect(loadConfig(path).neteaseRealIP).toBe("203.0.113.10");
+    for (const [value, expected] of [
+      [" 2001:db8::1 ", "2001:db8::1"],
+      ["", ""], ["invalid", ""], [42, ""], [null, ""], [undefined, ""],
+    ]) {
+      writeFileSync(path, JSON.stringify({ neteaseRealIP: value }));
+      expect(loadConfig(path).neteaseRealIP).toBe(expected);
+    }
+  });
+
   it("defaults voice ducking to disabled at 30 percent", () => {
     expect(getDefaultConfig().voiceDucking).toEqual({
       enabled: false,

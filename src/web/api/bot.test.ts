@@ -15,6 +15,7 @@ import { createPermissionStore } from "../../data/permissions.js";
 import { createBotRouter } from "./bot.js";
 import {
   getDefaultConfig,
+  loadConfig,
   type BotConfig,
   type JellyfinConfig,
   type VoiceDuckingConfig,
@@ -84,6 +85,40 @@ describe("bot router /settings", () => {
   it("requires auth", async () => {
     const res = await request(app).get("/api/bot/settings");
     expect(res.status).toBe(401);
+  });
+
+  it("saves, reads and clears the NetEase realIP without changing unrelated settings", async () => {
+    for (const realIP of [" 203.0.113.10 ", "2001:db8::1", ""]) {
+      const before = structuredClone(config);
+      const res = await request(app).post("/api/bot/settings").set("Cookie", cookie)
+        .send({ neteaseRealIP: realIP });
+      expect(res.status).toBe(200);
+      expect(res.body.neteaseRealIP).toBe(realIP.trim());
+      expect(config).toEqual({ ...before, neteaseRealIP: realIP.trim() });
+      expect(loadConfig(configPath).neteaseRealIP).toBe(realIP.trim());
+      const get = await request(app).get("/api/bot/settings").set("Cookie", cookie);
+      expect(get.body.neteaseRealIP).toBe(realIP.trim());
+    }
+    config.neteaseRealIP = "203.0.113.20";
+    await request(app).post("/api/bot/settings").set("Cookie", cookie).send({});
+    expect(config.neteaseRealIP).toBe("203.0.113.20");
+  });
+
+  it("rejects invalid NetEase IPs before mutating or saving settings", async () => {
+    const before = structuredClone(config);
+    for (const realIP of [null, 42, {}, "example.com", "999.1.1.1", "203.0.113.1, 203.0.113.2", "203.0.113.1\r\nX-Test: x"]) {
+      const res = await request(app).post("/api/bot/settings").set("Cookie", cookie)
+        .send({ neteaseRealIP: realIP, idleTimeoutMinutes: 99 });
+      expect(res.status).toBe(400);
+      expect(config).toEqual(before);
+      expect(existsSync(configPath)).toBe(false);
+    }
+  });
+
+  it("requires authentication to update the NetEase IP", async () => {
+    const res = await request(app).post("/api/bot/settings").send({ neteaseRealIP: "203.0.113.10" });
+    expect(res.status).toBe(401);
+    expect(config.neteaseRealIP).toBe("");
   });
 
   it("GET /settings includes autoPauseOnEmpty reflecting config", async () => {
