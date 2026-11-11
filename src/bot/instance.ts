@@ -1046,10 +1046,25 @@ export class BotInstance extends EventEmitter {
     this.lastPlayFailure = null;
     if (!this.connected) {
       this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
+      // Recorded so the web route can say this instead of blaming copyright:
+      // every early return used to leave lastPlayFailure null, which made the
+      // UI fall back to the catch-all 「区域/版权限制」 for unrelated causes.
+      this.lastPlayFailure = {
+        platform: song.platform,
+        songId: song.id,
+        code: "unknown",
+        message: "机器人未连接，无法播放",
+      };
       return false;
     }
     if (song.platform === "local" && !this.isLocalAudioEnabled()) {
       this.logger.warn({ songId: song.id, name: song.name }, "Local audio playback disabled — refusing track");
+      this.lastPlayFailure = {
+        platform: song.platform,
+        songId: song.id,
+        code: "unknown",
+        message: "该机器人已关闭本地音频播放",
+      };
       return false;
     }
     // Clear any accumulated skip votes — every fresh track starts with a
@@ -1059,11 +1074,18 @@ export class BotInstance extends EventEmitter {
     const provider = this.getProviderFor(song.platform);
     try {
       if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
-        const detail = await provider.getSongDetail(song.id);
-        if (detail) {
-          song.duration = detail.duration;
-          song.name = detail.name;
-          song.id = detail.id;
+        // Detail is metadata only (duration / canonical id). A failure here used
+        // to abort the whole resolve before the retry budget even started, so a
+        // transient 4xx turned into an instant 「无法播放」.
+        try {
+          const detail = await provider.getSongDetail(song.id);
+          if (detail) {
+            song.duration = detail.duration;
+            song.name = detail.name;
+            song.id = detail.id;
+          }
+        } catch (err) {
+          this.logger.warn({ err, songId: song.id }, "Song detail lookup failed — continuing with queued metadata");
         }
       }
       // Retries happen here (not in the provider) so every queue path — web
@@ -1257,6 +1279,10 @@ export class BotInstance extends EventEmitter {
       return true;
     } catch (err) {
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
+      // Anything thrown outside the retry budget (detail lookup, spotify
+      // handoff, player start) still needs a cause, otherwise the web route
+      // prints the old 「区域/版权限制」 for a cause that is not copyright.
+      this.lastPlayFailure = toPlayFailure(song.platform, song.id, err);
       return false;
     }
   }
