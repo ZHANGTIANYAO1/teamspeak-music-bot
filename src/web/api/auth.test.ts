@@ -130,4 +130,14 @@ describe("managed QQ authentication routes", () => {
     expect(legacyStore.save).toHaveBeenCalledWith("qq", "private-test-cookie");
     await request(app).post("/api/auth/qq/refresh").expect(404);
   });
+
+  it("keeps the current QQ cookie when an unmanaged import cannot be saved", async () => {
+    const { app, qq, legacyStore } = mount(false);
+    legacyStore.save.mockImplementationOnce(() => { throw new Error("test write failed"); });
+    await request(app).post("/api/auth/cookie").send({ platform: "qq", cookie: "uin=999" }).expect(503);
+    expect(qq.setCookie).not.toHaveBeenCalled();
+    await request(app).post("/api/auth/cookie").send({ platform: "qq", cookie: "uin=999" }).expect(200);
+    expect(legacyStore.save).toHaveBeenLastCalledWith("qq", "uin=999");
+    expect(qq.setCookie).toHaveBeenCalledWith("uin=999");
+  });
 });

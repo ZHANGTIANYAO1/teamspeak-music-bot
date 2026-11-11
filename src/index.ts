@@ -80,16 +80,23 @@ async function main() {
     spotifyProvider.setCreds(config.spotify.clientId, config.spotify.clientSecret);
   }
 
-  const cookieStore = createCookieStore(COOKIE_DIR);
+  const qqStore = createQqSessionStore(path.join(COOKIE_DIR, "qq-session.json"), path.join(COOKIE_DIR, "qq.json"));
+  const cookieStore = createCookieStore(COOKIE_DIR, qqStore);
   const avatarStore = createAvatarStore(AVATAR_DIR);
   const neteaseCookie = cookieStore.load("netease");
   if (neteaseCookie) neteaseProvider.setCookie(neteaseCookie);
-  const qqCookie = cookieStore.load("qq");
   const qqSession = (process.env.QQ_MUSIC_MANAGED_SESSION ?? "1") === "1" && isProviderEnabled(config, "qq")
-    ? new QQManagedSession(createQqLoginClient(), createQqSessionStore(path.join(COOKIE_DIR, "qq-session.json")), logger, qqCookie)
+    ? new QQManagedSession(createQqLoginClient(), qqStore, logger)
     : undefined;
   const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl(), qqSession);
-  if (!qqSession && qqCookie) qqProvider.setCookie(qqCookie);
+  if (!qqSession) {
+    try {
+      const cookie = cookieStore.load("qq");
+      if (cookie) qqProvider.setCookie(cookie);
+    } catch {
+      logger.warn("Could not read QQ session");
+    }
+  }
   const bilibiliCookie = cookieStore.load("bilibili");
   if (bilibiliCookie) bilibiliProvider.setCookie(bilibiliCookie);
   const kugouCookie = cookieStore.load("kugou");

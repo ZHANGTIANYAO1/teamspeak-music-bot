@@ -57,6 +57,7 @@ export function parseQqCredential(value: unknown, previous?: QqCredential): QqCr
   const musickey = token(data.musickey);
   if (!musicid || !musickey) return;
   const sameAccount = previous?.musicid === musicid ? previous : undefined;
+  const sameKey = sameAccount?.musickey === musickey ? sameAccount : undefined;
   return {
     musicid,
     musickey,
@@ -65,8 +66,8 @@ export function parseQqCredential(value: unknown, previous?: QqCredential): QqCr
     refresh_token: token(data.refresh_token ?? sameAccount?.refresh_token),
     refresh_key: token(data.refresh_key),
     expired_at: positiveInt(data.expired_at ?? sameAccount?.expired_at),
-    musickeyCreateTime: positiveInt(data.musickeyCreateTime),
-    keyExpiresIn: positiveInt(data.keyExpiresIn),
+    musickeyCreateTime: positiveInt(data.musickeyCreateTime ?? sameKey?.musickeyCreateTime),
+    keyExpiresIn: positiveInt(data.keyExpiresIn ?? sameKey?.keyExpiresIn),
   };
 }
 

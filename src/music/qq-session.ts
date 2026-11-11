@@ -31,18 +31,32 @@ function expiryTime(credential: QqCredential): number | undefined {
   return timestamp((credential.musickeyCreateTime + credential.keyExpiresIn) * 1000);
 }
 
-export function createQqSessionStore(file: string) {
+export function createQqSessionStore(file: string, legacyFile?: string) {
+  function loadLegacy(newerThan = -Infinity): QqSessionRecord | undefined {
+    if (!legacyFile) return;
+    try {
+      if (fs.statSync(legacyFile).mtimeMs <= newerThan) return;
+      const { cookie } = JSON.parse(fs.readFileSync(legacyFile, "utf8"));
+      if (typeof cookie === "string" && cookie) return { cookie };
+    } catch { /* The legacy cookie is missing or unreadable. */ }
+  }
+
   return {
     load(): QqSessionRecord | undefined {
       let raw: string;
       try {
         raw = fs.readFileSync(file, "utf8");
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return loadLegacy();
         throw err;
       }
       const data = JSON.parse(raw);
       if (data?.version !== 1 || typeof data.cookie !== "string") throw new Error("Invalid QQ session record");
+      // Before the stores were shared, a newer login could be in the legacy file.
+      if (data.shared !== true && legacyFile) {
+        const legacy = loadLegacy(fs.statSync(file).mtimeMs);
+        if (legacy) return legacy;
+      }
       const credential = parseQqCredential(data.credential);
       if (data.credential && (!credential || qqPlaybackCookie(credential) !== data.cookie)) {
         throw new Error("Invalid QQ session credential");
@@ -58,7 +72,7 @@ export function createQqSessionStore(file: string) {
     save(data: QqSessionRecord): void {
       const temp = path.join(path.dirname(file), `.qq-session-${randomUUID()}.tmp`);
       try {
-        fs.writeFileSync(temp, JSON.stringify({ version: 1, ...data }), {
+        fs.writeFileSync(temp, JSON.stringify({ version: 1, shared: true, ...data }), {
           encoding: "utf8", mode: 0o600, flag: "wx", flush: true,
         });
         fs.renameSync(temp, file);
@@ -94,10 +108,10 @@ export class QQManagedSession {
     private readonly client: QqLoginClient,
     private readonly store: ReturnType<typeof createQqSessionStore>,
     private readonly logger: Logger,
-    legacyCookie: string,
   ) {
     try {
-      this.state = store.load() ?? { cookie: legacyCookie };
+      const saved = store.load();
+      if (saved) this.state = saved;
     } catch {
       logger.warn("Could not read QQ managed session");
     }

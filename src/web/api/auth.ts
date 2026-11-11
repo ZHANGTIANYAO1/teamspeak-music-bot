@@ -212,8 +212,9 @@ export function createAuthRouter(
       return;
     }
     const provider = getProvider(platform);
-    if (platform === "qq" && qqSession) {
+    if (platform === "qq") {
       try {
+        if (!qqSession) cookieStore?.save("qq", cookie);
         provider.setCookie(cookie);
         res.json({ success: true });
       } catch {
@@ -225,7 +226,7 @@ export function createAuthRouter(
     provider.setCookie(cookie);
     const plat = platform === "bilibili" ? "bilibili" as const
       : platform === "kugou" ? "kugou" as const
-      : platform === "qq" ? "qq" as const : "netease" as const;
+      : "netease" as const;
     if (cookieStore) {
       cookieStore.save(plat, cookie);
     }

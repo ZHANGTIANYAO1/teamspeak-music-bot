@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { qqPlaybackCookie, type QqCredential, type QqLoginClient, type QqRefreshResult } from "./qq-login.js";
+import { createCookieStore } from "./auth.js";
+import { parseQqCredential, qqPlaybackCookie, type QqCredential, type QqLoginClient, type QqRefreshResult } from "./qq-login.js";
 import { createQqSessionStore, QQManagedSession } from "./qq-session.js";
 
 const NOW = new Date("2026-11-09T00:00:00.000Z");
@@ -35,13 +36,14 @@ describe("managed QQ session", () => {
       pollQr: vi.fn().mockResolvedValue({ status: "confirmed", credential: first }),
       refresh: vi.fn().mockResolvedValue({ status: "refreshed", credential: second }),
     };
-    session = new QQManagedSession(client, store, logger, "uin=123; qm_keyst=legacy");
+    session = new QQManagedSession(client, store, logger);
   });
 
   afterEach(() => {
     session.stop();
     vi.useRealTimers();
     fs.rmSync(file, { force: true });
+    fs.rmSync(path.join(dir, "qq.json"), { force: true });
     fs.rmdirSync(dir);
   });
 
@@ -66,7 +68,7 @@ describe("managed QQ session", () => {
     });
     await vi.advanceTimersByTimeAsync(DAY / 2);
     session.stop();
-    session = new QQManagedSession(client, store, logger, "");
+    session = new QQManagedSession(client, store, logger);
     await vi.advanceTimersByTimeAsync(DAY / 2 - 1);
     expect(client.refresh).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
@@ -77,7 +79,7 @@ describe("managed QQ session", () => {
 
     await vi.advanceTimersByTimeAsync(DAY / 2);
     session.stop();
-    session = new QQManagedSession(client, store, logger, "");
+    session = new QQManagedSession(client, store, logger);
     expect(session.getStatus()).toEqual({
       renewalStatus: "scheduled",
       nextRefreshAt: new Date(NOW.valueOf() + 2 * DAY).toISOString(),
@@ -95,11 +97,26 @@ describe("managed QQ session", () => {
     expect(client.refresh).toHaveBeenCalledWith(shortLived);
   });
 
+  it("keeps scheduling before expiry after a same-key token rotation", async () => {
+    const shortLived = { ...first, keyExpiresIn: 3600 };
+    vi.mocked(client.pollQr).mockResolvedValueOnce({ status: "confirmed", credential: shortLived });
+    await scan();
+    vi.setSystemTime(NOW.valueOf() + 54 * MINUTE);
+    const rotated = parseQqCredential({
+      musicid: first.musicid, musickey: first.musickey, refresh_token: "rotated-token",
+    }, shortLived)!;
+    vi.mocked(client.refresh).mockResolvedValueOnce({ status: "refreshed", credential: rotated });
+
+    expect(await session.refresh()).toBe("refreshed");
+    expect(store.load()?.credential?.refresh_token).toBe("rotated-token");
+    expect(session.getStatus().nextRefreshAt).toBe(new Date(NOW.valueOf() + 55 * MINUTE).toISOString());
+  });
+
   it("schedules older saved sessions using QQ's issue time without inventing a last renewal", () => {
     const older = { ...first, musickeyCreateTime: (NOW.valueOf() - DAY / 2) / 1000 };
     store.save({ cookie: qqPlaybackCookie(older), credential: older });
     session.stop();
-    session = new QQManagedSession(client, store, logger, "");
+    session = new QQManagedSession(client, store, logger);
     expect(session.getStatus()).toEqual({
       renewalStatus: "scheduled",
       nextRefreshAt: new Date(NOW.valueOf() + DAY / 2).toISOString(),
@@ -114,7 +131,7 @@ describe("managed QQ session", () => {
     expect(await a).toBe("refreshed");
     expect(client.refresh).toHaveBeenCalledTimes(1);
     session.stop();
-    session = new QQManagedSession(client, store, logger, "");
+    session = new QQManagedSession(client, store, logger);
     vi.mocked(client.refresh).mockResolvedValueOnce({
       status: "refreshed", credential: { ...second, musickey: "third-key" },
     });
@@ -184,7 +201,7 @@ describe("managed QQ session", () => {
     vi.mocked(client.refresh).mockResolvedValueOnce({ status: "reauth_required" });
     expect(await session.refresh()).toBe("reauth_required");
     session.stop();
-    session = new QQManagedSession(client, store, logger, "");
+    session = new QQManagedSession(client, store, logger);
     expect(session.getStatus()).toEqual({ renewalStatus: "reauth_required", nextRefreshAt: null, lastRefreshAt: null });
     expect(await session.refresh()).toBe("reauth_required");
     expect(client.refresh).toHaveBeenCalledTimes(1);
@@ -192,9 +209,13 @@ describe("managed QQ session", () => {
   });
 
   it("preserves a legacy cookie and renews daily even when QQ omits the key expiration", async () => {
+    createCookieStore(dir).save("qq", "uin=123; qm_keyst=legacy");
+    session.stop();
+    store = createQqSessionStore(file, path.join(dir, "qq.json"));
+    session = new QQManagedSession(client, store, logger);
     expect(session.getCookie()).toContain("qm_keyst=legacy");
     expect(session.getStatus()).toEqual({ renewalStatus: "cookie_only", nextRefreshAt: null, lastRefreshAt: null });
-    expect(store.load()).toBeUndefined();
+    expect(fs.existsSync(file)).toBe(false);
     vi.mocked(client.pollQr).mockResolvedValueOnce({
       status: "confirmed", credential: { ...first, musickeyCreateTime: 0, keyExpiresIn: 0 },
     });
@@ -205,5 +226,40 @@ describe("managed QQ session", () => {
     });
     await vi.advanceTimersByTimeAsync(DAY);
     expect(client.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares the current login across managed and unmanaged restarts", async () => {
+    const legacyFile = path.join(dir, "qq.json");
+    store = createQqSessionStore(file, legacyFile);
+    session.stop();
+    session = new QQManagedSession(client, store, logger);
+    await scan();
+    session.stop();
+
+    const cookies = createCookieStore(dir, store);
+    expect(cookies.load("qq")).toBe(qqPlaybackCookie(first));
+    cookies.save("qq", "uin=999; qm_keyst=imported");
+    session = new QQManagedSession(client, createQqSessionStore(file, legacyFile), logger);
+    expect(session.getCookie()).toBe("uin=999; qm_keyst=imported");
+    expect(await session.refresh()).toBe("reauth_required");
+    expect(client.refresh).not.toHaveBeenCalled();
+  });
+
+  it("uses the newer login when both older session files already exist", () => {
+    const legacyFile = path.join(dir, "qq.json");
+    const legacyCookie = "uin=999; qm_keyst=legacy";
+    fs.writeFileSync(file, JSON.stringify({ version: 1, cookie: qqPlaybackCookie(first), credential: first }));
+    createCookieStore(dir).save("qq", legacyCookie);
+    fs.utimesSync(file, 1, 1);
+    fs.utimesSync(legacyFile, 2, 2);
+    store = createQqSessionStore(file, legacyFile);
+    expect(store.load()).toEqual({ cookie: legacyCookie });
+
+    fs.utimesSync(file, 3, 3);
+    expect(store.load()?.credential).toEqual(first);
+
+    store.save({ cookie: "uin=42; qm_keyst=shared" });
+    fs.utimesSync(file, 1, 1);
+    expect(store.load()?.cookie).toBe("uin=42; qm_keyst=shared");
   });
 });

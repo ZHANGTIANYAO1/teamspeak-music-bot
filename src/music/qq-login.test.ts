@@ -98,7 +98,26 @@ describe("QQ login transport", () => {
       credential: {
         musicid: 12345, musickey: "rotated-key", refresh_token: "rotated-token",
         openid: credential.openid, access_token: credential.access_token,
+        musickeyCreateTime: 0, keyExpiresIn: 0,
       },
+    });
+  });
+
+  it("fills missing expiration fields only for the same account and playback key", async () => {
+    const sameKey = { musicid: credential.musicid, musickey: credential.musickey, refresh_token: "rotated-token" };
+    post.mockResolvedValueOnce({
+      headers: {},
+      data: { code: 0, req_0: { code: 0, data: sameKey } },
+    });
+    expect(await createQqLoginClient().refresh(credential)).toMatchObject({
+      status: "refreshed",
+      credential: { refresh_token: "rotated-token", musickeyCreateTime: 5678, keyExpiresIn: 3600 },
+    });
+    expect(parseQqCredential({ ...sameKey, keyExpiresIn: 7200 }, credential)).toMatchObject({
+      musickeyCreateTime: 5678, keyExpiresIn: 7200,
+    });
+    expect(parseQqCredential({ ...sameKey, musicid: 999 }, credential)).toMatchObject({
+      musickeyCreateTime: 0, keyExpiresIn: 0,
     });
   });
 });
