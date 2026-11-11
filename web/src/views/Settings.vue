@@ -441,6 +441,12 @@
             <div class="account-status" :class="{ logged: qqAuth.loggedIn }">
               {{ qqAuth.loggedIn ? `已登录: ${qqAuth.nickname}` : '未登录' }}
             </div>
+            <div v-if="qqRenewalMessage" class="account-status">
+              {{ qqRenewalMessage }}
+            </div>
+            <div v-if="qqAuth.renewalStatus" class="account-status">
+              上次成功续期 {{ qqAuth.lastRefreshAt ? new Date(qqAuth.lastRefreshAt).toLocaleString() : '暂无记录' }}
+            </div>
           </div>
         </div>
 
@@ -1418,7 +1424,22 @@ const kugouLoginMode = ref<'qr' | 'cookie' | null>(null);
 
 // Auth status
 const neteaseAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
-const qqAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
+const qqAuth = reactive({
+  loggedIn: false, nickname: '', avatarUrl: '',
+  renewalStatus: '' as '' | 'cookie_only' | 'scheduled' | 'retrying' | 'reauth_required',
+  nextRefreshAt: null as string | null,
+  lastRefreshAt: null as string | null,
+});
+const qqRenewalMessage = computed(() => {
+  const next = qqAuth.nextRefreshAt ? new Date(qqAuth.nextRefreshAt).toLocaleString() : '';
+  switch (qqAuth.renewalStatus) {
+    case 'cookie_only': return '没有续期凭据，请扫码授权';
+    case 'reauth_required': return '续期已暂停，请重新扫码';
+    case 'scheduled': return `下次自动续期 ${next}`;
+    case 'retrying': return `续期将于 ${next} 重试`;
+    default: return '';
+  }
+});
 const bilibiliAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const kugouAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const jellyfinAuth = reactive({ loggedIn: false, nickname: '' });
