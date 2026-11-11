@@ -1,4 +1,6 @@
 import axios, { type AxiosInstance } from "axios";
+import { RISK_CONTROL_CODE, RiskControlError, SongUrlUnavailable } from "./provider.js";
+import type { PlayFailure } from "./provider.js";
 import type {
   MusicProvider,
   Song,
@@ -114,6 +116,84 @@ export function parseNeteaseTrial(item: any): number | undefined {
   return Math.round(secs);
 }
 
+/**
+ * Recognise NetEase's IP risk control inside an axios error. The status alone
+ * is not enough — axios reports every 4xx as ERR_BAD_REQUEST — so the body has
+ * to be read. See RiskControlError for the measured behaviour.
+ */
+function riskControlFrom(err: unknown): RiskControlError | null {
+  const e = err as {
+    response?: { status?: number; data?: { code?: number; message?: string } };
+  };
+  if (e?.response?.status === 400 && e.response.data?.code === RISK_CONTROL_CODE) {
+    return new RiskControlError(e.response.data.message ?? "网络环境风险 (-460)");
+  }
+  return null;
+}
+
+/**
+ * Classify a 200-with-no-URL answer.
+ *
+ * `/song/url/v1` reports "no URL here" for at least four unrelated reasons, and
+ * they need different fixes: open a membership, pick another track, drop the
+ * quality, or just wait. The response does carry enough to tell them apart
+ * (`code`, `fee`, `payed`, `level`), and not reading those fields is exactly
+ * why every one of them reached the user as 「区域/版权限制」.
+ *
+ * Field meanings (NetEase):
+ *   fee 0 = free, 1 = VIP, 4 = album-only purchase, 8 = free / low quality
+ *   payed 1 = this account already paid for it
+ *   code 404 on the item = the id does not resolve to a playable track
+ */
+export function diagnoseNeteaseMiss(
+  songId: string,
+  level: string,
+  item: Record<string, any> | undefined,
+  body: Record<string, any> | undefined,
+): PlayFailure {
+  const upstream = {
+    code: item?.code ?? body?.code,
+    fee: item?.fee,
+    payed: item?.payed,
+    level: item?.level ?? level,
+    br: item?.br,
+    freeTrial: Boolean(item?.freeTrialInfo),
+  };
+  const suffix = `（${String(upstream.level)}）`;
+  const base = { platform: "netease" as const, songId, upstream };
+
+  if (!item) {
+    return {
+      ...base,
+      code: "unknown",
+      message: `音源没有返回该曲目${suffix}`,
+    };
+  }
+  if (upstream.code === 404) {
+    return {
+      ...base,
+      code: "no_copyright",
+      message: `无版权或已下架${suffix}`,
+    };
+  }
+  const fee = typeof upstream.fee === "number" ? upstream.fee : -1;
+  if ((fee === 1 || fee === 4) && !upstream.payed) {
+    return {
+      ...base,
+      code: "vip_required",
+      message: fee === 4 ? `需要购买该专辑${suffix}` : `需要会员${suffix}`,
+    };
+  }
+  // Everything else that has the track but no URL is a per-level restriction:
+  // the same id often plays at another level (measured: 192k OK while both
+  // 320k and 128k returned null).
+  return {
+    ...base,
+    code: "quality_denied",
+    message: `当前音质无播放权限${suffix}`,
+  };
+}
+
 // NetEase quality levels: standard(128k) higher(192k) exhigh(320k) lossless(flac) hires(hi-res) jyeffect jymaster
 export const NETEASE_QUALITY_LEVELS = [
   { value: "standard", label: "标准 (128kbps)", bitrate: 128 },
@@ -129,6 +209,8 @@ export class NeteaseProvider implements MusicProvider {
   private api: AxiosInstance;
   private cookie = "";
   private quality = "exhigh";
+  /** Outbound HTTP proxy for the sidecar's own requests. "" = direct. */
+  private proxy = "";
   private readonly baseUrl: string;
 
   constructor(baseUrl: string) {
@@ -151,13 +233,49 @@ export class NeteaseProvider implements MusicProvider {
     return this.cookie ? { cookie: this.cookie } : {};
   }
 
+  /**
+   * Outbound proxy for every sidecar call.
+   *
+   * NetEase limits by IP: a cloud-datacenter address answers `-460`
+   * ("检测到您的网络环境存在风险") on most requests no matter which account asks,
+   * while the same account from a residential IP works. There is no code-level
+   * fix — the request has to originate somewhere else.
+   *
+   * The sidecar already knows how: `NeteaseCloudMusicApi` reads a `proxy`
+   * request parameter and tunnels through it itself (`util/request.js`, via the
+   * `tunnel` package). So this needs no new dependency and no global-agent
+   * patching — just carry the value.
+   *
+   * Only `http://` proxies work (the sidecar implements this with CONNECT).
+   * Empty means direct, i.e. exactly the previous behaviour.
+   */
+  setProxy(proxy: string): void {
+    this.proxy = (proxy ?? "").trim();
+  }
+
+  getProxy(): string {
+    return this.proxy;
+  }
+
+  private get proxyParams(): Record<string, string> {
+    return this.proxy ? { proxy: this.proxy } : {};
+  }
+
+  /**
+   * Everything every call needs. One getter so a field added here cannot be
+   * forgotten on any of the ~20 call sites.
+   */
+  private get requestParams(): Record<string, string> {
+    return { ...this.cookieParams, ...this.proxyParams };
+  }
+
   async search(query: string, limit = 20, offset = 0): Promise<SearchResult> {
     // /cloudsearch supports offset for every type. Songs, playlists (type 1000)
     // and albums (type 10) are all limit/offset-driven so the web can page past
     // the first page (playlists/albums were previously hardcoded to limit: 10).
     const [songRes, playlistRes, albumRes, artistRes] = await Promise.all([
       this.api.get("/cloudsearch", {
-        params: { keywords: query, type: 1, limit, offset, ...this.cookieParams },
+        params: { keywords: query, type: 1, limit, offset, ...this.requestParams },
       }),
       this.api.get("/cloudsearch", {
         params: {
@@ -165,14 +283,14 @@ export class NeteaseProvider implements MusicProvider {
           type: 1000,
           limit,
           offset,
-          ...this.cookieParams,
+          ...this.requestParams,
         },
       }),
       this.api.get("/cloudsearch", {
-        params: { keywords: query, type: 10, limit, offset, ...this.cookieParams },
+        params: { keywords: query, type: 10, limit, offset, ...this.requestParams },
       }),
       this.api.get("/cloudsearch", {
-        params: { keywords: query, type: 100, limit, offset, ...this.cookieParams },
+        params: { keywords: query, type: 100, limit, offset, ...this.requestParams },
       }),
     ]);
 
@@ -197,32 +315,65 @@ export class NeteaseProvider implements MusicProvider {
 
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
     const level = quality ?? this.quality;
-    const res = await this.api.get("/song/url/v1", {
-      params: { id: songId, level, ...this.cookieParams },
-    });
+    let res;
+    try {
+      res = await this.api.get("/song/url/v1", {
+        params: { id: songId, level, ...this.requestParams },
+      });
+    } catch (err) {
+      // -460 arrives as HTTP 400, and left as-is it looks like "this track is
+      // unavailable" to every caller. Surface it as its own error type so the
+      // retry layer can wait out the risk-control window instead of giving up.
+      const risk = riskControlFrom(err);
+      if (risk) throw risk;
+      throw err;
+    }
     const item = res.data?.data?.[0];
     const url = item?.url;
-    if (!url) return null;
+    // A bare `null` here forced every caller to invent an explanation, and the
+    // one they invented was 「区域/版权限制」 — wrong for a lapsed membership, for
+    // a delisted track, and for a quality the account cannot stream. Throw the
+    // reason instead; the retry layer still spends its budget, it just stops
+    // lying about why nothing worked.
+    if (!url) throw new SongUrlUnavailable(diagnoseNeteaseMiss(songId, level, item, res.data));
     return { url, trialDuration: parseNeteaseTrial(item) };
+  }
+
+  /**
+   * Levels to fall back to when the configured one returns no URL.
+   *
+   * NetEase does not offer a continuous quality ladder per track: measured on a
+   * real library, a track can be available at "higher" (192k) while BOTH
+   * "exhigh" (320k) and "standard" (128k) answer `url: null`. So the caller must
+   * sweep every level BELOW the current one instead of assuming "just drop to
+   * the cheapest".
+   */
+  getFallbackQualities(): string[] {
+    const order = NETEASE_QUALITY_LEVELS.map((l) => l.value as string);
+    const index = order.indexOf(this.quality);
+    if (index <= 0) return [];
+    // order is low→high, so everything before the current level reversed gives
+    // best→worst below it (exhigh → ["higher", "standard"]).
+    return order.slice(0, index).reverse();
   }
 
   async getSongDetail(songId: string): Promise<Song | null> {
     const res = await this.api.get("/song/detail", {
-      params: { ids: songId, ...this.cookieParams },
+      params: { ids: songId, ...this.requestParams },
     });
     return mapNeteaseSongs(res.data?.songs)[0] ?? null;
   }
 
   async getPlaylistSongs(playlistId: string): Promise<Song[]> {
     const res = await this.api.get("/playlist/track/all", {
-      params: { id: playlistId, ...this.cookieParams },
+      params: { id: playlistId, ...this.requestParams },
     });
     return mapNeteaseSongs(res.data?.songs);
   }
 
   async getRecommendPlaylists(): Promise<Playlist[]> {
     const res = await this.api.get("/personalized", {
-      params: { limit: 10, ...this.cookieParams },
+      params: { limit: 10, ...this.requestParams },
     });
     return (res.data?.result ?? []).map((p: any) => ({
       id: String(p.id),
@@ -235,7 +386,7 @@ export class NeteaseProvider implements MusicProvider {
 
   async getAlbumSongs(albumId: string): Promise<Song[]> {
     const res = await this.api.get("/album", {
-      params: { id: albumId, ...this.cookieParams },
+      params: { id: albumId, ...this.requestParams },
     });
     return mapNeteaseSongs(res.data?.songs);
   }
@@ -245,7 +396,7 @@ export class NeteaseProvider implements MusicProvider {
     // separately via /artist/songs (order=hot) so the artist page's three
     // upstream calls stay independent of each other.
     const res = await this.api.get("/artists", {
-      params: { id: artistId, ...this.cookieParams },
+      params: { id: artistId, ...this.requestParams },
     });
     const a = res.data?.artist;
     if (!a) return null;
@@ -262,7 +413,7 @@ export class NeteaseProvider implements MusicProvider {
         limit,
         offset: 0,
         order: "hot",
-        ...this.cookieParams,
+        ...this.requestParams,
       },
     });
     return mapNeteaseSongs(res.data?.songs);
@@ -270,7 +421,7 @@ export class NeteaseProvider implements MusicProvider {
 
   async getArtistAlbums(artistId: string, limit = 20): Promise<Album[]> {
     const res = await this.api.get("/artist/album", {
-      params: { id: artistId, limit, offset: 0, ...this.cookieParams },
+      params: { id: artistId, limit, offset: 0, ...this.requestParams },
     });
     return mapNeteaseAlbums(res.data?.hotAlbums);
   }
@@ -291,7 +442,7 @@ export class NeteaseProvider implements MusicProvider {
         limit: safeLimit,
         offset: safeOffset,
         order: "hot",
-        ...this.cookieParams,
+        ...this.requestParams,
       },
     });
     const songs = mapNeteaseSongs(res.data?.songs);
@@ -305,7 +456,7 @@ export class NeteaseProvider implements MusicProvider {
 
   async getLyrics(songId: string): Promise<LyricLine[]> {
     const res = await this.api.get("/lyric", {
-      params: { id: songId, ...this.cookieParams },
+      params: { id: songId, ...this.requestParams },
     });
     return parseLyrics(
       res.data?.lrc?.lyric ?? "",
@@ -401,7 +552,7 @@ export class NeteaseProvider implements MusicProvider {
     if (!this.cookie) return { loggedIn: false };
     try {
       const res = await this.api.get("/login/status", {
-        params: { ...this.cookieParams },
+        params: { ...this.requestParams },
       });
       const profile = res.data?.data?.profile;
       if (profile) {
@@ -419,21 +570,21 @@ export class NeteaseProvider implements MusicProvider {
 
   async getPersonalFm(): Promise<Song[]> {
     const res = await this.api.get("/personal_fm", {
-      params: { ...this.cookieParams },
+      params: { ...this.requestParams },
     });
     return mapNeteaseSongs(res.data?.data);
   }
 
   async getDailyRecommendSongs(): Promise<Song[]> {
     const res = await this.api.get("/recommend/songs", {
-      params: { ...this.cookieParams },
+      params: { ...this.requestParams },
     });
     return mapNeteaseSongs(res.data?.data?.dailySongs);
   }
 
   async getPlaylistDetail(playlistId: string): Promise<PlaylistDetail | null> {
     const res = await this.api.get("/playlist/detail", {
-      params: { id: playlistId, ...this.cookieParams },
+      params: { id: playlistId, ...this.requestParams },
     });
     const p = res.data?.playlist;
     if (!p) return null;
@@ -449,13 +600,13 @@ export class NeteaseProvider implements MusicProvider {
   async getUserPlaylists(): Promise<Playlist[]> {
     // First get user ID from login status
     const statusRes = await this.api.get("/login/status", {
-      params: { ...this.cookieParams },
+      params: { ...this.requestParams },
     });
     const uid = statusRes.data?.data?.profile?.userId;
     if (!uid) return [];
 
     const res = await this.api.get("/user/playlist", {
-      params: { uid, ...this.cookieParams },
+      params: { uid, ...this.requestParams },
     });
     return (res.data?.playlist ?? []).map((p: any) => ({
       id: String(p.id),

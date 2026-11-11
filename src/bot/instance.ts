@@ -7,8 +7,11 @@ import {
   type TS3VoiceSendFailure,
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
+import { resolveUrlWithRetry } from "./url-retry.js";
+import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
+import type { PlayFailure } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
-import type { MusicProvider, Platform, Song } from "../music/provider.js";
+import type { MusicProvider, Platform, Song, SongUrlResult } from "../music/provider.js";
 import {
   parseCommand,
   canRunCommand,
@@ -201,6 +204,14 @@ export class BotInstance extends EventEmitter {
   private fmRequesterName: string | undefined;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
+  /**
+   * Why the most recent resolveAndPlay produced nothing, or null.
+   *
+   * Kept as an instance field rather than a second return value: `resolveAndPlay`
+   * has ~20 call sites and its boolean is load-bearing in tests, while only the
+   * web routes need the explanation. They read this right after a false.
+   */
+  private lastPlayFailure: PlayFailure | null = null;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
@@ -1021,14 +1032,39 @@ export class BotInstance extends EventEmitter {
     return requestedBy ? { ...song, requestedBy } : { ...song };
   }
 
+  /**
+   * Why the last `resolveAndPlay(false)` produced nothing, or null after a
+   * success. Web routes read this to say what actually went wrong instead of
+   * the old catch-all 「区域/版权限制」.
+   */
+  getLastPlayFailure(): PlayFailure | null {
+    return this.lastPlayFailure;
+  }
+
   /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
   async resolveAndPlay(song: QueuedSong): Promise<boolean> {
+    this.lastPlayFailure = null;
     if (!this.connected) {
       this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
+      // Recorded so the web route can say this instead of blaming copyright:
+      // every early return used to leave lastPlayFailure null, which made the
+      // UI fall back to the catch-all 「区域/版权限制」 for unrelated causes.
+      this.lastPlayFailure = {
+        platform: song.platform,
+        songId: song.id,
+        code: "unknown",
+        message: "机器人未连接，无法播放",
+      };
       return false;
     }
     if (song.platform === "local" && !this.isLocalAudioEnabled()) {
       this.logger.warn({ songId: song.id, name: song.name }, "Local audio playback disabled — refusing track");
+      this.lastPlayFailure = {
+        platform: song.platform,
+        songId: song.id,
+        code: "unknown",
+        message: "该机器人已关闭本地音频播放",
+      };
       return false;
     }
     // Clear any accumulated skip votes — every fresh track starts with a
@@ -1038,16 +1074,78 @@ export class BotInstance extends EventEmitter {
     const provider = this.getProviderFor(song.platform);
     try {
       if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
-        const detail = await provider.getSongDetail(song.id);
-        if (detail) {
-          song.duration = detail.duration;
-          song.name = detail.name;
-          song.id = detail.id;
+        // Detail is metadata only (duration / canonical id). A failure here used
+        // to abort the whole resolve before the retry budget even started, so a
+        // transient 4xx turned into an instant 「无法播放」.
+        try {
+          const detail = await provider.getSongDetail(song.id);
+          if (detail) {
+            song.duration = detail.duration;
+            song.name = detail.name;
+            song.id = detail.id;
+          }
+        } catch (err) {
+          this.logger.warn({ err, songId: song.id }, "Song detail lookup failed — continuing with queued metadata");
         }
       }
-      const result = await provider.getSongUrl(song.id);
+      // Retries happen here (not in the provider) so every queue path — web
+      // click, chat !play, auto-advance, FM — shares the same budget. The
+      // policy lives in url-retry.ts so it is unit tested without a bot; a
+      // config without the field means 0 retries, i.e. the previous behaviour.
+      const result = await resolveUrlWithRetry({
+        retries: this.config?.playUrlRetries,
+        resolve: (quality) => provider.getSongUrl(song.id, quality),
+        // NetEase's quality ladder is not continuous: a track can play at 192k
+        // while both 320k and 128k return null, so every lower level is tried.
+        // Providers without a quality knob return [] and keep one attempt.
+        fallbacks: provider.getFallbackQualities?.() ?? [],
+        // Stop / disconnect must abort the budget: retrying into a dead
+        // connection only delays the queue.
+        isCancelled: () => !this.connected,
+        onAttemptFailed: ({ attempt, total, quality, error }) => {
+          const fields = { songId: song.id, name: song.name, attempt, total, quality };
+          if (error instanceof RiskControlError) {
+            // -460 is NetEase refusing the IP, not this track. Say so, otherwise
+            // the log reads like the song is unavailable and people go hunting
+            // for a copyright problem that does not exist.
+            this.logger.warn(
+              { ...fields, code: RISK_CONTROL_CODE, reason: error.message },
+              "URL resolve hit NetEase risk control (-460) — backing off",
+            );
+          } else if (error) {
+            this.logger.warn({ ...fields, err: error }, "URL resolve threw — retrying");
+          } else if (attempt < total) {
+            this.logger.debug(fields, "URL resolve returned no URL — retrying");
+          }
+        },
+        // Once per track, and with the reason named. The old log line was
+        // `No URL available` with no cause, which is what sent three separate
+        // investigations after a copyright problem that was never there.
+        onExhausted: ({ quality, error }) => {
+          const failure = error
+            ? toPlayFailure(provider.platform, song.id, error)
+            : {
+                platform: provider.platform,
+                songId: song.id,
+                code: "unknown" as const,
+                message: `没有拿到播放地址（${quality ?? "默认音质"}）`,
+              };
+          this.lastPlayFailure = failure;
+          this.logger.warn(
+            {
+              songId: song.id,
+              name: song.name,
+              platform: provider.platform,
+              code: failure.code,
+              quality: quality ?? "default",
+              upstream: failure.upstream,
+              reason: failure.message,
+            },
+            "No URL available, skipping",
+          );
+        },
+      });
       if (!result?.url) {
-        this.logger.warn({ songId: song.id, name: song.name }, "No URL available, skipping");
         return false;
       }
       // Re-check connection state AFTER the network round-trip — the URL
@@ -1181,6 +1279,10 @@ export class BotInstance extends EventEmitter {
       return true;
     } catch (err) {
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
+      // Anything thrown outside the retry budget (detail lookup, spotify
+      // handoff, player start) still needs a cause, otherwise the web route
+      // prints the old 「区域/版权限制」 for a cause that is not copyright.
+      this.lastPlayFailure = toPlayFailure(song.platform, song.id, err);
       return false;
     }
   }

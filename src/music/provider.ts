@@ -34,6 +34,122 @@ export interface SongUrlResult {
   trialDuration?: number;
 }
 
+/**
+ * NetEase rate-limits by IP, not by request shape. When it decides the caller's
+ * network looks risky it answers **HTTP 400** with
+ *
+ *   {"code":-460,"message":"检测到您的网络环境存在风险，请稍后再试"}
+ *
+ * Cloud-host IPs hit this constantly; it clears up on its own after a few
+ * seconds. Because it is a 4xx, axios reports `ERR_BAD_REQUEST` — identical to
+ * a genuinely malformed request — so the only way to tell them apart is to read
+ * the response body. The distinction matters: -460 is worth retrying, a bad
+ * request never is.
+ *
+ * Measured on a live host: the anonymous call `?id=…&level=exhigh` answered
+ * 400/-460 every time, while the same call with the account cookie answered 200
+ * and returned a full 320k URL. Intermittently, the cookie version is also
+ * rejected — which is exactly the "click play five times until it works"
+ * behaviour users report.
+ */
+export const RISK_CONTROL_CODE = -460;
+
+export class RiskControlError extends Error {
+  readonly code: number = RISK_CONTROL_CODE;
+  constructor(message: string) {
+    super(message);
+    this.name = "RiskControlError";
+  }
+}
+
+/**
+ * Why a track could not be turned into a playable URL.
+ *
+ * Every one of these used to reach the user as the same string —
+ * 「无法播放（区域/版权限制）」 — which is why a genuine -460, a lapsed membership
+ * and a delisted track were indistinguishable for weeks of debugging. Naming
+ * the cause is the whole point of this type.
+ */
+export type PlayFailureCode =
+  /** Upstream refused the caller's IP (-460). Transient by nature. */
+  | "risk_control"
+  /** Paid track with no entitlement on the account (NetEase fee=1 VIP / fee=4). */
+  | "vip_required"
+  /** Delisted, region-blocked, or the id no longer resolves (upstream 404). */
+  | "no_copyright"
+  /** The track exists, but this quality level is not ours to serve. */
+  | "quality_denied"
+  /** 200 with no URL and nothing that explains why. */
+  | "unknown";
+
+export interface PlayFailure {
+  platform: string;
+  songId: string;
+  code: PlayFailureCode;
+  /** One short line in the UI's language — safe to render as-is. */
+  message: string;
+  /** Raw upstream fields (fee / payed / code / level). Logs only, never shown. */
+  upstream?: Record<string, unknown>;
+}
+
+/**
+ * Thrown when a provider knows *why* no URL came back.
+ *
+ * `resolveUrlWithRetry` still runs the full budget on it — a lower level can
+ * genuinely help, and "deterministic" judgements about this API have been wrong
+ * before — but it remembers the last one so the eventual message can name the
+ * cause instead of falling back to a guess.
+ */
+export class SongUrlUnavailable extends Error {
+  readonly failure: PlayFailure;
+  constructor(failure: PlayFailure) {
+    super(failure.message);
+    this.name = "SongUrlUnavailable";
+    this.failure = failure;
+  }
+}
+
+/** Build the -460 flavour. Kept here so every provider names it identically. */
+export function riskControlFailure(
+  platform: string,
+  songId: string,
+  detail?: string,
+): PlayFailure {
+  return {
+    platform,
+    songId,
+    code: "risk_control",
+    // 「约 5 秒」是有依据的：实测同一 IP 连续请求一般是 -460 几次之后放行，
+    // 重试预算也已经只留一次（RISK_CONTROL_BACKOFF_MS）。给一个具体的等待值，
+    // 比「请稍后重试」更能让人知道该干嘛。
+    message: "被网易云风控拦截（-460），约 5 秒后再试",
+    upstream: detail ? { detail } : undefined,
+  };
+}
+
+/**
+ * Normalise anything a failed attempt threw into a `PlayFailure`, so callers
+ * never have to pattern-match on error classes themselves.
+ *
+ * The `unknown` branch truncates the message: axios errors carry the whole
+ * request config (including the cookie) and would otherwise put kilobytes into
+ * a UI toast and the log.
+ */
+export function toPlayFailure(platform: string, songId: string, error: unknown): PlayFailure {
+  if (error instanceof SongUrlUnavailable) return error.failure;
+  if (error instanceof RiskControlError) {
+    return riskControlFailure(platform, songId, error.message);
+  }
+  const raw = error instanceof Error ? error.message : "";
+  const short = raw.replace(/\s+/g, " ").trim().slice(0, 120);
+  return {
+    platform,
+    songId,
+    code: "unknown",
+    message: short ? `解析播放地址失败：${short}` : "解析播放地址失败",
+  };
+}
+
 export interface Playlist {
   id: string;
   name: string;
@@ -41,6 +157,7 @@ export interface Playlist {
   songCount: number;
   platform: Platform;
 }
+
 
 export interface PlaylistDetail {
   id: string;
@@ -134,6 +251,17 @@ export interface MusicProvider {
   setCookie(cookie: string): void;
   getCookie(): string;
   getAuthStatus(): Promise<AuthStatus>;
+  /**
+   * Lower quality levels to try when the configured one has no URL, ordered
+   * best→worst.
+   *
+   * NetEase does not publish a uniform ladder: a track can be playable at 192k
+   * ("higher") while BOTH 320k ("exhigh") and 128k ("standard") return null —
+   * so the list has to contain every level below the current one, not just the
+   * cheapest. Sources whose quality is not a user-selectable knob (Bilibili,
+   * local files, Jellyfin) omit this and the caller keeps its single attempt.
+   */
+  getFallbackQualities?(): string[];
   getPersonalFm?(): Promise<Song[]>;
   getDailyRecommendSongs?(): Promise<Song[]>;
   getUserPlaylists?(): Promise<Playlist[]>;
