@@ -20,6 +20,7 @@ import { createAuditStore } from "../data/audit.js";
 import { createAuditRouter } from "./api/audit.js";
 import { createFavoritesRouter } from "./api/favorites.js";
 import { createPersonalMusicRouter } from "./api/personal-music.js";
+import { createMusicAccountsRouter } from "./api/music-accounts.js";
 import { createSavedQueuesRouter } from "./api/saved-queues.js";
 import { createSpotifyRouter } from "./api/spotify.js";
 import { createApiKeysRouter } from "./api/api-keys.js";
@@ -170,15 +171,16 @@ export function createWebServer(options: WebServerOptions): WebServer {
   );
   app.use(
     "/api/music",
-    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.localProvider, options.config, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider, options.configPath)
+    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.localProvider, options.config, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider, options.configPath, options.database)
   );
   app.use("/api/player", createPlayerRouter(
     options.botManager, logger, options.database,
     options.neteaseProvider, options.qqProvider, options.bilibiliProvider,
+    options.config,
   ));
   app.use(
     "/api/auth",
-    createAuthRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.cookieStore, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider, options.config)
+    createAuthRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.cookieStore, options.kugouProvider, options.spotifyProvider, options.jellyfinProvider, options.config, options.database)
   );
   if (options.spotifyOAuth) {
     app.use(
@@ -207,12 +209,41 @@ export function createWebServer(options: WebServerOptions): WebServer {
     );
   }
   app.use("/api/favorites", requireNotGuest, createFavoritesRouter(options.database, logger));
-  // The caller's own NetEase login for their personal FM (#164). Guests share
-  // one anonymous identity, so they cannot link an account.
+  // The caller's own music login, per platform (#164 + #164 follow-up). Guests
+  // share one anonymous identity, so they cannot link an account.
   app.use(
     "/api/me/music",
     requireNotGuest,
-    createPersonalMusicRouter(options.database, options.neteaseProvider, logger),
+    createPersonalMusicRouter(
+      options.database,
+      {
+        netease: options.neteaseProvider,
+        qq: options.qqProvider,
+        kugou: options.kugouProvider,
+        bilibili: options.bilibiliProvider,
+      },
+      logger,
+      options.config,
+    ),
+  );
+  // Admin-only pool of music logins + per-member assignments (#164 follow-up).
+  // Mounted on requireAdmin, NOT bot.manage: members must never see which
+  // account was handed to whom.
+  app.use(
+    "/api/music-accounts",
+    requireAdmin,
+    createMusicAccountsRouter(
+      options.database,
+      users,
+      {
+        netease: options.neteaseProvider,
+        qq: options.qqProvider,
+        kugou: options.kugouProvider,
+        bilibili: options.bilibiliProvider,
+      },
+      logger,
+      options.cookieStore,
+    ),
   );
   // Saved queues (Feature 1, #119). Members + admins only (requireNotGuest);
   // the router itself 403s every route unless savedQueuesEnabled is on.

@@ -824,6 +824,20 @@ export class QQMusicProvider implements MusicProvider {
     this.radarPage = 1;
   }
 
+  /**
+   * A view of the same provider logged in as another account (#164 follow-up):
+   * a web user's own QQ 音乐 login instead of the bot's shared one.
+   *
+   * The per-user view points at the SAME API server (`this.api.defaults.baseURL`)
+   * — only the cookie differs, so the shared login keeps its own instance.
+   */
+  withCookie(cookie: string): QQMusicProvider {
+    const view = new QQMusicProvider(this.api.defaults.baseURL ?? "");
+    view.quality = this.quality;
+    view.setCookie(cookie);
+    return view;
+  }
+
   getCookie(): string {
     return this.cookie;
   }

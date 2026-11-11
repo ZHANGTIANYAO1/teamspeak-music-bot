@@ -74,6 +74,7 @@ export function createBotRouter(
       voiceDucking: config.voiceDucking,
       localAudioEnabled: config.localAudioEnabled,
       savedQueuesEnabled: config.savedQueuesEnabled,
+      perUserMusicAccounts: config.perUserMusicAccounts === true,
       playKeepsQueue: config.playKeepsQueue,
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
@@ -94,6 +95,7 @@ export function createBotRouter(
       voiceDucking,
       guestMode,
       adminGroups,
+      perUserMusicAccounts,
     } = req.body;
 
     const hasIdle = idleTimeoutMinutes !== undefined;
@@ -104,10 +106,14 @@ export function createBotRouter(
 
     const hasAutoPause = typeof autoPauseOnEmpty === "boolean";
     const hasLocalAudioEnabled = typeof localAudioEnabled === "boolean";
+    // Per-user music accounts: admin-only toggle (this route already requires
+    // bot.manage). Strictly boolean — anything else leaves the value alone.
+    const hasPerUserMusicAccounts = typeof perUserMusicAccounts === "boolean";
 
     if (hasIdle) config.idleTimeoutMinutes = idleTimeoutMinutes;
     if (hasAutoPause) config.autoPauseOnEmpty = autoPauseOnEmpty;
     if (hasLocalAudioEnabled) config.localAudioEnabled = localAudioEnabled;
+    if (hasPerUserMusicAccounts) config.perUserMusicAccounts = perUserMusicAccounts;
 
     // Voice ducking is a partial settings block. Merge only known, strictly
     // valid fields so malformed JSON cannot replace the object or inject NaN /
@@ -282,6 +288,7 @@ export function createBotRouter(
       voiceDucking: config.voiceDucking,
       localAudioEnabled: config.localAudioEnabled,
       savedQueuesEnabled: config.savedQueuesEnabled,
+      perUserMusicAccounts: config.perUserMusicAccounts === true,
       playKeepsQueue: config.playKeepsQueue,
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
