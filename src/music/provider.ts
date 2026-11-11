@@ -119,7 +119,10 @@ export function riskControlFailure(
     platform,
     songId,
     code: "risk_control",
-    message: "被音源风控拦截（-460），请稍后重试",
+    // 「约 5 秒」是有依据的：实测同一 IP 连续请求一般是 -460 几次之后放行，
+    // 重试预算也已经只留一次（RISK_CONTROL_BACKOFF_MS）。给一个具体的等待值，
+    // 比「请稍后重试」更能让人知道该干嘛。
+    message: "被网易云风控拦截（-460），约 5 秒后再试",
     upstream: detail ? { detail } : undefined,
   };
 }

@@ -37,20 +37,31 @@ export const DEFAULT_URL_RETRY_BACKOFF_MS = 250;
 export const QUALITY_SWITCH_BACKOFF_MS = 120;
 
 /**
- * Delay after a -460 (NetEase IP risk control) failure.
+ * Delay before the single retry that follows a -460 (NetEase IP risk control).
  *
  * This is the one failure mode where the delay is NOT cosmetic: the upstream
  * has decided the caller's address looks risky and will keep answering 400 for
  * a few seconds no matter what we ask. Re-poking after 250ms just burns the
- * budget.
+ * budget inside the same window.
  *
- * Sized against the manual workaround users reported: the first click fails, the
- * toast sits there for ~2-3s, and the very next click succeeds. So the window is
- * a couple of seconds, not a couple hundred milliseconds. 2500ms × attempt puts
- * the second attempt at 2.5s and the third at ~7.5s, which is reliably outside
- * it; anything shorter just spends the retry budget inside the window.
+ * Sized against what the window actually looks like: a live host answered
+ * `-460, -460, -460, -460, 200` on six consecutive 128k requests with no
+ * waiting at all, i.e. it is "let a few of these through, then stop caring"
+ * rather than a hard timer. So 2.5s is a good bet for one retry, and waiting
+ * longer is not: it buys nothing the user cannot do themselves.
  */
 export const RISK_CONTROL_BACKOFF_MS = 2500;
+
+/**
+ * Hard ceiling on requests sent while the IP is risk controlled (1 + 1 retry).
+ *
+ * The previous shape grew the delay per attempt (2.5s, then 7.5s), which meant
+ * up to 10s of a spinner doing nothing before the same error appeared. Measured
+ * behaviour says a blocked address either clears within a couple of seconds or
+ * stays blocked; the third and later attempts only add silence. Spending two
+ * requests and then telling the user to wait ~5s is both faster and honest.
+ */
+export const MAX_RISK_CONTROL_REQUESTS = 2;
 
 /**
  * Normalise a config value into a usable retry count.
@@ -100,7 +111,9 @@ export interface ResolveUrlWithRetryOptions {
  *
  * Request count: `(1 + retries)` at the configured quality, then one per
  * fallback level. With the defaults (2 retries, exhigh, NetEase's two lower
- * levels) that is at most 5 requests and ~1.1s of waiting.
+ * levels) that is at most 5 requests and ~1.1s of waiting — or 2 requests and
+ * 2.5s when the IP is risk controlled, which is the one case where waiting
+ * more cannot help.
  */
 export async function resolveUrlWithRetry(
   opts: ResolveUrlWithRetryOptions,
@@ -120,6 +133,10 @@ export async function resolveUrlWithRetry(
   // Set when the previous attempt failed with -460. Risk control ignores the
   // quality we ask for, so a level switch does not get to use its short delay.
   let riskControlled = false;
+  // Requests actually sent. Only consulted while risk controlled, where the
+  // budget is capped at MAX_RISK_CONTROL_REQUESTS instead of the configured
+  // retry count.
+  let requestsMade = 0;
   // The last failure, kept so the caller can explain the outcome. A `null`
   // result (no throw) counts too — it is the providers that have not adopted
   // SongUrlUnavailable yet.
@@ -132,15 +149,14 @@ export async function resolveUrlWithRetry(
 
     // -460 is an IP-level refusal, not a property of this track: the quality we
     // ask for is irrelevant to it, so stepping down the ladder cannot succeed
-    // and each extra step costs another RISK_CONTROL_BACKOFF_MS. With the
-    // default budget that turned a blocked host into 17s of silence before the
-    // failure message — worse than the instant error it replaced. Give up as
-    // soon as the phase changes rather than when the plan runs out.
-    if (step.fallback && riskControlled) break;
+    // and each extra step only adds silence. Stop after one retry instead of
+    // when the plan runs out — the caller reports "try again in a few seconds",
+    // which is something the user can act on, unlike a longer spinner.
+    if (riskControlled && (step.fallback || requestsMade >= MAX_RISK_CONTROL_REQUESTS)) break;
 
     if (i > 0) {
       const wait = riskControlled
-        ? RISK_CONTROL_BACKOFF_MS * Math.max(1, sameQualityAttempt)
+        ? RISK_CONTROL_BACKOFF_MS
         : step.fallback
           ? QUALITY_SWITCH_BACKOFF_MS
           : backoffMs * sameQualityAttempt;
@@ -150,6 +166,7 @@ export async function resolveUrlWithRetry(
     }
 
     let error: unknown;
+    requestsMade += 1;
     try {
       const result = await opts.resolve(step.quality);
       if (result?.url) return result;

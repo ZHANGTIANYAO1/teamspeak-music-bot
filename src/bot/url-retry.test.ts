@@ -325,27 +325,27 @@ describe("resolveUrlWithRetry — quality fallback", () => {
 // window and the whole budget is wasted. These tests pin the longer wait.
 // ---------------------------------------------------------------------------
 describe("resolveUrlWithRetry — risk control backoff", () => {
-  it("grows the wait from RISK_CONTROL_BACKOFF_MS instead of 250ms", async () => {
+  it("retries once after RISK_CONTROL_BACKOFF_MS, then stops", async () => {
     const { sleep, delays } = recordingSleep();
-    const result = await resolveUrlWithRetry({
-      retries: 2,
-      resolve: async () => {
-        throw new RiskControlError("网络环境风险 (-460)");
-      },
-      sleep,
+    const resolve = vi.fn(async () => {
+      throw new RiskControlError("网络环境风险 (-460)");
     });
+    const result = await resolveUrlWithRetry({ retries: 2, resolve, sleep });
 
     expect(result).toBeNull();
-    expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS, RISK_CONTROL_BACKOFF_MS * 2]);
-    // Every one of them is longer than a plain transient retry would have been.
-    for (const d of delays) expect(d).toBeGreaterThan(DEFAULT_URL_RETRY_BACKOFF_MS);
+    // One request plus exactly one retry. The old shape waited 2.5s and then
+    // 7.5s, spending three requests to reach the same "still blocked".
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS]);
+    // Still far longer than a plain transient retry would have waited.
+    expect(delays[0]).toBeGreaterThan(DEFAULT_URL_RETRY_BACKOFF_MS);
   });
 
-  it("gives up instead of stepping down the ladder while risk controlled", async () => {
+  it("caps the budget at two requests regardless of retries, and skips the ladder", async () => {
     let attempts = 0;
     const { sleep, delays } = recordingSleep();
     const result = await resolveUrlWithRetry({
-      retries: 1,
+      retries: 5,
       resolve: async () => {
         attempts += 1;
         throw new RiskControlError("网络环境风险 (-460)");
@@ -355,9 +355,9 @@ describe("resolveUrlWithRetry — risk control backoff", () => {
     });
 
     expect(result).toBeNull();
-    // 1 + retries attempts at the configured quality, then stop. -460 ignores
-    // which level we ask for, so each ladder step would only add another
-    // RISK_CONTROL_BACKOFF_MS of silence before the same failure surfaces.
+    // -460 ignores which level we ask for, so neither the extra configured
+    // retries nor the two ladder steps are worth sending: each one only adds
+    // silence before the same failure surfaces.
     expect(attempts).toBe(2);
     expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS]);
   });
@@ -380,26 +380,27 @@ describe("resolveUrlWithRetry — risk control backoff", () => {
 
     expect(result?.url).toBe("https://cdn.example/128k.mp3");
     // 2 same-quality attempts, then both ladder steps — the second attempt was a
-    // plain miss, not -460, so the ladder keeps its normal cost.
+    // plain miss, not -460, so the cap no longer applies and the ladder keeps
+    // its normal cost.
     expect(attempts).toBe(4);
   });
 
-  it("recovers as soon as the window passes, and stops spending", async () => {
+  it("recovers on the single retry and stops spending", async () => {
     let attempts = 0;
     const { sleep, delays } = recordingSleep();
     const result = await resolveUrlWithRetry({
       retries: 3,
       resolve: async () => {
         attempts += 1;
-        if (attempts < 3) throw new RiskControlError("网络环境风险 (-460)");
+        if (attempts < 2) throw new RiskControlError("网络环境风险 (-460)");
         return ok("https://cdn.example/after-window.mp3");
       },
       sleep,
     });
 
     expect(result?.url).toBe("https://cdn.example/after-window.mp3");
-    expect(attempts).toBe(3);
-    expect(delays).toHaveLength(2);
+    expect(attempts).toBe(2);
+    expect(delays).toEqual([RISK_CONTROL_BACKOFF_MS]);
   });
 
   it("still uses the short delay for a plain error", async () => {
