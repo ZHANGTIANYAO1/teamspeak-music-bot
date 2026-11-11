@@ -124,6 +124,28 @@ export const NETEASE_QUALITY_LEVELS = [
   { value: "jymaster", label: "超清母带", bitrate: 4000 },
 ] as const;
 
+function getPlaybackUserAgent(cookie: string): string {
+  let decoded = cookie;
+  try {
+    decoded = decodeURIComponent(cookie);
+  } catch {
+    // A malformed cookie escape must not prevent a playback request.
+  }
+  const platform = decoded.match(/(?:^|;)\s*os\s*=\s*([^;]*)/)?.[1].trim();
+  // NCM API 4.32.0 defaults cookie profiles to PC but eapi's UA to iPhone.
+  // Match its client profiles here, and scope the override to playback only.
+  switch (platform) {
+    case "android":
+      return "NeteaseMusic/9.1.65.240927161425(9001065);Dalvik/2.1.0 (Linux; U; Android 14; 23013RK75C Build/UKQ1.230804.001)";
+    case "iphone":
+      return "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
+    case "linux":
+      return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.90 Safari/537.36";
+    default:
+      return "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.0.18.203152";
+  }
+}
+
 export class NeteaseProvider implements MusicProvider {
   readonly platform = "netease" as const;
   private api: AxiosInstance;
@@ -204,7 +226,7 @@ export class NeteaseProvider implements MusicProvider {
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
     const level = quality ?? this.quality;
     const res = await this.api.get("/song/url/v1", {
-      params: { id: songId, level, ...this.cookieParams },
+      params: { id: songId, level, ua: getPlaybackUserAgent(this.cookie), ...this.cookieParams },
     });
     const item = res.data?.data?.[0];
     const url = item?.url;
