@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import {
   parseLyrics,
   mapNeteaseAlbums,
@@ -7,6 +10,111 @@ import {
   parseNeteaseTrial,
   NeteaseProvider,
 } from "./netease.js";
+
+describe("NeteaseProvider realIP", () => {
+  it("applies live IP changes to search, login, playback and existing personal views", async () => {
+    const requests: URL[] = [];
+    const server = createServer((req, res) => {
+      requests.push(new URL(req.url!, "http://localhost"));
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ code: 200, data: [{ url: "https://example.com/song.mp3" }] }));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      let realIP = "";
+      const provider = new NeteaseProvider(baseUrl, () => realIP);
+      provider.setCookie("MUSIC_U=shared");
+      const personal = provider.withCookie("MUSIC_U=personal");
+      await provider.getSongUrl("1");
+      expect(requests.at(-1)!.searchParams.has("realIP")).toBe(false);
+
+      requests.length = 0;
+      realIP = "203.0.113.10";
+      await provider.search("hello");
+      await provider.getQrCode();
+      await provider.sendSmsCode("13800000000");
+      await provider.getSongUrl("2");
+      expect(requests).toHaveLength(8);
+      expect(requests.every((url) => url.searchParams.get("realIP") === realIP)).toBe(true);
+      expect(requests.at(-1)!.searchParams.get("cookie")).toBe("MUSIC_U=shared");
+
+      realIP = "2001:db8::1";
+      await personal.getSongUrl("3");
+      expect(requests.at(-1)!.searchParams.get("realIP")).toBe(realIP);
+      expect(requests.at(-1)!.searchParams.get("cookie")).toBe("MUSIC_U=personal");
+      expect(provider.getCookie()).toBe("MUSIC_U=shared");
+
+      realIP = "";
+      await personal.getSongUrl("4");
+      expect(requests.at(-1)!.searchParams.has("realIP")).toBe(false);
+      await new NeteaseProvider(baseUrl).getSongUrl("5");
+      expect(requests.at(-1)!.searchParams.has("realIP")).toBe(false);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+});
+
+describe("NeteaseProvider playback user agent", () => {
+  it("matches the playback UA to each account's platform without changing cookies or other requests", async () => {
+    const requests: URL[] = [];
+    const server = createServer((req, res) => {
+      requests.push(new URL(req.url!, "http://localhost"));
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ code: 200, data: [{ url: "https://example.com/song.mp3" }] }));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const provider = new NeteaseProvider(
+        `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        () => "203.0.113.10",
+      );
+      const cases = [
+        ["", "NeteaseMusicDesktop"],
+        ["MUSIC_U=shared", "NeteaseMusicDesktop"],
+        ["MUSIC_U=shared; os=pc", "NeteaseMusicDesktop"],
+        ["MUSIC_U=shared; os=android", "Android"],
+        ["MUSIC_U=shared; os=iphone", "iPhone"],
+        ["MUSIC_U=shared; os=linux", "Linux"],
+        ["MUSIC_U=shared; os=unknown", "NeteaseMusicDesktop"],
+        ["MUSIC_U=shared; os=%69phone", "iPhone"],
+        ["MUSIC_U=shared; os=%invalid", "NeteaseMusicDesktop"],
+      ];
+      for (const [cookie, uaFamily] of cases) {
+        provider.setCookie(cookie);
+        expect(await provider.getSongUrl("1", "standard")).toMatchObject({ url: "https://example.com/song.mp3" });
+        const params = requests.at(-1)!.searchParams;
+        expect(params.get("ua")).toContain(uaFamily);
+        expect(params.get("level")).toBe("standard");
+        expect(params.get("realIP")).toBe("203.0.113.10");
+        expect(params.get("cookie")).toBe(cookie || null);
+        expect(provider.getCookie()).toBe(cookie);
+      }
+
+      provider.setCookie("MUSIC_U=shared; os=pc");
+      const personal = provider.withCookie("MUSIC_U=personal; os=android");
+      await personal.getSongUrl("2");
+      expect(requests.at(-1)!.searchParams.get("ua")).toContain("Android");
+      expect(requests.at(-1)!.searchParams.get("cookie")).toBe("MUSIC_U=personal; os=android");
+      await provider.getSongUrl("3");
+      expect(requests.at(-1)!.searchParams.get("ua")).toContain("NeteaseMusicDesktop");
+      expect(provider.getCookie()).toBe("MUSIC_U=shared; os=pc");
+
+      requests.length = 0;
+      await provider.search("hello");
+      await provider.getQrCode();
+      expect(requests).toHaveLength(6);
+      expect(requests.every((url) => !url.searchParams.has("ua"))).toBe(true);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+});
 
 describe("NetEase adapter", () => {
   it("parses LRC format lyrics", () => {
