@@ -217,4 +217,35 @@ describe("admin music account pool", () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe("no_shared_login");
   });
+
+  it("imports the running QQ cookie instead of the stale file copy", async () => {
+    const cookieStore = { save: vi.fn(), load: vi.fn(() => "uin=999; qm_keyst=stale") };
+    const qq = {
+      platform: "qq",
+      withCookie: vi.fn(),
+      // 托管会话轮换后，内存里已经是新 cookie，qq.json 还是旧的
+      getCookie: () => "uin=1; qm_keyst=rotated",
+    };
+    const { app, db } = mount({ cookieStore, providers: { qq } });
+    const res = await request(app)
+      .post("/api/music-accounts/import-shared")
+      .send({ platform: "qq", label: "QQ 主号" });
+    expect(res.status).toBe(201);
+    expect(db.listMusicAccounts()[0]?.cookie).toBe("uin=1; qm_keyst=rotated");
+    expect(cookieStore.load).not.toHaveBeenCalled();
+    // cookie 不出服务器：响应里不能出现完整值
+    expect(JSON.stringify(res.body)).not.toContain("rotated");
+  });
+
+  it("409s a QQ import when the running provider has no login", async () => {
+    const cookieStore = { save: vi.fn(), load: vi.fn(() => "uin=999; qm_keyst=stale") };
+    const qq = { platform: "qq", withCookie: vi.fn(), getCookie: () => "" };
+    const { app, db } = mount({ cookieStore, providers: { qq } });
+    const res = await request(app)
+      .post("/api/music-accounts/import-shared")
+      .send({ platform: "qq" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("no_shared_login");
+    expect(db.listMusicAccounts()).toHaveLength(0);
+  });
 });

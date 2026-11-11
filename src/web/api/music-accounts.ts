@@ -84,7 +84,7 @@ export function createMusicAccountsRouter(
     };
   };
 
-  const isPlatform = (v: unknown): v is string =>
+  const isPlatform = (v: unknown): v is (typeof PERSONAL_MUSIC_PLATFORMS)[number] =>
     typeof v === "string" && knownPlatforms.has(v);
 
   const nonEmpty = (v: unknown, max: number): v is string =>
@@ -302,11 +302,15 @@ export function createMusicAccountsRouter(
    * the shared account can hand it to selected members without re-scanning.
    */
   router.post("/import-shared", (req, res) => {
-    if (!cookieStore) {
+    const { platform, label, capacity } = req.body ?? {};
+    // QQ 的共享登录以"运行中的 provider"为准：登录写的是它内存里的 cookie，
+    // qq.json 只是落盘副本。托管会话轮换凭据之后文件就旧了（#188），
+    // 从这里导入会把一个过期 cookie 塞进账号池。
+    const sharedQq = platform === "qq" ? providers.qq : undefined;
+    if (!sharedQq && !cookieStore) {
       res.status(501).json({ error: "cookie store unavailable" });
       return;
     }
-    const { platform, label, capacity } = req.body ?? {};
     if (!isPlatform(platform)) {
       res.status(400).json({ error: "unsupported platform" });
       return;
@@ -315,7 +319,19 @@ export function createMusicAccountsRouter(
       res.status(400).json({ error: "capacity must be a non-negative number" });
       return;
     }
-    const cookie = cookieStore.load(platform as Parameters<CookieStore["load"]>[0]);
+    // 没有 qq provider（例如单测只挂了 netease）时仍然回落到 cookie store，
+    // 所以这个改动对已有平台零影响。
+    let cookie: string | undefined;
+    if (sharedQq) {
+      try {
+        cookie = sharedQq.getCookie();
+      } catch {
+        // Provider 还没建立登录态时抛错等价于「没有可导入的登录」
+        cookie = "";
+      }
+    } else {
+      cookie = cookieStore?.load(platform);
+    }
     if (!cookie || !cookie.trim()) {
       res.status(409).json({ error: "no_shared_login", platform });
       return;
