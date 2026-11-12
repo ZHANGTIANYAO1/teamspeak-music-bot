@@ -1544,6 +1544,36 @@ describe("BotInstance live-queue persistence (#119)", () => {
 });
 
 describe("BotInstance Bilibili multi-P resolution", () => {
+  it("passes the page from a TeamSpeak video link to the Bilibili provider", async () => {
+    const song = {
+      id: "BV1yxHQeYEuE?p=2",
+      name: "Video - P2",
+      artist: "Uploader",
+      album: "",
+      duration: 180,
+      coverUrl: "",
+      platform: "bilibili" as const,
+    };
+    const provider = { platform: "bilibili", getSongDetail: vi.fn().mockResolvedValue(song) };
+    const ctx = {
+      config: { commandPrefix: "!" },
+      assertProviderEnabled: vi.fn(),
+      getProviderFor: vi.fn().mockReturnValue(provider),
+    };
+    const args = "[URL]https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2[/URL]";
+
+    const result = await (BotInstance.prototype as any).resolvePlayQuery.call(ctx, {
+      name: "play",
+      args,
+      rawArgs: [args],
+      flags: new Set(),
+    });
+
+    expect(ctx.getProviderFor).toHaveBeenCalledWith("bilibili");
+    expect(provider.getSongDetail).toHaveBeenCalledWith("BV1yxHQeYEuE?p=2");
+    expect(result.song).toEqual(song);
+  });
+
   it("resolves multi-P search result to P1 with accurate duration and name", async () => {
     const multiPSongDetail = {
       id: "BV1multiP?p=1",

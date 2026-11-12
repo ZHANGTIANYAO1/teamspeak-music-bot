@@ -101,6 +101,32 @@ describe("parseSongRef (#90 exact-song selection)", () => {
     expect(parseSongRef("https://www.bilibili.com/video/BV1yxHQeYEuE")).toEqual({ id: "BV1yxHQeYEuE", platform: "bilibili" });
     expect(parseSongRef("https://b23.tv/BV1yxHQeYEuE")).toEqual({ id: "BV1yxHQeYEuE", platform: "bilibili" });
   });
+
+  it.each([
+    "https://www.bilibili.com/video/BV1yxHQeYEuE?p=2",
+    "https://b23.tv/BV1yxHQeYEuE?p=2",
+    "https://www.bilibili.com/video/BV1yxHQeYEuE/?from=share&p=2&vd_source=test#reply",
+    "https://www.bilibili.com/video/BV1yxHQeYEuE/?from=share?p=3&p=2",
+    "https://www.bilibili.com/video/BV1yxHQeYEuE/?p=%32",
+    "[URL]https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2[/URL]",
+    "[url]https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2#reply[/url]",
+  ])("preserves the Bilibili page query in %s", (input) => {
+    expect(parseSongRef(input)).toEqual({ id: "BV1yxHQeYEuE?p=2", platform: "bilibili" });
+  });
+
+  it.each([
+    "?p=2extra",
+    "?p=-2",
+    "?page=2",
+    "?sp=2",
+    "?from=share?p=2",
+    "?from=share%3Fp%3D2",
+    "?from=share#reply&p=2",
+    "#reply?p=2",
+  ])("ignores an invalid or unrelated Bilibili page query %s", (query) => {
+    expect(parseSongRef(`https://www.bilibili.com/video/BV1yxHQeYEuE${query}`))
+      .toEqual({ id: "BV1yxHQeYEuE", platform: "bilibili" });
+  });
 });
 
 describe("parseSelectionIndex (#90 pick from last search)", () => {
