@@ -98,7 +98,7 @@ export function buildFfmpegArgs(url: string, seekSeconds: number): string[] {
   }
   const isHttp = httpHostname !== null;
   const isBilibili = httpHostname !== null &&
-    ["bilivideo.com", "bilivideo.cn", "bilibili.com", "szbdyd.com"].some(
+    ["bilivideo.com", "bilivideo.cn", "bilibili.com", "szbdyd.com", "mountaintoys.cn"].some(
       domain => httpHostname === domain || httpHostname.endsWith(`.${domain}`),
     );
 
