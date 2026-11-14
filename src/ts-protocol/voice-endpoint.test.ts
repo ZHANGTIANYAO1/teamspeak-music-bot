@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AddrResolver, ResolvedAddr } from "@honeybbq/teamspeak-client";
+import type { AddrResolver, ResolvedAddr } from "@honeybbq/teamspeak/client";
 import { TrackingVoiceEndpointResolver } from "./voice-endpoint.js";
 
 function result(addr: string): ResolvedAddr {

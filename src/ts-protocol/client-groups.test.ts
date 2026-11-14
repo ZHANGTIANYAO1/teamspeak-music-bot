@@ -29,7 +29,11 @@ function withFakeClient(
 ): string[] {
   const calls: string[] = [];
   const fake = {
-    execCommandWithResponse: vi.fn(async (cmd: string) => {
+    send: vi.fn(async (req: { command: string; params?: readonly (readonly [string, unknown])[] }) => {
+      const paramPairs = (req.params ?? [])
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}=${String(v)}`);
+      const cmd = paramPairs.length > 0 ? `${req.command} ${paramPairs.join(" ")}` : req.command;
       calls.push(cmd);
       return respond(cmd);
     }),

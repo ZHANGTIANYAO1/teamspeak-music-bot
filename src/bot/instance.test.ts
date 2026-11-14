@@ -1948,3 +1948,115 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     expect(ctx.advances).toEqual([]);
   });
 });
+
+describe("BotInstance — OpenProtocol & slash command routing", () => {
+  it("accepts / commands when commandPrefix is '!' and routes private replies to invokerId", async () => {
+    const ctx = makeGateCtx({ adminGroups: [] });
+    ctx.executeCommand = vi.fn(async (parsed: { name: string; args: string }) =>
+      `ok:${parsed.name}:${parsed.args}`,
+    );
+
+    const dm: TS3TextMessage = {
+      invokerName: "FlSpeakUser",
+      invokerId: "12",
+      invokerUid: "uid-fl",
+      message: "/play 晴天",
+      targetMode: 1,
+      invokerGroups: [],
+    };
+    await handleTextMessage.call(ctx, dm);
+
+    expect(ctx.executeCommand).toHaveBeenCalledTimes(1);
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledTimes(1);
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith("ok:play:晴天", 1, 12);
+
+    ctx.tsClient.sendTextMessage.mockClear();
+    await handleTextMessage.call(ctx, makeMsg("/now"));
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith("ok:now:");
+  });
+
+  it("routes permission denied and execution errors privately when triggered via DM", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: [] });
+    const dmStop: TS3TextMessage = {
+      invokerName: "Guest",
+      invokerId: "22",
+      invokerUid: "uid-guest",
+      message: "/stop",
+      targetMode: 1,
+      invokerGroups: [],
+    };
+    await handleTextMessage.call(ctx, dmStop);
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith(COMMAND_DENIED_MESSAGE, 1, 22);
+
+    ctx.tsClient.sendTextMessage.mockClear();
+    const okCtx = makeGateCtx({ adminGroups: [] });
+    okCtx.executeCommand = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    await handleTextMessage.call(okCtx, { ...dmStop, message: "/play x" });
+    expect(okCtx.tsClient.sendTextMessage).toHaveBeenCalledWith("Error: boom", 1, 22);
+  });
+
+  it("wires connected, clientMoved, pluginCommand, and disconnected to openProtocol", () => {
+    const tsClient = new EventEmitter() as EventEmitter & {
+      getClientId(): number;
+    };
+    tsClient.getClientId = () => 99;
+    const openProtocol = {
+      scheduleAnnounce: vi.fn(),
+      handlePluginCommand: vi.fn(async () => {}),
+      reset: vi.fn(),
+    };
+    const ctx = {
+      tsClient,
+      openProtocol,
+      connected: true,
+      lifecycleGeneration: 0,
+      autoPaused: false,
+      idleTimer: null,
+      idlePollTimer: null,
+      jellyfinPollTimer: null,
+      snapshotTimer: null,
+      currentSourceIsSpotify: false,
+      disconnectEmitted: false,
+      _cancelIdleTimer: vi.fn(),
+      _startIdlePoller: vi.fn(),
+      _startJellyfinReportPoller: vi.fn(),
+      unregisterManagedVoiceClient: vi.fn(),
+      voiceDucking: { reset: vi.fn(), removeSpeaker: vi.fn(), handleVoiceActivity: vi.fn() },
+      spotifyController: { stop: vi.fn() },
+      player: { stop: vi.fn() },
+      jellyfinReporter: undefined,
+      queue: { clear: vi.fn() },
+      sweepLocalAudio: vi.fn(),
+      emit: vi.fn(),
+      refreshOccupancy: vi.fn(async () => {}),
+      profileManager: { onChannelMoved: vi.fn(async () => {}) },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as Record<string, any>;
+
+    (BotInstance.prototype as any).setupTsEvents.call(ctx);
+
+    tsClient.emit("connected");
+    expect(openProtocol.scheduleAnnounce).toHaveBeenCalledTimes(1);
+
+    tsClient.emit("clientMoved", { id: 5, targetChannelID: 10n });
+    expect(openProtocol.scheduleAnnounce).toHaveBeenCalledTimes(1);
+
+    tsClient.emit("clientMoved", { id: 99, targetChannelID: 10n });
+    expect(openProtocol.scheduleAnnounce).toHaveBeenCalledTimes(2);
+
+    const pluginCmd = {
+      name: "tsclient:commands",
+      data: JSON.stringify({ v: 1, action: "list_req" }),
+      invokerId: 5,
+      invokerName: "User",
+      invokerUid: "uid-user",
+    };
+    tsClient.emit("pluginCommand", pluginCmd);
+    expect(openProtocol.handlePluginCommand).toHaveBeenCalledWith(pluginCmd);
+
+    tsClient.emit("disconnected");
+    expect(openProtocol.reset).toHaveBeenCalledTimes(1);
+  });
+});

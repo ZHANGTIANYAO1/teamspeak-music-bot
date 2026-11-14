@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseCommand, canRunCommand, isAdminCommand } from "./commands.js";
+import {
+  parseCommand,
+  parseCommandWithFallback,
+  canRunCommand,
+  isAdminCommand,
+} from "./commands.js";
 
 describe("Command Parser", () => {
   it("parses simple command", () => {
@@ -91,5 +96,33 @@ describe("canRunCommand", () => {
   });
   it("denies admin command when invoker has no groups and enforcement is on", () => {
     expect(canRunCommand("clear", [], [6])).toBe(false);
+  });
+});
+
+describe("parseCommandWithFallback", () => {
+  it("accepts both the configured primary prefix and slash fallback", () => {
+    expect(parseCommandWithFallback("!play 晴天", "!")).toEqual({
+      name: "play",
+      args: "晴天",
+      rawArgs: ["晴天"],
+      flags: new Set(),
+    });
+    expect(parseCommandWithFallback("/play 晴天", "!")).toEqual({
+      name: "play",
+      args: "晴天",
+      rawArgs: ["晴天"],
+      flags: new Set(),
+    });
+  });
+
+  it("applies aliases on slash fallback and ignores bare slash", () => {
+    expect(parseCommandWithFallback("/p 稻香", "!", { p: "play" })).toEqual({
+      name: "play",
+      args: "稻香",
+      rawArgs: ["稻香"],
+      flags: new Set(),
+    });
+    expect(parseCommandWithFallback("/", "!")).toBeNull();
+    expect(parseCommandWithFallback("plain chat", "!")).toBeNull();
   });
 });

@@ -1,16 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { toTS3TextMessage } from "./client.js";
-import type { TextMessage } from "@honeybbq/teamspeak-client";
+import {
+  asClientID,
+  asServerGroupID,
+  asUID,
+  type TextMessageEvent,
+} from "@honeybbq/teamspeak";
 
-function makeMsg(over: Partial<TextMessage> = {}): TextMessage {
+function makeMsg(over: Partial<TextMessageEvent> = {}): TextMessageEvent {
   return {
     invokerName: "Alice",
-    invokerUID: "uid-abc",
+    invokerUID: asUID("uid-abc"),
     message: "!stop",
-    invokerGroups: ["6", "8"],
+    invokerGroups: [asServerGroupID(6n), asServerGroupID(8n)],
     targetMode: 2,
-    targetID: 0n,
-    invokerID: 5,
+    targetID: asClientID(0),
+    invokerID: asClientID(5),
     ...over,
   };
 }
@@ -26,18 +31,20 @@ describe("toTS3TextMessage", () => {
   });
 
   it("preserves the sender's server groups", () => {
-    expect(toTS3TextMessage(makeMsg({ invokerGroups: ["6"] })).invokerGroups).toEqual(["6"]);
+    expect(
+      toTS3TextMessage(makeMsg({ invokerGroups: [asServerGroupID(6n)] })).invokerGroups,
+    ).toEqual(["6"]);
   });
 
   it("defaults missing invokerGroups to an empty array", () => {
     const partial = {
       invokerName: "Bob",
-      invokerUID: "u",
+      invokerUID: asUID("u"),
       message: "!stop",
       targetMode: 1,
-      targetID: 0n,
-      invokerID: 7,
-    } as unknown as TextMessage;
+      targetID: asClientID(0),
+      invokerID: asClientID(7),
+    } as unknown as TextMessageEvent;
     expect(toTS3TextMessage(partial).invokerGroups).toEqual([]);
   });
 });
