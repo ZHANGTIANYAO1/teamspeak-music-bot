@@ -39,8 +39,8 @@ function makeCmd(overrides: Partial<TS3PluginCommand> = {}): TS3PluginCommand {
 }
 
 describe("OpenProtocol payload builders", () => {
-  it("builds valid v1 identity payloads with package version and command_prefix under 1024 bytes", () => {
-    const raw = buildIdentityPayloadJson("announce", "!");
+  it("builds valid v1 identity payloads with package version under 1024 bytes", () => {
+    const raw = buildIdentityPayloadJson("announce");
     expect(Buffer.byteLength(raw, "utf8")).toBeLessThan(MAX_PAYLOAD_BYTES);
     expect(JSON.parse(raw)).toEqual({
       v: OPEN_PROTOCOL_VERSION,
@@ -49,18 +49,11 @@ describe("OpenProtocol payload builders", () => {
       app_name: APP_NAME,
       app_version: APP_VERSION,
       capabilities: [...BOT_CAPABILITIES],
-      command_prefix: "!",
     });
 
-    const ack = JSON.parse(buildIdentityPayloadJson("announce_ack", "?"));
+    const ack = JSON.parse(buildIdentityPayloadJson("announce_ack"));
     expect(ack.action).toBe("announce_ack");
-    expect(ack.command_prefix).toBe("?");
-  });
-
-  it("drops command_prefix if an oversized value would exceed 1024 bytes", () => {
-    const raw = buildIdentityPayloadJson("announce", "p".repeat(1200));
-    expect(Buffer.byteLength(raw, "utf8")).toBeLessThan(MAX_PAYLOAD_BYTES);
-    expect(JSON.parse(raw).app_name).toBe(APP_NAME);
+    expect(ack.command_prefix).toBeUndefined();
   });
 
   it("builds localized command lists adhering to field caps and <1024 byte UTF-8 limit", () => {
@@ -82,12 +75,12 @@ describe("OpenProtocol payload builders", () => {
       const parsed = JSON.parse(raw) as {
         v: number;
         action: string;
-        prefix: string;
+        command_prefix: string;
         commands: unknown[];
       };
       expect(parsed.v).toBe(OPEN_PROTOCOL_VERSION);
       expect(parsed.action).toBe("list_ack");
-      expect(parsed.prefix).toBe("!");
+      expect(parsed.command_prefix).toBe("!");
       expect(parsed.commands.length).toBe(cmds.length);
     }
   });
@@ -184,7 +177,7 @@ describe("OpenProtocolManager", () => {
     const payload = JSON.parse(sendPluginCommand.mock.calls[0][1] as string);
     expect(payload.v).toBe(1);
     expect(payload.action).toBe("list_ack");
-    expect(payload.prefix).toBe("?");
+    expect(payload.command_prefix).toBe("?");
     expect(payload.commands[0]).toEqual({ name: "play", args: "<query>", desc: "Play song" });
 
     // Cooldown falls back to invokerId when invokerUid is empty

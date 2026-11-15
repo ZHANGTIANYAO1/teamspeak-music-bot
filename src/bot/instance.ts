@@ -12,7 +12,7 @@ import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Platform, Song } from "../music/provider.js";
 import {
-  parseCommandWithFallback,
+  parseCommand,
   canRunCommand,
   type ParsedCommand,
 } from "./commands.js";
@@ -823,7 +823,7 @@ export class BotInstance extends EventEmitter {
   }
 
   private async handleTextMessage(msg: TS3TextMessage): Promise<void> {
-    const parsed = parseCommandWithFallback(
+    const parsed = parseCommand(
       msg.message,
       this.config.commandPrefix,
       this.config.commandAliases,

@@ -55,23 +55,6 @@ export function parseCommand(
   };
 }
 
-export function parseCommandWithFallback(
-  message: string,
-  primaryPrefix: string,
-  aliases: Record<string, string> = {},
-  fallbackPrefixes: readonly string[] = ["/"],
-): ParsedCommand | null {
-  const direct = parseCommand(message, primaryPrefix, aliases);
-  if (direct) return direct;
-
-  for (const fallback of fallbackPrefixes) {
-    if (!fallback || fallback === primaryPrefix) continue;
-    const parsed = parseCommand(message, fallback, aliases);
-    if (parsed) return parsed;
-  }
-  return null;
-}
-
 export function isAdminCommand(commandName: string): boolean {
   return ADMIN_COMMANDS.has(commandName);
 }

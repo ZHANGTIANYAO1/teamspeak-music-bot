@@ -21,6 +21,7 @@ export const ACK_GLOBAL_BURST = 4;
 export const ACK_GLOBAL_RATE_PER_SEC = 2;
 
 export const MAX_COMMANDS = 16;
+export const MAX_CMD_PREFIX_CHARS = 8;
 export const MAX_CMD_NAME_CHARS = 24;
 export const MAX_CMD_ARGS_CHARS = 32;
 export const MAX_CMD_DESC_CHARS = 64;
@@ -40,13 +41,12 @@ export interface OpenProtocolIdentityPayload {
   app_name: string;
   app_version: string;
   capabilities: string[];
-  command_prefix?: string;
 }
 
 export interface OpenProtocolCommandsListAckPayload {
   v: 1;
   action: "list_ack";
-  prefix?: string;
+  command_prefix?: string;
   commands: OpenProtocolCommandSpec[];
 }
 
@@ -124,14 +124,8 @@ function truncateChars(value: string, maxChars: number): string {
 
 export function buildIdentityPayloadJson(
   action: "announce" | "announce_ack",
-  commandPrefix?: string,
   appVersion: string = APP_VERSION,
 ): string {
-  const normalizedPrefix =
-    typeof commandPrefix === "string" && commandPrefix.trim().length > 0
-      ? truncateChars(commandPrefix.trim(), MAX_CMD_NAME_CHARS)
-      : undefined;
-
   const payload: OpenProtocolIdentityPayload = {
     v: OPEN_PROTOCOL_VERSION,
     action,
@@ -139,15 +133,8 @@ export function buildIdentityPayloadJson(
     app_name: truncateChars(APP_NAME, MAX_APP_META_CHARS),
     app_version: truncateChars(appVersion, MAX_APP_META_CHARS),
     capabilities: [...BOT_CAPABILITIES],
-    ...(normalizedPrefix ? { command_prefix: normalizedPrefix } : {}),
   };
 
-  const json = JSON.stringify(payload);
-  if (Buffer.byteLength(json, "utf8") < MAX_PAYLOAD_BYTES) {
-    return json;
-  }
-
-  delete payload.command_prefix;
   return JSON.stringify(payload);
 }
 
@@ -172,7 +159,7 @@ export function buildCommandsListAckJson(
 ): string {
   const normalizedPrefix =
     typeof commandPrefix === "string" && commandPrefix.trim().length > 0
-      ? truncateChars(commandPrefix.trim(), MAX_CMD_NAME_CHARS)
+      ? truncateChars(commandPrefix.trim(), MAX_CMD_PREFIX_CHARS)
       : undefined;
 
   const commands = buildOpenProtocolCommands(locale);
@@ -180,7 +167,7 @@ export function buildCommandsListAckJson(
     const payload: OpenProtocolCommandsListAckPayload = {
       v: OPEN_PROTOCOL_VERSION,
       action: "list_ack",
-      ...(normalizedPrefix ? { prefix: normalizedPrefix } : {}),
+      ...(normalizedPrefix ? { command_prefix: normalizedPrefix } : {}),
       commands,
     };
     const json = JSON.stringify(payload);
@@ -193,7 +180,7 @@ export function buildCommandsListAckJson(
   return JSON.stringify({
     v: OPEN_PROTOCOL_VERSION,
     action: "list_ack",
-    ...(normalizedPrefix ? { prefix: normalizedPrefix } : {}),
+    ...(normalizedPrefix ? { command_prefix: normalizedPrefix } : {}),
     commands: [],
   } satisfies OpenProtocolCommandsListAckPayload);
 }
@@ -402,8 +389,7 @@ export class OpenProtocolManager {
     );
     if (!token) return;
 
-    const { commandPrefix } = this.getConfig();
-    const payload = buildIdentityPayloadJson("announce_ack", commandPrefix);
+    const payload = buildIdentityPayloadJson("announce_ack");
     await this.sendAck(IDENTITY_PLUGIN, payload, invokerId, token);
   }
 
@@ -460,8 +446,7 @@ export class OpenProtocolManager {
 
     this.lastAnnounceAttemptMs = this.now();
     const seq = ++this.announceSeq;
-    const { commandPrefix } = this.getConfig();
-    const payload = buildIdentityPayloadJson("announce", commandPrefix);
+    const payload = buildIdentityPayloadJson("announce");
 
     if (Buffer.byteLength(payload, "utf8") >= MAX_PAYLOAD_BYTES) {
       this.logger.debug("OpenProtocol announce payload exceeded size limit");
@@ -497,8 +482,7 @@ export class OpenProtocolManager {
         return;
       }
       const retrySeq = ++this.announceSeq;
-      const { commandPrefix } = this.getConfig();
-      const payload = buildIdentityPayloadJson("announce", commandPrefix);
+      const payload = buildIdentityPayloadJson("announce");
       this.lastAnnounceAttemptMs = this.now();
       this.transport
         .sendPluginCommand(IDENTITY_PLUGIN, payload, "channel")

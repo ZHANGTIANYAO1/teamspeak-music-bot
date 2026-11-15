@@ -1949,18 +1949,21 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
   });
 });
 
-describe("BotInstance — OpenProtocol & slash command routing", () => {
-  it("accepts / commands when commandPrefix is '!' and routes private replies to invokerId", async () => {
+describe("BotInstance — OpenProtocol & command routing", () => {
+  it("ignores / commands when commandPrefix is '!' and routes private replies to invokerId", async () => {
     const ctx = makeGateCtx({ adminGroups: [] });
     ctx.executeCommand = vi.fn(async (parsed: { name: string; args: string }) =>
       `ok:${parsed.name}:${parsed.args}`,
     );
 
+    await handleTextMessage.call(ctx, makeMsg("/play 晴天"));
+    expect(ctx.executeCommand).not.toHaveBeenCalled();
+
     const dm: TS3TextMessage = {
       invokerName: "FlSpeakUser",
       invokerId: "12",
       invokerUid: "uid-fl",
-      message: "/play 晴天",
+      message: "!play 晴天",
       targetMode: 1,
       invokerGroups: [],
     };
@@ -1971,7 +1974,7 @@ describe("BotInstance — OpenProtocol & slash command routing", () => {
     expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith("ok:play:晴天", 1, 12);
 
     ctx.tsClient.sendTextMessage.mockClear();
-    await handleTextMessage.call(ctx, makeMsg("/now"));
+    await handleTextMessage.call(ctx, makeMsg("!now"));
     expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith("ok:now:");
   });
 
@@ -1981,7 +1984,7 @@ describe("BotInstance — OpenProtocol & slash command routing", () => {
       invokerName: "Guest",
       invokerId: "22",
       invokerUid: "uid-guest",
-      message: "/stop",
+      message: "!stop",
       targetMode: 1,
       invokerGroups: [],
     };
@@ -1993,7 +1996,7 @@ describe("BotInstance — OpenProtocol & slash command routing", () => {
     okCtx.executeCommand = vi.fn(async () => {
       throw new Error("boom");
     });
-    await handleTextMessage.call(okCtx, { ...dmStop, message: "/play x" });
+    await handleTextMessage.call(okCtx, { ...dmStop, message: "!play x" });
     expect(okCtx.tsClient.sendTextMessage).toHaveBeenCalledWith("Error: boom", 1, 22);
   });
 
