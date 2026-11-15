@@ -826,7 +826,7 @@ export class BotInstance extends EventEmitter {
     const parsed = parseCommand(
       msg.message,
       this.config.commandPrefix,
-      this.config.commandAliases,
+      this.config.commandAliases
     );
     if (!parsed) return;
 

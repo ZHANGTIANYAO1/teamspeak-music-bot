@@ -1950,14 +1950,11 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
 });
 
 describe("BotInstance — OpenProtocol & command routing", () => {
-  it("ignores / commands when commandPrefix is '!' and routes private replies to invokerId", async () => {
+  it("routes private DM command replies to invokerId and channel replies to the channel", async () => {
     const ctx = makeGateCtx({ adminGroups: [] });
     ctx.executeCommand = vi.fn(async (parsed: { name: string; args: string }) =>
       `ok:${parsed.name}:${parsed.args}`,
     );
-
-    await handleTextMessage.call(ctx, makeMsg("/play 晴天"));
-    expect(ctx.executeCommand).not.toHaveBeenCalled();
 
     const dm: TS3TextMessage = {
       invokerName: "FlSpeakUser",

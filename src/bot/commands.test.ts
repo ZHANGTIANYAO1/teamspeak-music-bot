@@ -1,9 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  parseCommand,
-  canRunCommand,
-  isAdminCommand,
-} from "./commands.js";
+import { parseCommand, canRunCommand, isAdminCommand } from "./commands.js";
 
 describe("Command Parser", () => {
   it("parses simple command", () => {
