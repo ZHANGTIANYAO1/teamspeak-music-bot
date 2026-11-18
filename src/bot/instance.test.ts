@@ -1771,7 +1771,7 @@ describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", 
   it("re-resolves the URL and resumes at the current position when a B站 stream ends early", async () => {
     const ctx = makeCtx({ elapsed: 1000, duration: 10_000 });
     expect(await resumeInterruptedStream.call(ctx)).toBe(true);
-    expect(ctx.provider.getSongUrl).toHaveBeenCalledWith("BV1abc");
+    expect(ctx.provider.getSongUrl).toHaveBeenCalledExactlyOnceWith("BV1abc", undefined, { avoidHosts: new Set() });
     expect(ctx.player.play).toHaveBeenCalledWith("https://fresh.test/a.m4s", 1000, 10_000);
     expect(ctx.song.url).toBe("https://fresh.test/a.m4s");
   });
