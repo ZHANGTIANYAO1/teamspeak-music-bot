@@ -1,5 +1,7 @@
 import { normalizeCookie } from "./cookie-normalize.js";
 import axios, { type AxiosInstance } from "axios";
+import { RISK_CONTROL_CODE, RiskControlError, SongUrlUnavailable } from "./provider.js";
+import type { PlayFailure } from "./provider.js";
 import type {
   MusicProvider,
   Song,
@@ -115,6 +117,84 @@ export function parseNeteaseTrial(item: any): number | undefined {
   return Math.round(secs);
 }
 
+/**
+ * Recognise NetEase's IP risk control inside an axios error. The status alone
+ * is not enough — axios reports every 4xx as ERR_BAD_REQUEST — so the body has
+ * to be read. See RiskControlError for the measured behaviour.
+ */
+function riskControlFrom(err: unknown): RiskControlError | null {
+  const e = err as {
+    response?: { status?: number; data?: { code?: number } };
+  };
+  if (e?.response?.status === 400 && e.response.data?.code === RISK_CONTROL_CODE) {
+    return new RiskControlError("网易云请求被风控拦截 (-460)");
+  }
+  return null;
+}
+
+/**
+ * Classify a 200-with-no-URL answer.
+ *
+ * `/song/url/v1` reports "no URL here" for at least four unrelated reasons, and
+ * they need different fixes: open a membership, pick another track, drop the
+ * quality, or just wait. The response does carry enough to tell them apart
+ * (`code`, `fee`, `payed`, `level`), and not reading those fields is exactly
+ * why every one of them reached the user as 「区域/版权限制」.
+ *
+ * Field meanings (NetEase):
+ *   fee 0 = free, 1 = VIP, 4 = album-only purchase, 8 = free / low quality
+ *   payed 1 = this account already paid for it
+ *   code 404 on the item = the id does not resolve to a playable track
+ */
+export function diagnoseNeteaseMiss(
+  songId: string,
+  level: string,
+  item: Record<string, any> | undefined,
+  body: Record<string, any> | undefined,
+): PlayFailure {
+  const upstream = {
+    code: item?.code ?? body?.code,
+    fee: item?.fee,
+    payed: item?.payed,
+    level: item?.level ?? level,
+    br: item?.br,
+    freeTrial: Boolean(item?.freeTrialInfo),
+  };
+  const suffix = `（${String(upstream.level)}）`;
+  const base = { platform: "netease" as const, songId, upstream };
+
+  if (!item) {
+    return {
+      ...base,
+      code: "unknown",
+      message: `音源没有返回该曲目${suffix}`,
+    };
+  }
+  if (upstream.code === 404) {
+    return {
+      ...base,
+      code: "no_copyright",
+      message: `无版权或已下架${suffix}`,
+    };
+  }
+  const fee = typeof upstream.fee === "number" ? upstream.fee : -1;
+  if ((fee === 1 || fee === 4) && !upstream.payed) {
+    return {
+      ...base,
+      code: "vip_required",
+      message: fee === 4 ? `需要购买该专辑${suffix}` : `需要会员${suffix}`,
+    };
+  }
+  // Everything else that has the track but no URL is a per-level restriction:
+  // the same id often plays at another level (measured: 192k OK while both
+  // 320k and 128k returned null).
+  return {
+    ...base,
+    code: "quality_denied",
+    message: `当前音质无播放权限${suffix}`,
+  };
+}
+
 // NetEase quality levels: standard(128k) higher(192k) exhigh(320k) lossless(flac) hires(hi-res) jyeffect jymaster
 export const NETEASE_QUALITY_LEVELS = [
   { value: "standard", label: "标准 (128kbps)", bitrate: 128 },
@@ -221,13 +301,46 @@ export class NeteaseProvider implements MusicProvider {
 
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
     const level = quality ?? this.quality;
-    const res = await this.api.get("/song/url/v1", {
-      params: { id: songId, level, ua: getPlaybackUserAgent(this.cookie), ...this.cookieParams },
-    });
+    let res;
+    try {
+      res = await this.api.get("/song/url/v1", {
+        params: { id: songId, level, ua: getPlaybackUserAgent(this.cookie), ...this.cookieParams },
+      });
+    } catch (err) {
+      // -460 arrives as HTTP 400, and left as-is it looks like "this track is
+      // unavailable" to every caller. Surface it as its own error type so the
+      // retry layer can wait out the risk-control window instead of giving up.
+      const risk = riskControlFrom(err);
+      if (risk) throw risk;
+      throw err;
+    }
     const item = res.data?.data?.[0];
     const url = item?.url;
-    if (!url) return null;
+    // A bare `null` here forced every caller to invent an explanation, and the
+    // one they invented was 「区域/版权限制」 — wrong for a lapsed membership, for
+    // a delisted track, and for a quality the account cannot stream. Throw the
+    // reason instead; the retry layer still spends its budget, it just stops
+    // lying about why nothing worked.
+    if (!url) throw new SongUrlUnavailable(diagnoseNeteaseMiss(songId, level, item, res.data));
     return { url, trialDuration: parseNeteaseTrial(item) };
+  }
+
+  /**
+   * Levels to fall back to when the configured one returns no URL.
+   *
+   * NetEase does not offer a continuous quality ladder per track: measured on a
+   * real library, a track can be available at "higher" (192k) while BOTH
+   * "exhigh" (320k) and "standard" (128k) answer `url: null`. So the caller must
+   * sweep every level BELOW the current one instead of assuming "just drop to
+   * the cheapest".
+   */
+  getFallbackQualities(): string[] {
+    const order = NETEASE_QUALITY_LEVELS.map((l) => l.value as string);
+    const index = order.indexOf(this.quality);
+    if (index <= 0) return [];
+    // order is low→high, so everything before the current level reversed gives
+    // best→worst below it (exhigh → ["higher", "standard"]).
+    return order.slice(0, index).reverse();
   }
 
   async getSongDetail(songId: string): Promise<Song | null> {

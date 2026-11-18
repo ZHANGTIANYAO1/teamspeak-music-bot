@@ -9,8 +9,10 @@ import {
 } from "../ts-protocol/client.js";
 import { OpenProtocolManager } from "../ts-protocol/open-protocol.js";
 import { AudioPlayer } from "../audio/player.js";
+import { resolveUrlWithRetry } from "./url-retry.js";
+import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
-import type { MusicProvider, Platform, Song } from "../music/provider.js";
+import type { MusicProvider, Platform, PlayFailure, Song, SongUrlResult } from "../music/provider.js";
 import { musicRequestError } from "../music/request-error.js";
 import {
   parseCommand,
@@ -221,6 +223,7 @@ export class BotInstance extends EventEmitter {
   private fmRequesterName: string | undefined;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
+  private playbackRequest?: symbol;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
@@ -1066,55 +1069,118 @@ export class BotInstance extends EventEmitter {
     return requestedBy ? { ...song, requestedBy } : { ...song };
   }
 
-  /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
-  async resolveAndPlay(song: QueuedSong): Promise<boolean> {
+  /** Resolve the URL and start playback if this request still owns the queue. */
+  async resolveAndPlay(song: QueuedSong, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
+    const request = Symbol();
+    this.playbackRequest = request;
+    const generation = this.lifecycleGeneration;
+    const current = this.queue.current();
+    const isCancelled = () => !this.connected || this.lifecycleGeneration !== generation ||
+      this.playbackRequest !== request || this.queue.current() !== current;
+    const fail = (message: string) => onFailure?.({
+      platform: song.platform,
+      songId: song.id,
+      code: "unknown",
+      message,
+    });
     if (!this.connected) {
-      this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
+      fail("机器人未连接");
       return false;
     }
     if (song.platform === "local" && !this.isLocalAudioEnabled()) {
-      this.logger.warn({ songId: song.id, name: song.name }, "Local audio playback disabled — refusing track");
+      fail("该机器人已关闭本地音频播放");
       return false;
     }
     // Clear any accumulated skip votes — every fresh track starts with a
     // clean slate, regardless of which code path loaded it (cmdPlay,
     // cmdPlaylist, cmdAlbum, cmdFm, trackEnd auto-advance, etc.).
     this.voteSkipUsers.clear();
-    const provider = this.getProviderFor(song.platform);
     try {
+      const provider = this.getProviderFor(song.platform);
       if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
-        const detail = await provider.getSongDetail(song.id);
-        if (detail) {
-          song.duration = detail.duration;
-          song.name = detail.name;
-          song.id = detail.id;
+        // Detail is metadata only (duration / canonical id). A failure here used
+        // to abort the whole resolve before the retry budget even started, so a
+        // transient 4xx turned into an instant 「无法播放」.
+        try {
+          const detail = await provider.getSongDetail(song.id);
+          if (isCancelled()) return false;
+          if (detail) {
+            song.duration = detail.duration;
+            song.name = detail.name;
+            song.id = detail.id;
+          }
+        } catch (err) {
+          this.logger.warn({ err, songId: song.id }, "Song detail lookup failed — continuing with queued metadata");
         }
       }
-      const result = await provider.getSongUrl(song.id);
-      if (!result?.url) {
-        this.logger.warn({ songId: song.id, name: song.name }, "No URL available, skipping");
-        return false;
-      }
-      // Re-check connection state AFTER the network round-trip — the URL
-      // resolve can take multiple seconds and the user may have called stop
-      // during that window. Without this, we'd spawn ffmpeg on a
-      // disconnected bot and land back in the same "connected=false but
-      // playing=true" inconsistency that Bug C was about.
-      if (!this.connected) {
-        this.logger.warn(
-          { songId: song.id, name: song.name },
-          "bot disconnected during URL resolve — aborting playback",
-        );
-        return false;
-      }
+      // Retries happen here (not in the provider) so every queue path — web
+      // click, chat !play, auto-advance, FM — shares the same budget. The
+      // policy lives in url-retry.ts so it is unit tested without a bot; a
+      // config without the field means 0 retries, i.e. the previous behaviour.
+      const result = await resolveUrlWithRetry({
+        retries: this.config?.playUrlRetries,
+        resolve: (quality) => provider.getSongUrl(song.id, quality),
+        // NetEase's quality ladder is not continuous: a track can play at 192k
+        // while both 320k and 128k return null, so every lower level is tried.
+        // Providers without a quality knob return [] and keep one attempt.
+        fallbacks: provider.getFallbackQualities?.() ?? [],
+        // Stop / disconnect must abort the budget: retrying into a dead
+        // connection only delays the queue.
+        isCancelled,
+        onAttemptFailed: ({ attempt, total, quality, error }) => {
+          const fields = { songId: song.id, name: song.name, attempt, total, quality };
+          if (error instanceof RiskControlError) {
+            // -460 is NetEase refusing the IP, not this track. Say so, otherwise
+            // the log reads like the song is unavailable and people go hunting
+            // for a copyright problem that does not exist.
+            this.logger.warn(
+              { ...fields, code: RISK_CONTROL_CODE, reason: error.message },
+              "URL resolve hit NetEase risk control (-460) — backing off",
+            );
+          } else if (error) {
+            this.logger.warn({ ...fields, err: error }, "URL resolve threw — retrying");
+          } else if (attempt < total) {
+            this.logger.debug(fields, "URL resolve returned no URL — retrying");
+          }
+        },
+        // Once per track, and with the reason named. The old log line was
+        // `No URL available` with no cause, which is what sent three separate
+        // investigations after a copyright problem that was never there.
+        onExhausted: ({ quality, error }) => {
+          const failure = error
+            ? toPlayFailure(provider.platform, song.id, error)
+            : {
+                platform: provider.platform,
+                songId: song.id,
+                code: "unknown" as const,
+                message: `没有拿到播放地址（${quality ?? "默认音质"}）`,
+              };
+          onFailure?.(failure);
+          this.logger.warn(
+            {
+              songId: song.id,
+              name: song.name,
+              platform: provider.platform,
+              code: failure.code,
+              quality: quality ?? "default",
+              upstream: failure.upstream,
+              reason: failure.message,
+            },
+            "No URL available, skipping",
+          );
+        },
+      });
+      if (!result?.url || isCancelled()) return false;
       // Stage 2: a `spotify:` sentinel URI means the go-librespot sidecar
       // serves the audio, NOT ffmpeg. Start the per-bot sidecar on demand; if
       // it can't run (disabled / non-Linux / binary missing) keep the Stage-1
       // fallback message + skip so the queue keeps moving.
       if (isSpotifyUri(result.url)) {
         const ready = await this.spotifyController.ensureStarted();
+        if (isCancelled()) return false;
         if (!ready) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify backend unavailable — skipping");
+          fail(SPOTIFY_UNAVAILABLE_MESSAGE);
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
           return false;
         }
@@ -1124,8 +1190,10 @@ export class BotInstance extends EventEmitter {
         // sidecar failed the play (dead/errored backend): never attach the
         // player to a dead stream — send the same fallback and skip.
         const played = await this.spotifyController.playTrack(result.url);
+        if (isCancelled()) return false;
         if (!played) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify playTrack failed — skipping");
+          fail(SPOTIFY_UNAVAILABLE_MESSAGE);
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
           return false;
         }
@@ -1225,7 +1293,9 @@ export class BotInstance extends EventEmitter {
       this.emit("stateChange");
       return true;
     } catch (err) {
+      if (isCancelled()) return false;
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
+      onFailure?.(toPlayFailure(song.platform, song.id, err));
       return false;
     }
   }
@@ -1409,8 +1479,9 @@ export class BotInstance extends EventEmitter {
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const song0 = song!;
-    const ok = await this.playSingleSong(song0, requesterName);
-    if (!ok) return `Cannot play: ${song0.name}`;
+    let why: string | undefined;
+    const ok = await this.playSingleSong(song0, requesterName, failure => { why = failure.message; });
+    if (!ok) return why ? `Cannot play: ${song0.name} — ${why}` : `Cannot play: ${song0.name}`;
     return `Now playing: ${song0.name} - ${song0.artist}`;
   }
 
@@ -1426,7 +1497,7 @@ export class BotInstance extends EventEmitter {
    * Shared by chat !play and the web /play-song route so the toggle decision
    * lives in exactly one place (#119). Returns true if a track started playing.
    */
-  async playSingleSong(song: QueuedSong, requesterName?: string): Promise<boolean> {
+  async playSingleSong(song: QueuedSong, requesterName?: string, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
     const s = this.withRequester(song, requesterName);
     if (this.config.playKeepsQueue && !this.queue.isEmpty()) {
       const insertedAt =
@@ -1439,7 +1510,7 @@ export class BotInstance extends EventEmitter {
       this.queue.playAt(insertedAt);
       this.player.resetFailures();
       // No sweep here: the queue is kept, so no local uploads were released.
-      return this.resolveAndPlay(this.queue.current()!);
+      return this.resolveAndPlay(this.queue.current()!, onFailure);
     }
     // Legacy replace behavior (default).
     const previous = this.queue.current();
@@ -1453,7 +1524,7 @@ export class BotInstance extends EventEmitter {
 
     // Reset failure counter on user-initiated play
     this.player.resetFailures();
-    const ok = await this.resolveAndPlay(this.queue.current()!);
+    const ok = await this.resolveAndPlay(this.queue.current()!, onFailure);
     // Sweep AFTER the new song is queued+resolved: the replaced songs are no
     // longer referenced (and get deleted), but the song — if it is the same
     // local upload that was already playing — stays referenced and is preserved.
@@ -2157,24 +2228,39 @@ export class BotInstance extends EventEmitter {
    *
    * Returns true if a song actually started playing, false otherwise.
    */
-  async playNext(maxRetries = 3): Promise<boolean> {
+  async playNext(maxRetries = 3, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
     if (this.isAdvancing || !this.connected) return false;
     this.isAdvancing = true;
     let started = false;
+    let riskControlled = false;
+    const captureFailure = (failure: PlayFailure) => {
+      riskControlled = failure.code === "risk_control";
+      onFailure?.(failure);
+    };
+    const generation = this.lifecycleGeneration;
+    const unchanged = (song: QueuedSong, request: symbol | undefined) =>
+      this.connected && this.lifecycleGeneration === generation &&
+      this.queue.current() === song && this.playbackRequest === request;
     try {
       if (this.player.getState() !== "idle") this.player.stop(true);
       this.voteSkipUsers.clear();
       const next = this.queue.next();
       if (next) {
-        started = await this.resolveAndPlay(next);
+        const playback = this.resolveAndPlay(next, captureFailure);
+        const request = this.playbackRequest;
+        started = await playback;
+        if (!started && !unchanged(next, request)) return false;
         if (!started) {
-          for (let i = 0; i < maxRetries && this.connected; i++) {
+          for (let i = 0; i < maxRetries && this.connected && !riskControlled; i++) {
             const retry = this.queue.next();
             if (!retry) break;
-            if (await this.resolveAndPlay(retry)) {
+            const retryPlayback = this.resolveAndPlay(retry, captureFailure);
+            const retryRequest = this.playbackRequest;
+            if (await retryPlayback) {
               started = true;
               break;
             }
+            if (!unchanged(retry, retryRequest)) return false;
           }
         }
         if (!started) {
@@ -2190,7 +2276,10 @@ export class BotInstance extends EventEmitter {
           await this.refillFm();
           const refillNext = this.queue.next();
           if (refillNext) {
-            started = await this.resolveAndPlay(refillNext);
+            const refillPlayback = this.resolveAndPlay(refillNext, captureFailure);
+            const refillRequest = this.playbackRequest;
+            started = await refillPlayback;
+            if (!started && !unchanged(refillNext, refillRequest)) return false;
           }
           if (!started) {
             this.player.stop();

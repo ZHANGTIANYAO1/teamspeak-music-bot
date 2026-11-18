@@ -475,6 +475,7 @@ function makeResolveCtx(opts: {
     config: {},
     id: "bot1",
     voteSkipUsers: new Set<string>(),
+    queue: { current: vi.fn(() => null) },
     autoPaused: false,
     currentSourceIsSpotify: opts.currentSourceIsSpotify ?? false,
     effectiveDuration: undefined,
@@ -500,6 +501,22 @@ function spotifySong() {
     url: "",
   };
 }
+
+it("does not start a track whose URL resolved after the queue was cleared", async () => {
+  const player = makePlayer();
+  const song = { ...spotifySong(), platform: "netease" };
+  const ctx = makeResolveCtx({ controller: makeController(), player, url: "" });
+  ctx.queue.current.mockReturnValue(song);
+  ctx.getProviderFor.mockReturnValue({
+    getSongUrl: async () => {
+      ctx.queue.current.mockReturnValue(null);
+      return { url: "https://example.com/track" };
+    },
+  });
+
+  expect(await resolveAndPlay.call(ctx, song)).toBe(false);
+  expect(player.play).not.toHaveBeenCalled();
+});
 
 describe("BotInstance.resolveAndPlay — Spotify routing (C4)", () => {
   it("routes a spotify song to controller.playTrack + player.playPcmStream, not player.play", async () => {
