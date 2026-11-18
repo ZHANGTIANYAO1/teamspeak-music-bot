@@ -62,6 +62,10 @@ export type PlayFailureCode =
   | "no_copyright"
   /** The track exists, but this quality level is not ours to serve. */
   | "quality_denied"
+  /** The upstream HTTP request failed or the expected API was unreachable. */
+  | "upstream_request_failed"
+  /** The music service explicitly asked the user to complete verification. */
+  | "provider_verification_required"
   /** 200 with no URL and nothing that explains why. */
   | "unknown";
 
@@ -71,7 +75,7 @@ export interface PlayFailure {
   code: PlayFailureCode;
   /** One short line in the UI's language — safe to render as-is. */
   message: string;
-  /** Raw upstream fields (fee / payed / code / level). Logs only, never shown. */
+  /** Selected non-secret diagnostic fields. Logs only, never shown directly. */
   upstream?: Record<string, unknown>;
 }
 
@@ -90,6 +94,30 @@ export class SongUrlUnavailable extends Error {
     this.name = "SongUrlUnavailable";
     this.failure = failure;
   }
+}
+
+/** Preserve typed status for troubleshooting without forwarding request or response data. */
+export function playbackRequestFailure(
+  platform: "qq" | "kugou",
+  songId: string,
+  error: unknown,
+): SongUrlUnavailable {
+  const raw = error as { code?: unknown; response?: { status?: unknown } } | null;
+  const status = raw?.response?.status;
+  const httpStatus = typeof status === "number" && Number.isInteger(status) && status >= 100 && status < 600
+    ? status : undefined;
+  const name = platform === "qq" ? "QQ 音乐 API" : "酷狗";
+  const message = httpStatus ? `${name}播放请求失败（HTTP ${httpStatus}）`
+    : raw?.code === "ECONNREFUSED" && platform === "qq" ? "无法连接 QQ 音乐 API，请检查服务启动与端口"
+    : raw?.code === "ECONNABORTED" || raw?.code === "ETIMEDOUT" ? `${name}播放请求超时`
+    : `${name}播放请求失败，请检查服务与网络连接`;
+  return new SongUrlUnavailable({
+    platform,
+    songId,
+    code: "upstream_request_failed",
+    message,
+    upstream: httpStatus ? { httpStatus } : undefined,
+  });
 }
 
 export function toPlayFailure(platform: string, songId: string, error: unknown): PlayFailure {

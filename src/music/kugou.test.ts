@@ -2,6 +2,31 @@ import { describe, it, expect, vi } from "vitest";
 import { mapKugouSong, mapKugouSongs, mapKugouAlbums, mapKugouPlaylist, mapKugouPlaylists, krcToLrc, KugouProvider } from "./kugou.js";
 import { parseLyrics } from "./netease.js";
 
+describe("KugouProvider.getSongUrl failure diagnostics", () => {
+  const id = "b3a52a7a958bf0aed0efbba2e9a818b7|32100650|966846";
+  const provider = () => {
+    const p = new KugouProvider();
+    p.setCookie("dfid=test-device");
+    return { bot: p, http: p as unknown as { request: (...args: unknown[]) => Promise<unknown> } };
+  };
+
+  it("distinguishes a provider verification response from a missing stream", async () => {
+    const { bot, http } = provider();
+    vi.spyOn(http, "request").mockResolvedValue({ status: 0, errcode: 20028 });
+    await expect(bot.getSongUrl(id)).rejects.toMatchObject({
+      failure: { code: "provider_verification_required", upstream: { code: 20028 } },
+    });
+  });
+
+  it("carries only safe status fields on a failed HTTP request", async () => {
+    const { bot, http } = provider();
+    vi.spyOn(http, "request").mockRejectedValue({ response: { status: 503, data: { hidden: "test-cookie" } } });
+    await expect(bot.getSongUrl(id)).rejects.toMatchObject({
+      failure: { code: "upstream_request_failed", upstream: { httpStatus: 503 } },
+    });
+  });
+});
+
 describe("mapKugouSongs", () => {
   it("maps the mobile-search song shape to a Song with platform 'kugou'", () => {
     // Shape captured live from mobilecdn.kugou.com/api/v3/search/song.

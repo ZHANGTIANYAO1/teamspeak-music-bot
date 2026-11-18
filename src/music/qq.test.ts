@@ -10,6 +10,47 @@ vi.mock("axios", () => ({
 
 import { mapQqAlbums, mapQqArtists, mapQqSongs, parseQqTrial, QQMusicProvider } from "./qq.js";
 
+describe("QQ playback sidecar contract", () => {
+  beforeEach(() => {
+    mockGet.mockReset();
+  });
+
+  it("maps app playback quality to the installed sidecar format", async () => {
+    const provider = new QQMusicProvider("http://127.0.0.1:3200");
+    provider.setQuality("lossless");
+    mockGet.mockResolvedValue({ data: { data: { playUrl: { abc: { url: "https://example.com/audio" } } } } });
+    await expect(provider.getSongUrl("abc")).resolves.toMatchObject({ url: "https://example.com/audio" });
+    expect(mockGet).toHaveBeenLastCalledWith("/getMusicPlay", { params: expect.objectContaining({ songmid: "abc", quality: "flac" }) });
+  });
+
+  it("resolves a numeric ID to a MID before asking the sidecar for playback", async () => {
+    const provider = new QQMusicProvider("http://127.0.0.1:3200");
+    mockGet.mockResolvedValueOnce({ data: { response: { songinfo: { data: { track_info: { mid: "abc" } } } } } });
+    mockGet.mockResolvedValueOnce({ data: { data: { playUrl: { abc: { url: "https://example.com/audio" } } } } });
+    await expect(provider.getSongUrl("12345")).resolves.toMatchObject({ url: "https://example.com/audio" });
+    expect(mockGet).toHaveBeenNthCalledWith(1, "/getSongInfo", { params: expect.objectContaining({ songid: "12345" }) });
+    expect(mockGet).toHaveBeenNthCalledWith(2, "/getMusicPlay", { params: expect.objectContaining({ songmid: "abc" }) });
+  });
+
+  it("separates a broken sidecar from a track without a URL", async () => {
+    const provider = new QQMusicProvider("http://127.0.0.1:3200");
+    mockGet.mockRejectedValue({ response: { status: 502, data: { hidden: "test-cookie" } } });
+    await expect(provider.getSongUrl("abc")).rejects.toMatchObject({
+      failure: { code: "upstream_request_failed", upstream: { httpStatus: 502 } },
+    });
+    expect(mockGet).toHaveBeenCalledOnce();
+  });
+
+  it("keeps tracks playable at a supported fallback quality during batch preflight", async () => {
+    const provider = new QQMusicProvider("http://127.0.0.1:3200");
+    provider.setQuality("exhigh");
+    mockGet.mockResolvedValueOnce({ data: { data: { playUrl: { abc: { url: "https://example.com/audio1" }, def: { url: "" } } } } });
+    mockGet.mockResolvedValueOnce({ data: { data: { playUrl: { def: { url: "https://example.com/audio2" } } } } });
+    await expect(provider.getPlayableSongIds(["abc", "def"])).resolves.toEqual(new Set(["abc", "def"]));
+    expect(mockGet).toHaveBeenNthCalledWith(2, "/getMusicPlay", { params: expect.objectContaining({ songmid: "def", quality: "128" }) });
+  });
+});
+
 describe("QQ adapter", () => {
   it("mapQqSongs maps QQMusicApi-style song entries", () => {
     const out = mapQqSongs([

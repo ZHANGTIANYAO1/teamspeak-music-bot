@@ -1,5 +1,6 @@
 import { normalizeCookie } from "./cookie-normalize.js";
 import axios, { type AxiosInstance } from "axios";
+import { playbackRequestFailure, SongUrlUnavailable } from "./provider.js";
 import type {
   MusicProvider,
   Song,
@@ -44,6 +45,25 @@ const qqFavApi = axios.create({
   timeout: 10000,
   headers: { referer: "https://y.qq.com/" },
 });
+
+/** Formats supported by @sansenjian/qq-music-api 2.4's /getMusicPlay route. */
+function qqPlaybackQuality(quality: string): string {
+  switch (quality) {
+    case "exhigh": return "320";
+    case "lossless":
+    case "hires":
+    case "jymaster": return "flac";
+    case "320":
+    case "flac":
+    case "ape":
+    case "m4a": return quality;
+    default: return "128";
+  }
+}
+
+function isQqNumericId(value: string): boolean {
+  return /^\d+$/.test(value);
+}
 
 /** True when a search_type=2 album search entry really belongs to this singer.
  *  QQ fills singerMID for most albums; older entries only carry singer_list. */
@@ -194,6 +214,13 @@ export class QQMusicProvider implements MusicProvider {
 
   getQuality(): string {
     return this.quality;
+  }
+
+  getFallbackQualities(): string[] {
+    const primary = qqPlaybackQuality(this.quality);
+    if (primary === "flac" || primary === "ape") return ["320", "128"];
+    if (primary === "320") return ["128"];
+    return [];
   }
 
   private get cookieParams(): Record<string, string> {
@@ -358,25 +385,29 @@ export class QQMusicProvider implements MusicProvider {
   }
 
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
-    try {
-      const res = await this.api.get("/getMusicPlay", {
-        params: { songmid: songId, quality: quality ?? this.quality, ...this.cookieParams },
-      });
-      const playUrl = res.data?.data?.playUrl?.[songId];
-      if (playUrl?.url) return { url: playUrl.url, trialDuration: parseQqTrial(playUrl) };
-    } catch {
-      // try with songid
-      try {
-        const res = await this.api.get("/getMusicPlay", {
-          params: { songid: songId, quality: quality ?? this.quality, ...this.cookieParams },
-        });
-        const playUrl = res.data?.data?.playUrl?.[songId];
-        if (playUrl?.url) return { url: playUrl.url, trialDuration: parseQqTrial(playUrl) };
-      } catch {
-        // ignore
-      }
+    // The sidecar's play endpoint only reads songmid. Old queues and explicit
+    // ID requests can carry numeric IDs, which the metadata endpoint resolves.
+    const songmid = isQqNumericId(songId) ? (await this.getSongDetail(songId))?.id : songId;
+    if (!songmid || isQqNumericId(songmid)) {
+      throw new SongUrlUnavailable({ platform: this.platform, songId, code: "unknown", message: "QQ 音乐未返回该曲目的 MID" });
     }
-    return null;
+    const format = qqPlaybackQuality(quality ?? this.quality);
+    let response;
+    try {
+      response = await this.api.get("/getMusicPlay", {
+        params: { songmid, quality: format, ...this.cookieParams },
+      });
+    } catch (error) {
+      throw playbackRequestFailure(this.platform, songId, error);
+    }
+    const playUrl = response.data?.data?.playUrl?.[songmid];
+    if (typeof playUrl?.url === "string" && playUrl.url) {
+      return { url: playUrl.url, trialDuration: parseQqTrial(playUrl) };
+    }
+    throw new SongUrlUnavailable({
+      platform: this.platform, songId, code: "unknown",
+      message: `QQ 音乐未返回播放地址（${format}）`,
+    });
   }
 
   /**
@@ -390,37 +421,39 @@ export class QQMusicProvider implements MusicProvider {
    * the URL well under typical 8KB query-string limits and to keep per-
    * request latency bounded (~2-3s per 100 mids).
    *
-   * Returns:
-   *   - non-null Set: authoritative result. Empty Set means all songs are
-   *     unplayable; non-empty means filter to those mids.
-   *   - null: every chunk failed. Caller should fall back to sequential
-   *     retry rather than treating as "all unplayable".
+   * Check lower configured formats for MIDs missing from the first result.
+   * Return null on an incomplete response so the caller can resolve tracks
+   * normally instead of discarding unverified entries.
    */
   async getPlayableSongIds(songIds: string[]): Promise<Set<string> | null> {
     if (songIds.length === 0) return new Set();
+    if (songIds.some(isQqNumericId)) return null;
 
     const CHUNK = 100;          // ~14 chars/mid * 100 + commas ≈ 1.5KB
     const playable = new Set<string>();
-    let allChunksFailed = true;
+    const formats = [qqPlaybackQuality(this.quality), ...this.getFallbackQualities()];
     for (let i = 0; i < songIds.length; i += CHUNK) {
-      const slice = songIds.slice(i, i + CHUNK);
-      try {
-        const res = await this.api.get("/getMusicPlay", {
-          params: { songmid: slice.join(","), quality: this.quality, ...this.cookieParams },
-        });
-        const playUrlMap: Record<string, { url?: string }> | undefined =
-          res.data?.data?.playUrl;
-        if (!playUrlMap) continue; // chunk-level failure, try next
-        allChunksFailed = false;
-        for (const [mid, info] of Object.entries(playUrlMap)) {
-          if (info?.url) playable.add(mid);
+      let remaining = songIds.slice(i, i + CHUNK);
+      for (const quality of formats) {
+        try {
+          const res = await this.api.get("/getMusicPlay", {
+            params: { songmid: remaining.join(","), quality, ...this.cookieParams },
+          });
+          const playUrlMap: Record<string, { url?: string }> | undefined = res.data?.data?.playUrl;
+          if (!playUrlMap || remaining.some(mid => !Object.hasOwn(playUrlMap, mid))) return null;
+          remaining = remaining.filter(mid => {
+            const url = playUrlMap[mid]?.url;
+            if (typeof url !== "string" || !url) return true;
+            playable.add(mid);
+            return false;
+          });
+          if (remaining.length === 0) break;
+        } catch {
+          return null;
         }
-      } catch {
-        // chunk-level failure — keep going so a transient error on one
-        // chunk doesn't poison the whole batch.
       }
     }
-    return allChunksFailed ? null : playable;
+    return playable;
   }
 
   async getSongDetail(songId: string): Promise<Song | null> {
@@ -432,9 +465,9 @@ export class QQMusicProvider implements MusicProvider {
     // stub is sufficient to let /play-by-id and /add-by-id flows succeed.
     try {
       const res = await this.api.get("/getSongInfo", {
-        params: { songmid: songId, ...this.cookieParams },
+        params: { ...(isQqNumericId(songId) ? { songid: songId } : { songmid: songId }), ...this.cookieParams },
       });
-      const s = res.data?.response?.data;
+      const s = res.data?.response?.songinfo?.data ?? res.data?.response?.data;
       if (s && s.track_info) {
         const t = s.track_info;
         return {
@@ -483,11 +516,14 @@ export class QQMusicProvider implements MusicProvider {
    * caller can fall back to the minimal stub. */
   private async fetchSongDetailViaMusicu(songId: string): Promise<Song | null> {
     try {
+      const numeric = isQqNumericId(songId);
+      const song_id = Number(songId);
+      if (numeric && (!Number.isSafeInteger(song_id) || song_id < 1)) return null;
       const reqData = JSON.stringify({
         req_0: {
           module: "music.pf_song_detail_svr",
           method: "get_song_detail_yqq",
-          param: { song_mid: songId, song_type: 0 },
+          param: { ...(numeric ? { song_id } : { song_mid: songId }), song_type: 0 },
         },
       });
       const res = await qqMusicuApi.get("/cgi-bin/musicu.fcg", {
