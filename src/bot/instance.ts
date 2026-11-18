@@ -558,12 +558,10 @@ export class BotInstance extends EventEmitter {
     // React near-instantly to channel membership changes. The 30s idle
     // poller remains the fallback if any of these events are missed.
     //
-    // clientEnter additionally arms auto-RESUME directly from the event,
-    // because the occupancy query (clientlist) times out whenever another
-    // client is present — i.e. exactly when a listener returns — so it cannot
-    // be used to confirm the return. See _resumeIfReturning().
-    this.tsClient.on("clientEnter", () => {
-      this._resumeIfReturning();
+    // Enter and move events can confirm a listener's arrival even if the
+    // occupancy query fails. Only arrivals in this channel can resume playback.
+    this.tsClient.on("clientEnter", (event: { id: number; channelID: bigint }) => {
+      this._resumeIfReturning(event.id, event.channelID);
       void this.refreshOccupancy();
     });
     this.tsClient.on("clientLeave", (event: { id: number }) => {
@@ -583,6 +581,7 @@ export class BotInstance extends EventEmitter {
         this.openProtocol?.scheduleAnnounce();
       } else {
         this.voiceDucking.removeSpeaker(event.id);
+        this._resumeIfReturning(event.id, event.targetChannelID);
       }
       void this.refreshOccupancy();
     });
@@ -628,20 +627,10 @@ export class BotInstance extends EventEmitter {
     }
   }
 
-  /**
-   * Resume playback when a listener returns after an auto-pause, driven by the
-   * clientEnter push event rather than a (timing-out) occupancy query.
-   *
-   * We only auto-pause while alone on the server, so `autoPaused` is a reliable
-   * "paused because empty" flag; any client appearing while it's set means a
-   * listener returned. Delegating to handleOccupancy(1) routes through
-   * decideOccupancyAction (resume iff autoPaused && paused) and also cancels the
-   * idle-disconnect timer. This path NEVER pauses — userCount is always > 0 —
-   * so a spurious or unrelated enter can only (harmlessly) resume, never stop
-   * playback. Pause remains exclusively on the authoritative clientlist path.
-   */
-  private _resumeIfReturning(): void {
-    if (!this.connected) return;
+  /** Resume an automatic pause after a listener arrives in the bot's channel. */
+  private _resumeIfReturning(listenerId: number, channelId: bigint): void {
+    if (!this.connected || listenerId <= 0 || listenerId === this.tsClient.getClientId() ||
+        channelId === 0n || channelId !== this.tsClient.getChannelId()) return;
     if (shouldResumeOnReturn(this.autoPaused, this.player.getState())) {
       this.handleOccupancy(1);
     }

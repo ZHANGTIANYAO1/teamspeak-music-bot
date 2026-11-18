@@ -42,22 +42,8 @@ export function decideOccupancyAction(
 }
 
 /**
- * Whether a client-presence push event (a `clientEnter`) should trigger an
- * auto-resume, WITHOUT consulting a clientlist query.
- *
- * Why event-driven: the full-client `clientlist`/`channellist` commands time
- * out whenever ≥2 clients are connected to the server (a library limitation) —
- * which is exactly the moment a listener returns. So occupancy cannot be
- * re-queried to confirm the return; we must act on the push event itself.
- * This is sound because the bot only ever auto-pauses while it is alone on the
- * server (the sole state in which the occupancy query succeeds and pause
- * fires). Therefore, while `autoPaused` is true, the only way occupancy can
- * return is a fresh connection — delivered reliably as `clientEnter`.
- *
- * Gating on `autoPaused` (not merely "paused") guarantees we never revive a
- * track the user paused by hand, and makes the bot's own `clientEnter` at
- * connect a no-op (autoPaused is cleared to false on connect). This predicate
- * NEVER pauses — pause stays on the authoritative clientlist path.
+ * Whether a confirmed arrival in the bot's channel should resume playback.
+ * An arrival does not resume a pause requested manually.
  */
 export function shouldResumeOnReturn(
   autoPaused: boolean,

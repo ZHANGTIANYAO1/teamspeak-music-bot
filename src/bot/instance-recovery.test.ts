@@ -40,6 +40,7 @@ function makeBot() {
   const tsClient = new EventEmitter() as any;
   tsClient.getClientsInChannel = vi.fn(async () => [{ id: 1 }, { id: 2 }]);
   tsClient.getClientId = () => 1;
+  tsClient.getChannelId = () => 3n;
   tsClient.sendVoiceData = vi.fn();
   tsClient.connect = vi.fn(async () => { tsClient.emit("connected"); });
   tsClient.disconnect = vi.fn(() => { tsClient.emit("disconnected"); });
@@ -330,13 +331,35 @@ describe("occupancy responses belong to the current request and connection", () 
     const older = deferred<any[]>();
     bot.tsClient.getClientsInChannel.mockReturnValueOnce(older.promise).mockResolvedValueOnce([]);
     const first = bot.refreshOccupancy();
-    bot.tsClient.emit(event, { id: 2, targetChannelID: 3n });
+    bot.tsClient.emit(event, { id: 2, channelID: 3n, targetChannelID: 3n });
     await flush();
     older.resolve([{ id: 1 }]);
     await first;
     expect(bot.player.getState()).toBe("playing");
     expect(bot.autoPaused).toBe(false);
     expect(bot.idleTimer).toBeNull();
+  });
+
+  it("does not resume for a client entering another channel", async () => {
+    const bot = makeBot();
+    bot.player.state = "paused";
+    bot.autoPaused = true;
+    bot.tsClient.getClientsInChannel.mockResolvedValue([]);
+    bot.tsClient.emit("clientEnter", { id: 2, channelID: 4n });
+    await flush();
+    expect(bot.player.getState()).toBe("paused");
+    expect(bot.autoPaused).toBe(true);
+  });
+
+  it("resumes when a listener moves into the channel and the occupancy query fails", async () => {
+    const bot = makeBot();
+    bot.player.state = "paused";
+    bot.autoPaused = true;
+    bot.tsClient.getClientsInChannel.mockResolvedValue([]);
+    bot.tsClient.emit("clientMoved", { id: 2, targetChannelID: 3n });
+    await flush();
+    expect(bot.player.getState()).toBe("playing");
+    expect(bot.autoPaused).toBe(false);
   });
 
   it("a listener's return cannot be undone by an earlier alone response", async () => {
@@ -346,7 +369,7 @@ describe("occupancy responses belong to the current request and connection", () 
     const older = deferred<any[]>(), newer = deferred<any[]>();
     bot.tsClient.getClientsInChannel.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
     const first = bot.refreshOccupancy();
-    bot.tsClient.emit("clientEnter");
+    bot.tsClient.emit("clientEnter", { id: 2, channelID: 3n });
     expect(bot.player.getState()).toBe("playing");
     older.resolve([{ id: 1 }]);
     await first;

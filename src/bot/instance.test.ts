@@ -2232,6 +2232,7 @@ describe("BotInstance — OpenProtocol & command routing", () => {
       sweepLocalAudio: vi.fn(),
       emit: vi.fn(),
       refreshOccupancy: vi.fn(async () => {}),
+      _resumeIfReturning: vi.fn(),
       profileManager: { onChannelMoved: vi.fn(async () => {}) },
       logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     } as Record<string, any>;
