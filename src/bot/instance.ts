@@ -59,6 +59,13 @@ import {
 /** Reply sent when a non-admin invokes an admin-only chat command. */
 export const COMMAND_DENIED_MESSAGE = "⛔ 需要管理员权限（该命令仅限管理员服务器组）";
 
+async function startTrackForCommand(bot: BotInstance, song: QueuedSong | null): Promise<string | undefined> {
+  if (!song) return "No track to play";
+  let reason: string | undefined;
+  const started = await bot.resolveAndPlay(song, failure => { reason = failure.message; });
+  if (!started) return reason ? `Cannot play: ${song.name} — ${reason}` : `Cannot play: ${song.name}`;
+}
+
 /** Maps the persisted / command-line play-mode string to the PlayMode enum.
  *  Shared by the !mode command and the restart-restore path (#125). */
 const PLAY_MODE_BY_VALUE: Record<string, PlayMode> = {
@@ -1600,9 +1607,9 @@ export class BotInstance extends EventEmitter {
     if (wasIdle) {
       this.queue.playAt(this.queue.size() - 1);
       this.player.resetFailures();
-      await this.resolveAndPlay(this.queue.current()!);
+      const failure = await startTrackForCommand(this, this.queue.current());
       this.emit("stateChange");
-      return `Now playing: ${s.name} - ${s.artist}`;
+      return failure ?? `Now playing: ${s.name} - ${s.artist}`;
     }
 
     this.emit("stateChange");
@@ -1630,10 +1637,9 @@ export class BotInstance extends EventEmitter {
     if (wasIdle) {
       this.queue.playAt(insertedAt);
       this.player.resetFailures();
-      const ok = await this.resolveAndPlay(this.queue.current()!);
+      const failure = await startTrackForCommand(this, this.queue.current());
       this.emit("stateChange");
-      if (!ok) return `Cannot play: ${s.name}`;
-      return `Now playing: ${s.name} - ${s.artist}`;
+      return failure ?? `Now playing: ${s.name} - ${s.artist}`;
     }
 
     this.emit("stateChange");
@@ -1892,10 +1898,10 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    return failure ?? `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
   }
 
   private async cmdAlbum(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1929,10 +1935,10 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    return failure ?? `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
   }
 
   private async cmdFm(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1970,11 +1976,11 @@ export class BotInstance extends EventEmitter {
     this.player.resetFailures();
 
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
     const label = provider.platform === "qq" ? "QQ Radar FM" : "Personal FM";
-    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}`;
+    return failure ?? `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}`;
   }
 
   private async cmdArtist(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -2004,10 +2010,10 @@ export class BotInstance extends EventEmitter {
     this.player.resetFailures();
 
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}`;
+    return failure ?? `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}`;
   }
 
   private async refillFm(): Promise<void> {

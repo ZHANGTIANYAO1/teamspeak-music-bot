@@ -210,10 +210,7 @@ export function createPlayerRouter(
       const resolveFmProvider = () => fmProvider(scope, bot, platform);
       const message = await bot.startFm(resolveFmProvider(), requesterName(req), resolveFmProvider);
       res.json({
-        ok:
-          !message.startsWith("No FM songs") &&
-          !message.includes("not available") &&
-          !message.includes("not connected"),
+        ok: message.startsWith("Personal FM started") || message.startsWith("QQ Radar FM started"),
         message,
       });
     } catch (err) {

@@ -1710,6 +1710,12 @@ describe("cmdPlaylist with a playlist link (#160)", () => {
     expect(ctx.providers.netease.search).not.toHaveBeenCalled();
   });
 
+  it("reports a refused first track instead of announcing playback", async () => {
+    const ctx = makeCtx();
+    ctx.resolveAndPlay.mockResolvedValue(false);
+    expect(await cmdPlaylist.call(ctx, cmd("2829883282"))).toBe("Cannot play: Song");
+  });
+
   it("checks the link's platform is enabled", async () => {
     const ctx = makeCtx();
     ctx.assertProviderEnabled.mockImplementation(() => { throw new Error("音源未启用：qq"); });
