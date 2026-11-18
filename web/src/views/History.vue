@@ -6,6 +6,7 @@
     </button>
     <h1 class="page-title">播放历史</h1>
 
+    <p v-if="error" class="history-error" role="alert">{{ error }}</p>
     <div v-if="loading" class="loading">加载中...</div>
 
     <div v-else-if="history.length === 0" class="empty">
@@ -13,17 +14,17 @@
     </div>
 
     <template v-else>
-      <div class="toolbar">
+      <div v-if="canDelete" class="toolbar">
         <label class="select-all">
-          <input type="checkbox" :checked="allSelected" @change="toggleAll" />
+          <input type="checkbox" :checked="allSelected" :disabled="deleting" @change="toggleAll" />
           全选
         </label>
         <span class="spacer" />
-        <button class="tool-btn" :disabled="selected.size === 0" @click="deleteSelected">
+        <button class="tool-btn" :disabled="deleting || selected.size === 0" @click="deleteSelected">
           <Icon icon="mdi:delete-outline" />
           删除选中{{ selected.size ? `（${selected.size}）` : '' }}
         </button>
-        <button class="tool-btn danger" :disabled="history.length === 0" @click="clearAll">
+        <button class="tool-btn danger" :disabled="deleting" @click="clearAll">
           <Icon icon="mdi:delete-sweep-outline" />
           清空全部
         </button>
@@ -37,9 +38,12 @@
           :class="{ selected: selected.has(song.rowId) }"
         >
           <input
+            v-if="canDelete"
             type="checkbox"
             class="row-check"
+            :aria-label="`选择 ${song.name}`"
             :checked="selected.has(song.rowId)"
+            :disabled="deleting"
             @change="toggle(song.rowId)"
           />
           <SongCard
@@ -51,7 +55,14 @@
             @playNext="store.playNextSong(song)"
             @add="store.addSong(song)"
           />
-          <button class="row-del" title="删除这条记录" @click.stop="deleteOne(song.rowId)">
+          <button
+            v-if="canDelete"
+            class="row-del"
+            title="删除这条记录"
+            :aria-label="`删除 ${song.name} 的播放记录`"
+            :disabled="deleting"
+            @click.stop="deleteHistory([song.rowId])"
+          >
             <Icon icon="mdi:close" />
           </button>
         </div>
@@ -61,13 +72,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { Icon } from '@iconify/vue';
 import axios from 'axios';
 import { usePlayerStore } from '../stores/player.js';
+import { useSession } from '../composables/useSession.js';
 import SongCard from '../components/SongCard.vue';
 
 const store = usePlayerStore();
+const { can, guestCan } = useSession();
 
 import { Song } from '../stores/player.js';
 
@@ -76,7 +89,11 @@ type HistorySong = Song & { rowId: number };
 
 const history = ref<HistorySong[]>([]);
 const loading = ref(true);
+const deleting = ref(false);
+const error = ref('');
 const selected = ref(new Set<number>());
+const canDelete = computed(() => can('player.queue') || guestCan('removeClear'));
+let historyVersion = 0;
 
 const allSelected = computed(
   () => history.value.length > 0 && selected.value.size === history.value.length
@@ -95,57 +112,63 @@ function toggleAll() {
     : new Set(history.value.map((s) => s.rowId));
 }
 
-async function deleteOne(rowId: number) {
-  if (!store.activeBotId) return;
+async function deleteHistory(ids: number[] | null) {
+  const botId = store.activeBotId;
+  if (!botId || !canDelete.value || deleting.value) return;
+  const version = historyVersion;
+  const url = `/api/player/${encodeURIComponent(botId)}/history`;
+  deleting.value = true;
+  error.value = '';
   try {
-    await axios.delete(`/api/player/${store.activeBotId}/history/${rowId}`);
-    history.value = history.value.filter((s) => s.rowId !== rowId);
-    if (selected.value.has(rowId)) toggle(rowId);
+    if (ids?.length === 1) {
+      await axios.delete(`${url}/${ids[0]}`);
+    } else {
+      await axios.delete(url, { data: ids ? { ids } : { all: true } });
+    }
+    if (version !== historyVersion) return;
+    const removed = new Set(ids);
+    history.value = ids ? history.value.filter((song) => !removed.has(song.rowId)) : [];
+    selected.value = ids ? new Set([...selected.value].filter((id) => !removed.has(id))) : new Set();
   } catch {
-    // Keep the row when the request fails; the list stays consistent with the server.
+    if (version === historyVersion) error.value = '删除播放记录失败，请重试。';
+  } finally {
+    if (version === historyVersion) deleting.value = false;
   }
 }
 
-async function deleteSelected() {
-  if (!store.activeBotId || selected.value.size === 0) return;
-  const ids = Array.from(selected.value);
-  try {
-    await axios.delete(`/api/player/${store.activeBotId}/history`, { data: { ids } });
-    const drop = new Set(ids);
-    history.value = history.value.filter((s) => !drop.has(s.rowId));
-    selected.value = new Set<number>();
-  } catch {
-    // Leave the selection in place so the user can retry.
-  }
+function deleteSelected() {
+  if (selected.value.size) void deleteHistory([...selected.value]);
 }
 
-async function clearAll() {
-  if (!store.activeBotId) return;
-  if (!window.confirm('确定清空全部播放历史吗？此操作不可恢复。')) return;
-  try {
-    await axios.delete(`/api/player/${store.activeBotId}/history`, { data: { all: true } });
-    history.value = [];
-    selected.value = new Set<number>();
-  } catch {
-    // No optimistic clear on failure.
-  }
+function clearAll() {
+  if (window.confirm('确定清空全部播放历史吗？此操作不可恢复。')) void deleteHistory(null);
 }
+
+watch(() => store.activeBotId, async (botId, _previous, onCleanup) => {
+  historyVersion++;
+  history.value = [];
+  selected.value = new Set();
+  deleting.value = false;
+  error.value = '';
+  loading.value = !!botId;
+  if (!botId) return;
+
+  const controller = new AbortController();
+  onCleanup(() => controller.abort());
+  try {
+    const { data } = await axios.get(`/api/player/${encodeURIComponent(botId)}/history`, { signal: controller.signal });
+    if (!controller.signal.aborted) history.value = data.history;
+  } catch {
+    if (!controller.signal.aborted) error.value = '加载播放历史失败。';
+  } finally {
+    if (!controller.signal.aborted) loading.value = false;
+  }
+}, { immediate: true, flush: 'sync' });
 
 onMounted(async () => {
   if (!store.activeBotId) {
     await store.fetchBots();
   }
-
-  if (store.activeBotId) {
-    try {
-      const res = await axios.get(`/api/player/${store.activeBotId}/history`);
-      history.value = res.data.history;
-    } catch {
-      // Ignore if API not ready
-    }
-  }
-
-  loading.value = false;
 });
 </script>
 
@@ -165,6 +188,11 @@ onMounted(async () => {
   font-size: 28px;
   font-weight: 800;
   margin-bottom: 24px;
+}
+
+.history-error {
+  color: var(--text-secondary);
+  margin-bottom: 12px;
 }
 
 .toolbar {
@@ -231,15 +259,13 @@ onMounted(async () => {
     display: flex;
     align-items: center;
     padding: 4px;
-    opacity: 0;
     color: var(--text-tertiary);
     border-radius: var(--radius-sm);
     transition: all var(--transition-fast);
 
-    &:hover { color: #f2555a; opacity: 1; }
+    &:hover, &:focus-visible { color: #f2555a; }
+    &:disabled { opacity: 0.4; cursor: not-allowed; }
   }
-
-  &:hover .row-del { opacity: 1; }
 }
 
 .loading {

@@ -12,6 +12,11 @@ import { supportsPersonalLogin } from "./personal-music.js";
  *  against a pathological catalogue (and against an upstream paging bug). */
 const MAX_ARTIST_QUEUE = 500;
 const ARTIST_QUEUE_PAGE = 100;
+const MAX_HISTORY_DELETE_BATCH = 500;
+
+function isHistoryRowId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
 
 /** Walks every page of an artist's catalogue (best-first, de-duplicated). */
 export async function collectArtistSongs(
@@ -830,8 +835,8 @@ export function createPlayerRouter(
         res.status(404).json({ error: "history unavailable" });
         return;
       }
-      const rowId = Number.parseInt(req.params.rowId, 10);
-      if (!Number.isInteger(rowId) || rowId <= 0) {
+      const rowId = Number(req.params.rowId);
+      if (!/^\d+$/.test(req.params.rowId) || !isHistoryRowId(rowId)) {
         res.status(400).json({ error: "invalid rowId" });
         return;
       }
@@ -850,20 +855,18 @@ export function createPlayerRouter(
         return;
       }
       const body = (req.body ?? {}) as { ids?: unknown; all?: unknown };
-      if (body.all === true) {
+      if (body.all === true && body.ids === undefined) {
         const deleted = database.clearPlayHistory(req.params.botId);
         res.json({ deleted });
         return;
       }
-      const ids = Array.isArray(body.ids)
-        ? body.ids.filter((v): v is number => Number.isInteger(v) && (v as number) > 0)
-        : [];
-      if (ids.length === 0) {
-        res.status(400).json({ error: "ids[] or all:true required" });
+      const { ids } = body;
+      if (body.all !== undefined || !Array.isArray(ids) || ids.length === 0 ||
+          ids.length > MAX_HISTORY_DELETE_BATCH || !ids.every(isHistoryRowId)) {
+        res.status(400).json({ error: "Provide 1 to 500 history IDs or all:true" });
         return;
       }
-      // Cap the batch so a hostile payload cannot lock the DB for long.
-      const deleted = database.deletePlayHistory(req.params.botId, ids.slice(0, 500));
+      const deleted = database.deletePlayHistory(req.params.botId, ids);
       res.json({ deleted });
     }
   );
