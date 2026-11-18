@@ -583,7 +583,7 @@ teamspeak-music-bot/
 | **后端框架** | Express 4, WebSocket (ws) |
 | **数据库** | better-sqlite3 (SQLite) |
 | **音频处理** | FFmpeg (ffmpeg-static 内置), @discordjs/opus |
-| **TS 协议** | @honeybbq/teamspeak-client（完整客户端协议）+ 自研 TS6 协议适配层 |
+| **TS 协议** | @honeybbq/teamspeak（TS3 / TS6 完整客户端协议，支持 OpenProtocol v1） |
 | **Jellyfin** | Jellyfin REST API（可选音源，直连，无额外 npm 依赖） |
 | **网易云 API** | NeteaseCloudMusicApi |
 | **QQ 音乐 API** | @sansenjian/qq-music-api（锁定 `~2.4.0`，需 Node ≥ 20.17） |
@@ -1246,7 +1246,7 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 | [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) | 网易云音乐 API 项目 |
 | [QQMusicApi](https://github.com/jsososo/QQMusicApi) | QQ 音乐 API 项目 |
 | [@sansenjian/qq-music-api](https://github.com/sansenjian/qq-music-api) | QQ 音乐 API 活跃维护版本 |
-| [@honeybbq/teamspeak-client](https://www.npmjs.com/package/@honeybbq/teamspeak-client) | TS3 完整客户端协议实现 |
+| [@honeybbq/teamspeak](https://www.npmjs.com/package/@honeybbq/teamspeak) | TS3 / TS6 完整客户端协议实现 |
 | [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect) | 哔哩哔哩 API 文档 |
 | [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) | 酷狗音乐 API 参考（请求签名 / KRC 歌词解码 / 设备注册移植来源，MIT 许可） |
 

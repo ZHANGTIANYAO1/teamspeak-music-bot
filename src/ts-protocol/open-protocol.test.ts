@@ -56,6 +56,13 @@ describe("OpenProtocol payload builders", () => {
     expect(ack.command_prefix).toBeUndefined();
   });
 
+  it("advertises only playback mode values supported by the bot", () => {
+    for (const locale of ["zh", "en"] as const) {
+      expect(buildOpenProtocolCommands(locale).find(({ name }) => name === "mode")?.args)
+        .toBe("<seq|loop|random|rloop>");
+    }
+  });
+
   it("builds localized command lists adhering to field caps and <1024 byte UTF-8 limit", () => {
     for (const locale of ["zh", "en"] as const) {
       const cmds = buildOpenProtocolCommands(locale);
@@ -71,6 +78,7 @@ describe("OpenProtocol payload builders", () => {
       }
 
       const raw = buildCommandsListAckJson(locale, "!");
+      if (raw === null) throw new Error("Expected a command list for a valid prefix");
       expect(Buffer.byteLength(raw, "utf8")).toBeLessThan(MAX_PAYLOAD_BYTES);
       const parsed = JSON.parse(raw) as {
         v: number;
@@ -193,7 +201,27 @@ describe("OpenProtocolManager", () => {
     expect(sendPluginCommand).toHaveBeenCalledTimes(1);
   });
 
-  it("enforces global token bucket across peers and rolls back cooldown/token on send failure", async () => {
+  it("does not advertise command discovery with a prefix too long to send unchanged", async () => {
+    config.commandPrefix = "musicbot!!";
+    manager.scheduleAnnounce();
+    await manager.handlePluginCommand(makeCmd({
+      name: COMMANDS_PLUGIN,
+      data: JSON.stringify({ v: 1, action: "list_req" }),
+    }));
+
+    expect(sendPluginCommand).toHaveBeenCalledTimes(1);
+    const identity = JSON.parse(sendPluginCommand.mock.calls[0][1] as string);
+    expect(identity.capabilities).not.toContain("chat:slash_commands");
+  });
+
+  it("ignores inbound payloads beyond the protocol byte limit", async () => {
+    await manager.handlePluginCommand(makeCmd({
+      data: JSON.stringify({ v: 1, action: "query", padding: "中".repeat(MAX_PAYLOAD_BYTES / 2) }),
+    }));
+    expect(sendPluginCommand).not.toHaveBeenCalled();
+  });
+
+  it("enforces global and peer cooldowns when sending replies fails", async () => {
     for (let i = 1; i <= ACK_GLOBAL_BURST; i++) {
       await manager.handlePluginCommand(
         makeCmd({
@@ -230,15 +258,21 @@ describe("OpenProtocolManager", () => {
     );
     expect(sendPluginCommand).toHaveBeenCalledTimes(ACK_GLOBAL_BURST + 1);
 
-    // Because send failed, both peer-99 cooldown and global token were rolled back
-    await manager.handlePluginCommand(
-      makeCmd({
-        name: COMMANDS_PLUGIN,
-        data: JSON.stringify({ v: 1, action: "list_req" }),
-        invokerId: 99,
-        invokerUid: "peer-99",
-      }),
-    );
+    // A rejected reply still consumes the global allowance for other peers.
+    const otherRequest = makeCmd({
+      name: COMMANDS_PLUGIN,
+      data: JSON.stringify({ v: 1, action: "list_req" }),
+      invokerId: 98,
+      invokerUid: "peer-98",
+    });
+    await manager.handlePluginCommand(otherRequest);
+    expect(sendPluginCommand).toHaveBeenCalledTimes(ACK_GLOBAL_BURST + 1);
+
+    // Once a global slot refills, the original peer is still cooling down.
+    nowMs += 500;
+    await manager.handlePluginCommand({ ...otherRequest, invokerId: 99, invokerUid: "peer-99" });
+    expect(sendPluginCommand).toHaveBeenCalledTimes(ACK_GLOBAL_BURST + 1);
+    await manager.handlePluginCommand(otherRequest);
     expect(sendPluginCommand).toHaveBeenCalledTimes(ACK_GLOBAL_BURST + 2);
   });
 

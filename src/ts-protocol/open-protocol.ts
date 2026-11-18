@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { PlayMode } from "../audio/queue.js";
 import type { Logger } from "../logger.js";
 import type { PluginCommandTarget, TS3PluginCommand } from "./client.js";
 
@@ -46,7 +47,7 @@ export interface OpenProtocolIdentityPayload {
 export interface OpenProtocolCommandsListAckPayload {
   v: 1;
   action: "list_ack";
-  command_prefix?: string;
+  command_prefix: string;
   commands: OpenProtocolCommandSpec[];
 }
 
@@ -83,7 +84,7 @@ const CORE_COMMAND_CATALOG: readonly CommandCatalogEntry[] = [
   { name: "now", descZh: "当前播放", descEn: "Current track" },
   { name: "queue", descZh: "查看队列", descEn: "Show queue" },
   { name: "vol", args: "<0-100>", descZh: "调节音量", descEn: "Set volume" },
-  { name: "mode", args: "<order|loop|single|shuffle>", descZh: "切换播放模式", descEn: "Set play mode" },
+  { name: "mode", args: `<${Object.values(PlayMode).join("|")}>`, descZh: "切换播放模式", descEn: "Set play mode" },
   { name: "clear", descZh: "清空队列", descEn: "Clear queue" },
   { name: "remove", args: "<序号>", descZh: "移除指定曲目", descEn: "Remove track" },
   { name: "playlist", args: "<歌单>", descZh: "导入歌单", descEn: "Load playlist" },
@@ -95,7 +96,6 @@ const CORE_COMMAND_ARGS_EN: Readonly<Record<string, string>> = {
   add: "<query>",
   search: "<keyword>",
   vol: "<0-100>",
-  mode: "<order|loop|single|shuffle>",
   remove: "<index>",
   playlist: "<id|url>",
 };
@@ -122,9 +122,17 @@ function truncateChars(value: string, maxChars: number): string {
   return chars.slice(0, maxChars).join("");
 }
 
+function isDiscoverablePrefix(prefix: string): boolean {
+  return typeof prefix === "string"
+    && prefix.length > 0
+    && prefix.trim() === prefix
+    && truncateChars(prefix, MAX_CMD_PREFIX_CHARS) === prefix;
+}
+
 export function buildIdentityPayloadJson(
   action: "announce" | "announce_ack",
   appVersion: string = APP_VERSION,
+  commandPrefix = "!",
 ): string {
   const payload: OpenProtocolIdentityPayload = {
     v: OPEN_PROTOCOL_VERSION,
@@ -132,7 +140,7 @@ export function buildIdentityPayloadJson(
     client_type: "bot",
     app_name: truncateChars(APP_NAME, MAX_APP_META_CHARS),
     app_version: truncateChars(appVersion, MAX_APP_META_CHARS),
-    capabilities: [...BOT_CAPABILITIES],
+    capabilities: isDiscoverablePrefix(commandPrefix) ? [...BOT_CAPABILITIES] : [],
   };
 
   return JSON.stringify(payload);
@@ -155,19 +163,16 @@ export function buildOpenProtocolCommands(locale: "zh" | "en"): OpenProtocolComm
 
 export function buildCommandsListAckJson(
   locale: "zh" | "en",
-  commandPrefix?: string,
-): string {
-  const normalizedPrefix =
-    typeof commandPrefix === "string" && commandPrefix.trim().length > 0
-      ? truncateChars(commandPrefix.trim(), MAX_CMD_PREFIX_CHARS)
-      : undefined;
+  commandPrefix: string,
+): string | null {
+  if (!isDiscoverablePrefix(commandPrefix)) return null;
 
   const commands = buildOpenProtocolCommands(locale);
   while (commands.length > 0) {
     const payload: OpenProtocolCommandsListAckPayload = {
       v: OPEN_PROTOCOL_VERSION,
       action: "list_ack",
-      ...(normalizedPrefix ? { command_prefix: normalizedPrefix } : {}),
+      command_prefix: commandPrefix,
       commands,
     };
     const json = JSON.stringify(payload);
@@ -180,15 +185,9 @@ export function buildCommandsListAckJson(
   return JSON.stringify({
     v: OPEN_PROTOCOL_VERSION,
     action: "list_ack",
-    ...(normalizedPrefix ? { command_prefix: normalizedPrefix } : {}),
+    command_prefix: commandPrefix,
     commands: [],
   } satisfies OpenProtocolCommandsListAckPayload);
-}
-
-interface RateLimitToken {
-  key: string;
-  cooldownMs: number;
-  previousTimestamp: number | undefined;
 }
 
 class AckRateLimiter {
@@ -223,31 +222,22 @@ class AckRateLimiter {
     }
   }
 
-  tryAcquire(peerKey: string, actionKey: string, cooldownMs: number, nowMs: number): RateLimitToken | null {
+  tryAcquire(peerKey: string, actionKey: string, cooldownMs: number, nowMs: number): boolean {
     this.prune(nowMs);
     const key = `${peerKey}:${actionKey}`;
     const prev = this.lastSent.get(key);
     if (prev !== undefined && nowMs - prev < cooldownMs) {
-      return null;
+      return false;
     }
 
     this.refill(nowMs);
     if (this.tokens < 1) {
-      return null;
+      return false;
     }
 
     this.tokens -= 1;
     this.lastSent.set(key, nowMs);
-    return { key, cooldownMs, previousTimestamp: prev };
-  }
-
-  rollback(token: RateLimitToken): void {
-    this.tokens = Math.min(ACK_GLOBAL_BURST, this.tokens + 1);
-    if (token.previousTimestamp === undefined) {
-      this.lastSent.delete(token.key);
-    } else {
-      this.lastSent.set(token.key, token.previousTimestamp);
-    }
+    return true;
   }
 
   clear(): void {
@@ -332,7 +322,8 @@ export class OpenProtocolManager {
     }
 
     const selfClientId = this.transport.getClientId();
-    if (selfClientId <= 0 || cmd.invokerId === selfClientId) {
+    if (selfClientId <= 0 || cmd.invokerId === selfClientId || cmd.invokerId <= 0
+      || Buffer.byteLength(cmd.data, "utf8") >= MAX_PAYLOAD_BYTES) {
       return;
     }
 
@@ -381,16 +372,12 @@ export class OpenProtocolManager {
       return;
     }
 
-    const token = this.rateLimiter.tryAcquire(
-      peerKey,
-      `${IDENTITY_PLUGIN}:${action}`,
-      cooldownMs,
-      this.now(),
-    );
-    if (!token) return;
+    if (!this.rateLimiter.tryAcquire(
+      peerKey, `${IDENTITY_PLUGIN}:${action}`, cooldownMs, this.now(),
+    )) return;
 
-    const payload = buildIdentityPayloadJson("announce_ack");
-    await this.sendAck(IDENTITY_PLUGIN, payload, invokerId, token);
+    const payload = buildIdentityPayloadJson("announce_ack", APP_VERSION, this.getConfig().commandPrefix);
+    await this.sendAck(IDENTITY_PLUGIN, payload, invokerId);
   }
 
   private async handleCommandsAction(
@@ -400,38 +387,28 @@ export class OpenProtocolManager {
   ): Promise<void> {
     if (action !== "list_req") return;
 
-    const token = this.rateLimiter.tryAcquire(
-      peerKey,
-      `${COMMANDS_PLUGIN}:list_req`,
-      COMMANDS_LIST_REQ_COOLDOWN_MS,
-      this.now(),
-    );
-    if (!token) return;
-
     const { locale, commandPrefix } = this.getConfig();
+    if (!isDiscoverablePrefix(commandPrefix) || !this.rateLimiter.tryAcquire(
+      peerKey, `${COMMANDS_PLUGIN}:list_req`, COMMANDS_LIST_REQ_COOLDOWN_MS, this.now(),
+    )) return;
+
     const payload = buildCommandsListAckJson(locale, commandPrefix);
-    await this.sendAck(COMMANDS_PLUGIN, payload, invokerId, token);
+    if (payload !== null) await this.sendAck(COMMANDS_PLUGIN, payload, invokerId);
   }
 
   private async sendAck(
     pluginName: string,
     payload: string,
     invokerId: number,
-    token: RateLimitToken,
   ): Promise<void> {
     if (Buffer.byteLength(payload, "utf8") >= MAX_PAYLOAD_BYTES) {
-      this.rateLimiter.rollback(token);
       this.logger.debug({ pluginName }, "OpenProtocol payload exceeded size limit");
       return;
     }
 
-    const gen = this.generation;
     try {
       await this.transport.sendPluginCommand(pluginName, payload, invokerId);
     } catch (err) {
-      if (gen === this.generation) {
-        this.rateLimiter.rollback(token);
-      }
       this.logger.debug(
         { err, pluginName, invokerId },
         "Failed to send OpenProtocol response",
@@ -446,7 +423,7 @@ export class OpenProtocolManager {
 
     this.lastAnnounceAttemptMs = this.now();
     const seq = ++this.announceSeq;
-    const payload = buildIdentityPayloadJson("announce");
+    const payload = buildIdentityPayloadJson("announce", APP_VERSION, this.getConfig().commandPrefix);
 
     if (Buffer.byteLength(payload, "utf8") >= MAX_PAYLOAD_BYTES) {
       this.logger.debug("OpenProtocol announce payload exceeded size limit");
@@ -482,7 +459,7 @@ export class OpenProtocolManager {
         return;
       }
       const retrySeq = ++this.announceSeq;
-      const payload = buildIdentityPayloadJson("announce");
+      const payload = buildIdentityPayloadJson("announce", APP_VERSION, this.getConfig().commandPrefix);
       this.lastAnnounceAttemptMs = this.now();
       this.transport
         .sendPluginCommand(IDENTITY_PLUGIN, payload, "channel")
