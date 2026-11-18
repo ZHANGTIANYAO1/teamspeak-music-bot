@@ -213,11 +213,16 @@ export interface AuthStatus {
   avatarUrl?: string;
 }
 
+export interface SongUrlRequestOptions {
+  /** CDN hosts that already failed around this playback position (where supported). */
+  avoidHosts?: ReadonlySet<string>;
+}
+
 export interface MusicProvider {
   readonly platform: Platform;
 
   search(query: string, limit?: number, offset?: number): Promise<SearchResult>;
-  getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null>;
+  getSongUrl(songId: string, quality?: string, options?: SongUrlRequestOptions): Promise<SongUrlResult | null>;
   setQuality(quality: string): void;
   getQuality(): string;
   getSongDetail(songId: string): Promise<Song | null>;

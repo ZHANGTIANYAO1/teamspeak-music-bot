@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { BotInstance } from "./instance.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue } from "../audio/queue.js";
+import { BiliBiliProvider } from "../music/bilibili.js";
 import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
 
 function deferred<T>() {
@@ -82,6 +83,44 @@ beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe("Bilibili recovery retries transient URL failures", () => {
+  it("rotates to untried CDN hosts after a long stream ends repeatedly at the same point", async () => {
+    const bot = makeBot();
+    const song = bot.queue.current();
+    song.url = "https://upos-primary.bilivideo.com/audio.m4s?deadline=1";
+    bot.player.elapsed = 2220;
+    bot.effectiveDuration = 4020;
+    song.duration = 4020;
+    const primary = "https://upos-primary.bilivideo.com/audio.m4s?deadline=2";
+    const backup = "https://upos-backup.bilivideo.com/audio.m4s?deadline=2";
+    const edge = "https://fixture.szbdyd.com/audio.m4s?deadline=2";
+    const provider = new BiliBiliProvider() as any;
+    provider.cidCache.set(song.id, 42);
+    provider.api = {
+      get: vi.fn(async () => ({
+        data: { data: { dash: { audio: [{ bandwidth: 192000, baseUrl: primary, backupUrl: [edge, backup] }] } } },
+      })),
+    };
+    bot.getProviderFor = () => provider;
+
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.player.play).toHaveBeenLastCalledWith(backup, 2220, 4020);
+
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.player.play).toHaveBeenLastCalledWith(edge, 2220, 4020);
+
+    // Once playback advances, a previously failed host can be used again.
+    bot.player.elapsed += 31;
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.player.play).toHaveBeenLastCalledWith(primary, 2251, 4020);
+    expect(bot.queue.current()).toBe(song);
+    expect(bot.playNext).not.toHaveBeenCalled();
+  });
+
   it("keeps the same queue and seek through a null lookup, then resumes after one second", async () => {
     const bot = makeBot();
     const song = bot.queue.current();

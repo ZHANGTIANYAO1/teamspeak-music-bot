@@ -227,7 +227,16 @@ export class BotInstance extends EventEmitter {
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
-  private streamRecovery: { song: QueuedSong; attempts: number; position: number; session: number; generation: number; pauseRequested: boolean; inFlight: boolean } | null = null;
+  private streamRecovery: {
+    song: QueuedSong;
+    attempts: number;
+    position: number;
+    session: number;
+    generation: number;
+    pauseRequested: boolean;
+    inFlight: boolean;
+    failedHosts: Set<string>;
+  } | null = null;
   private playGate: Promise<unknown> = Promise.resolve();
   /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
    *  null when the wired provider has no reporting capability. */
@@ -1339,7 +1348,10 @@ export class BotInstance extends EventEmitter {
       recovery.generation !== generation ||
       position - recovery.position > BotInstance.STREAM_END_TOLERANCE_S
     ) {
-      this.streamRecovery = { song, attempts: 0, position, session: endedSession, generation, pauseRequested: false, inFlight: false };
+      this.streamRecovery = {
+        song, attempts: 0, position, session: endedSession, generation,
+        pauseRequested: false, inFlight: false, failedHosts: new Set(),
+      };
     }
     const state = this.streamRecovery!;
     if (state.inFlight) return true;
@@ -1352,6 +1364,8 @@ export class BotInstance extends EventEmitter {
       return false;
     }
     state.position = position;
+    const failedHost = song.url ? URL.parse(song.url)?.hostname.replace(/\.$/, "") : undefined;
+    if (failedHost) state.failedHosts.add(failedHost);
 
     this.logger.warn(
       { songId: song.id, position, duration, attempt: state.attempts + 1 },
@@ -1375,7 +1389,9 @@ export class BotInstance extends EventEmitter {
         let result: Awaited<ReturnType<MusicProvider["getSongUrl"]>> = null;
         let reason = "no-url";
         try {
-          result = await this.getProviderFor(song.platform).getSongUrl(song.id);
+          result = await this.getProviderFor(song.platform).getSongUrl(
+            song.id, undefined, { avoidHosts: state.failedHosts },
+          );
         } catch {
           reason = "lookup-error";
         }
