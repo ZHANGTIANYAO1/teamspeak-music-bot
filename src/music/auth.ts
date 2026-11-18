@@ -47,7 +47,8 @@ export function createCookieStore(cookieDir: string): CookieStore {
       let stored: string;
       try {
         const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-        stored = data.cookie ?? "";
+        if (typeof data?.cookie !== "string") return "";
+        stored = data.cookie;
       } catch {
         return "";
       }

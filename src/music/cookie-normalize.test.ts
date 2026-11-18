@@ -54,6 +54,11 @@ describe("normalizeCookie", () => {
     expect(normalizeCookie("cookie: MUSIC_U=abc")).toBe("MUSIC_U=abc");
   });
 
+  it("keeps each cookie from multiple pasted Set-Cookie lines", () => {
+    expect(normalizeCookie("Set-Cookie: MUSIC_U=abc; Path=/\r\nSet-Cookie: __csrf=def; HttpOnly"))
+      .toBe("MUSIC_U=abc; __csrf=def");
+  });
+
   it("empties out a blob that carries no real cookie at all", () => {
     expect(normalizeCookie("Max-Age=1; Expires=Thu, 25 Nov 2094 21:48:40 GMT; Path=/")).toBe("");
   });

@@ -50,7 +50,7 @@ const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 /**
  * Turn whatever was pasted into a syntactically valid `Cookie:` header value.
  *
- * - drops a leading `Set-Cookie:` / `Cookie:` prefix (people copy the whole line)
+ * - handles pasted `Set-Cookie:` / `Cookie:` header lines
  * - drops attribute pairs (`Max-Age`, `Expires`, `Path`, ...)
  * - drops fragments without `=` (`;;`, trailing separators)
  * - drops values that are empty, which the sidecar reads as "unset anyway"
@@ -64,9 +64,7 @@ const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 export function normalizeCookie(raw: string): string {
   if (!raw) return "";
 
-  let text = raw.trim();
-  const prefix = /^(?:set-)?cookie\s*:\s*/i.exec(text);
-  if (prefix) text = text.slice(prefix[0].length);
+  const text = raw.trim().replace(/^[ \t]*(?:set-)?cookie[ \t]*:[ \t]*/gim, ";");
 
   const pairs = new Map<string, string>();
   for (const fragment of text.split(";")) {

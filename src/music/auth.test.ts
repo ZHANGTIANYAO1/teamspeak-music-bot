@@ -67,4 +67,9 @@ describe("cookie store", () => {
     fs.writeFileSync(path.join(dir, "qq.json"), "{not json", "utf-8");
     expect(store.load("qq")).toBe("");
   });
+
+  it("ignores a well-formed JSON file with a non-string cookie", () => {
+    fs.writeFileSync(path.join(dir, "qq.json"), JSON.stringify({ cookie: { invalid: true } }));
+    expect(createCookieStore(dir).load("qq")).toBe("");
+  });
 });
