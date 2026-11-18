@@ -29,6 +29,10 @@ function makeBot() {
   player.getVolume = () => 50;
   player.pause = AudioPlayer.prototype.pause;
   player.resume = AudioPlayer.prototype.resume;
+  // The real pause()/resume() drive the de-click transport ramp
+  // (a0f0b49..6f165b5). A stub player must expose it too, or the prototype
+  // methods throw "setTransportRamp is not a function".
+  player.setTransportRamp = vi.fn();
   player.play = vi.fn((_url: string, position: number) => { player.sessionId++; player.elapsed = position; player.state = "playing"; });
   player.stop = vi.fn(() => { player.sessionId++; player.state = "idle"; });
   const provider = { getSongUrl: vi.fn(async (): Promise<{ url: string } | null> => ({ url: "fresh" })) };
