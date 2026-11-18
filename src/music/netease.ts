@@ -209,8 +209,6 @@ export class NeteaseProvider implements MusicProvider {
   private api: AxiosInstance;
   private cookie = "";
   private quality = "exhigh";
-  /** Outbound HTTP proxy for the sidecar's own requests. "" = direct. */
-  private proxy = "";
   private readonly baseUrl: string;
 
   constructor(baseUrl: string) {
@@ -233,49 +231,13 @@ export class NeteaseProvider implements MusicProvider {
     return this.cookie ? { cookie: this.cookie } : {};
   }
 
-  /**
-   * Outbound proxy for every sidecar call.
-   *
-   * NetEase limits by IP: a cloud-datacenter address answers `-460`
-   * ("检测到您的网络环境存在风险") on most requests no matter which account asks,
-   * while the same account from a residential IP works. There is no code-level
-   * fix — the request has to originate somewhere else.
-   *
-   * The sidecar already knows how: `NeteaseCloudMusicApi` reads a `proxy`
-   * request parameter and tunnels through it itself (`util/request.js`, via the
-   * `tunnel` package). So this needs no new dependency and no global-agent
-   * patching — just carry the value.
-   *
-   * Only `http://` proxies work (the sidecar implements this with CONNECT).
-   * Empty means direct, i.e. exactly the previous behaviour.
-   */
-  setProxy(proxy: string): void {
-    this.proxy = (proxy ?? "").trim();
-  }
-
-  getProxy(): string {
-    return this.proxy;
-  }
-
-  private get proxyParams(): Record<string, string> {
-    return this.proxy ? { proxy: this.proxy } : {};
-  }
-
-  /**
-   * Everything every call needs. One getter so a field added here cannot be
-   * forgotten on any of the ~20 call sites.
-   */
-  private get requestParams(): Record<string, string> {
-    return { ...this.cookieParams, ...this.proxyParams };
-  }
-
   async search(query: string, limit = 20, offset = 0): Promise<SearchResult> {
     // /cloudsearch supports offset for every type. Songs, playlists (type 1000)
     // and albums (type 10) are all limit/offset-driven so the web can page past
     // the first page (playlists/albums were previously hardcoded to limit: 10).
     const [songRes, playlistRes, albumRes, artistRes] = await Promise.all([
       this.api.get("/cloudsearch", {
-        params: { keywords: query, type: 1, limit, offset, ...this.requestParams },
+        params: { keywords: query, type: 1, limit, offset, ...this.cookieParams },
       }),
       this.api.get("/cloudsearch", {
         params: {
@@ -283,14 +245,14 @@ export class NeteaseProvider implements MusicProvider {
           type: 1000,
           limit,
           offset,
-          ...this.requestParams,
+          ...this.cookieParams,
         },
       }),
       this.api.get("/cloudsearch", {
-        params: { keywords: query, type: 10, limit, offset, ...this.requestParams },
+        params: { keywords: query, type: 10, limit, offset, ...this.cookieParams },
       }),
       this.api.get("/cloudsearch", {
-        params: { keywords: query, type: 100, limit, offset, ...this.requestParams },
+        params: { keywords: query, type: 100, limit, offset, ...this.cookieParams },
       }),
     ]);
 
@@ -318,7 +280,7 @@ export class NeteaseProvider implements MusicProvider {
     let res;
     try {
       res = await this.api.get("/song/url/v1", {
-        params: { id: songId, level, ...this.requestParams },
+        params: { id: songId, level, ...this.cookieParams },
       });
     } catch (err) {
       // -460 arrives as HTTP 400, and left as-is it looks like "this track is
@@ -359,21 +321,21 @@ export class NeteaseProvider implements MusicProvider {
 
   async getSongDetail(songId: string): Promise<Song | null> {
     const res = await this.api.get("/song/detail", {
-      params: { ids: songId, ...this.requestParams },
+      params: { ids: songId, ...this.cookieParams },
     });
     return mapNeteaseSongs(res.data?.songs)[0] ?? null;
   }
 
   async getPlaylistSongs(playlistId: string): Promise<Song[]> {
     const res = await this.api.get("/playlist/track/all", {
-      params: { id: playlistId, ...this.requestParams },
+      params: { id: playlistId, ...this.cookieParams },
     });
     return mapNeteaseSongs(res.data?.songs);
   }
 
   async getRecommendPlaylists(): Promise<Playlist[]> {
     const res = await this.api.get("/personalized", {
-      params: { limit: 10, ...this.requestParams },
+      params: { limit: 10, ...this.cookieParams },
     });
     return (res.data?.result ?? []).map((p: any) => ({
       id: String(p.id),
@@ -386,7 +348,7 @@ export class NeteaseProvider implements MusicProvider {
 
   async getAlbumSongs(albumId: string): Promise<Song[]> {
     const res = await this.api.get("/album", {
-      params: { id: albumId, ...this.requestParams },
+      params: { id: albumId, ...this.cookieParams },
     });
     return mapNeteaseSongs(res.data?.songs);
   }
@@ -396,7 +358,7 @@ export class NeteaseProvider implements MusicProvider {
     // separately via /artist/songs (order=hot) so the artist page's three
     // upstream calls stay independent of each other.
     const res = await this.api.get("/artists", {
-      params: { id: artistId, ...this.requestParams },
+      params: { id: artistId, ...this.cookieParams },
     });
     const a = res.data?.artist;
     if (!a) return null;
@@ -413,7 +375,7 @@ export class NeteaseProvider implements MusicProvider {
         limit,
         offset: 0,
         order: "hot",
-        ...this.requestParams,
+        ...this.cookieParams,
       },
     });
     return mapNeteaseSongs(res.data?.songs);
@@ -421,7 +383,7 @@ export class NeteaseProvider implements MusicProvider {
 
   async getArtistAlbums(artistId: string, limit = 20): Promise<Album[]> {
     const res = await this.api.get("/artist/album", {
-      params: { id: artistId, limit, offset: 0, ...this.requestParams },
+      params: { id: artistId, limit, offset: 0, ...this.cookieParams },
     });
     return mapNeteaseAlbums(res.data?.hotAlbums);
   }
@@ -442,7 +404,7 @@ export class NeteaseProvider implements MusicProvider {
         limit: safeLimit,
         offset: safeOffset,
         order: "hot",
-        ...this.requestParams,
+        ...this.cookieParams,
       },
     });
     const songs = mapNeteaseSongs(res.data?.songs);
@@ -456,7 +418,7 @@ export class NeteaseProvider implements MusicProvider {
 
   async getLyrics(songId: string): Promise<LyricLine[]> {
     const res = await this.api.get("/lyric", {
-      params: { id: songId, ...this.requestParams },
+      params: { id: songId, ...this.cookieParams },
     });
     return parseLyrics(
       res.data?.lrc?.lyric ?? "",
@@ -552,7 +514,7 @@ export class NeteaseProvider implements MusicProvider {
     if (!this.cookie) return { loggedIn: false };
     try {
       const res = await this.api.get("/login/status", {
-        params: { ...this.requestParams },
+        params: { ...this.cookieParams },
       });
       const profile = res.data?.data?.profile;
       if (profile) {
@@ -570,21 +532,21 @@ export class NeteaseProvider implements MusicProvider {
 
   async getPersonalFm(): Promise<Song[]> {
     const res = await this.api.get("/personal_fm", {
-      params: { ...this.requestParams },
+      params: { ...this.cookieParams },
     });
     return mapNeteaseSongs(res.data?.data);
   }
 
   async getDailyRecommendSongs(): Promise<Song[]> {
     const res = await this.api.get("/recommend/songs", {
-      params: { ...this.requestParams },
+      params: { ...this.cookieParams },
     });
     return mapNeteaseSongs(res.data?.data?.dailySongs);
   }
 
   async getPlaylistDetail(playlistId: string): Promise<PlaylistDetail | null> {
     const res = await this.api.get("/playlist/detail", {
-      params: { id: playlistId, ...this.requestParams },
+      params: { id: playlistId, ...this.cookieParams },
     });
     const p = res.data?.playlist;
     if (!p) return null;
@@ -600,13 +562,13 @@ export class NeteaseProvider implements MusicProvider {
   async getUserPlaylists(): Promise<Playlist[]> {
     // First get user ID from login status
     const statusRes = await this.api.get("/login/status", {
-      params: { ...this.requestParams },
+      params: { ...this.cookieParams },
     });
     const uid = statusRes.data?.data?.profile?.userId;
     if (!uid) return [];
 
     const res = await this.api.get("/user/playlist", {
-      params: { uid, ...this.requestParams },
+      params: { uid, ...this.cookieParams },
     });
     return (res.data?.playlist ?? []).map((p: any) => ({
       id: String(p.id),
