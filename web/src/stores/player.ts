@@ -401,12 +401,15 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
-    /** Poll server for real elapsed time for active bot */
-    async syncElapsed() {
-      if (!this.activeBotId || !this.isPlaying) return;
+    /** Poll the same bot for authoritative elapsed time. */
+    async syncElapsed(botId = this.activeBotId) {
+      if (!botId || !this.bots.some(bot => bot.id === botId && bot.playing && !bot.paused)) return;
+      const timing = this.timings[botId];
       try {
-        const res = await axios.get(`/api/player/${this.activeBotId}/elapsed`);
-        this._setTiming(this.activeBotId, {
+        const res = await axios.get(`/api/player/${botId}/elapsed`);
+        // A newer WebSocket update or poll supersedes this result.
+        if (this.timings[botId] !== timing) return;
+        this._setTiming(botId, {
           serverElapsed: res.data.elapsed,
           serverSyncTime: Date.now(),
           wasPlaying: true,
@@ -533,7 +536,8 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playSong(song: Song, skipPartCheck = false) {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
         const handled = await this.checkBilibiliMultiPart(song, 'play');
         if (handled) return;
@@ -541,12 +545,11 @@ export const usePlayerStore = defineStore('player', {
       // Guests use the non-destructive "play now" (insert-next + skip) so they
       // can't wipe everyone else's queue; members/admins keep the normal behavior.
       const endpoint = useSession().isGuest.value ? 'play-now-song' : 'play-song';
-      const res = await axios.post(`/api/player/${this.activeBotId}/${endpoint}`, { song });
+      const res = await axios.post(`/api/player/${botId}/${endpoint}`, { song });
       if (res.data?.ok === false && res.data?.message) {
         this.notify(res.data.message, 'error');
       }
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
+      if (res.data?.ok === true) void this.syncElapsed(botId);
     },
 
     async playNextSong(song: Song, skipPartCheck = false) {
@@ -583,14 +586,14 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playPlaylist(playlistId: string, platform = 'netease') {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       try {
-        const res = await axios.post(`/api/player/${this.activeBotId}/play-playlist`, { playlistId, platform });
+        const res = await axios.post(`/api/player/${botId}/play-playlist`, { playlistId, platform });
         if (res.data?.message) {
           this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
         }
-        this._setTiming(this.activeBotId, { serverElapsed: 0 });
-        this._syncAfterAction();
+        if (res.data?.ok === true) void this.syncElapsed(botId);
       } catch (e: any) {
         // A 403 here means a guest lacks the "play entire collection" permission
         // (issue #103) — surface it instead of failing silently.
@@ -599,14 +602,14 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playAlbum(albumId: string, platform = 'netease') {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       try {
-        const res = await axios.post(`/api/player/${this.activeBotId}/play-album`, { albumId, platform });
+        const res = await axios.post(`/api/player/${botId}/play-album`, { albumId, platform });
         if (res.data?.message) {
           this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
         }
-        this._setTiming(this.activeBotId, { serverElapsed: 0 });
-        this._syncAfterAction();
+        if (res.data?.ok === true) void this.syncElapsed(botId);
       } catch (e: any) {
         this.notify(e?.response?.status === 403 ? '没有权限播放整个专辑' : '播放专辑失败', 'error');
       }
@@ -618,18 +621,18 @@ export const usePlayerStore = defineStore('player', {
      * trips, so the caller gets a "loading" notice first.
      */
     async playArtist(artistId: string, platform = 'netease') {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       this.notify('正在载入该歌手的全部歌曲…', 'info');
       try {
         const res = await axios.post(
-          `/api/player/${this.activeBotId}/play-artist`,
+          `/api/player/${botId}/play-artist`,
           { artistId, platform },
         );
         if (res.data?.message) {
           this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
         }
-        this._setTiming(this.activeBotId, { serverElapsed: 0 });
-        this._syncAfterAction();
+        if (res.data?.ok === true) void this.syncElapsed(botId);
       } catch (e: any) {
         const status = e?.response?.status;
         this.notify(
@@ -665,10 +668,11 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async next() {
-      if (!this.activeBotId) return;
-      await axios.post(`/api/player/${this.activeBotId}/next`);
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
+      const botId = this.activeBotId;
+      if (!botId) return;
+      const res = await axios.post(`/api/player/${botId}/next`);
+      if (res.data?.ok === false && res.data?.message) this.notify(res.data.message, 'error');
+      if (res.data?.ok === true) void this.syncElapsed(botId);
     },
 
     async prev() {

@@ -976,7 +976,7 @@ export class BotInstance extends EventEmitter {
         return this.cmdStop();
       case "next":
       case "skip":
-        return this.cmdNext();
+        return (await this.skipToNext()).message;
       case "prev":
         return this.cmdPrev();
       case "vol":
@@ -1255,45 +1255,36 @@ export class BotInstance extends EventEmitter {
           this.player.resume();
         }
         this.currentSourceIsSpotify = true;
-        this.jellyfinReporter?.onStop();
-        song.url = result.url;
-        // No trial clip for Spotify — full-track duration only (the near-end
-        // stall watchdog is disabled for the external stream anyway).
+        // Spotify has no preview clip or URL stall watchdog.
         this.effectiveDuration = song.duration;
-        this.autoPaused = false;
-        this.database.addPlayHistory({
-          botId: this.id,
-          songId: song.id,
-          songName: song.name,
-          artist: song.artist,
-          album: song.album,
-          platform: song.platform,
-          coverUrl: song.coverUrl,
-          requestedBy: song.requestedBy,
-        });
-        await this.syncProfileToSong(song);
-        this.emit("stateChange");
-        return true;
-      }
-      // Non-Spotify track: if we were on Spotify, pause the sidecar so it stops
-      // decoding ahead before the URL ffmpeg reclaims the PCM buffer.
-      if (this.currentSourceIsSpotify) {
-        this.spotifyController.pause().catch((err) =>
-          this.logger.warn({ err }, "Failed to pause Spotify sidecar on source switch"));
-        this.currentSourceIsSpotify = false;
+      } else {
+        // Pause the sidecar before URL playback reclaims the PCM buffer.
+        if (this.currentSourceIsSpotify) {
+          this.spotifyController.pause().catch((err) =>
+            this.logger.warn({ err }, "Failed to pause Spotify sidecar on source switch"));
+          this.currentSourceIsSpotify = false;
+        }
+        this.effectiveDuration = result.trialDuration ?? song.duration;
+        this.player.play(result.url, 0, this.effectiveDuration);
       }
       song.url = result.url;
-      // 试听片段用试听时长（让 player nearEnd 正确触发自动切歌）；完整曲回退 song.duration
-      this.effectiveDuration = result.trialDuration ?? song.duration;
-      this.player.play(result.url, 0, this.effectiveDuration);
-      // Jellyfin playback reporting: open a session for jellyfin tracks (the
-      // reporter closes the previous one itself); close any open session when
-      // playback moves to another source. Fire-and-forget — never blocks play.
+    } catch (err) {
+      if (isCancelled()) return false;
+      this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
+      onFailure?.(toPlayFailure(song.platform, song.id, err));
+      return false;
+    }
+
+    // Playback has started. Failures in bookkeeping must not skip a track
+    // or turn an otherwise successful playback request into an error.
+    this.autoPaused = false;
+    try {
       if (song.platform === "jellyfin") this.jellyfinReporter?.onTrackStart(song.id);
       else this.jellyfinReporter?.onStop();
-      // Fresh playback (re)start — clear auto-pause so a later occupancy
-      // change won't try to "resume" a track the user already restarted.
-      this.autoPaused = false;
+    } catch (err) {
+      this.logger.warn({ err, songId: song.id }, "Failed to report playback session");
+    }
+    try {
       this.database.addPlayHistory({
         botId: this.id,
         songId: song.id,
@@ -1304,16 +1295,14 @@ export class BotInstance extends EventEmitter {
         coverUrl: song.coverUrl,
         requestedBy: song.requestedBy,
       });
-      // Keep TeamSpeak-side profile updates on the same path for play/next/FM.
-      await this.syncProfileToSong(song);
-      this.emit("stateChange");
-      return true;
     } catch (err) {
-      if (isCancelled()) return false;
-      this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
-      onFailure?.(toPlayFailure(song.platform, song.id, err));
-      return false;
+      this.logger.warn({ err, songId: song.id }, "Failed to save play history");
     }
+    this.emit("stateChange");
+    // Profile uploads can outlive a short track. Let the queue advance while
+    // the profile manager's generation checks discard superseded updates.
+    void this.syncProfileToSong(song);
+    return true;
   }
 
   /** Platforms whose CDN stream can die mid-file on long content (#89, #161). */
@@ -1704,12 +1693,16 @@ export class BotInstance extends EventEmitter {
     return "Stopped and queue cleared";
   }
 
-  private async cmdNext(): Promise<string> {
-    await this.playNext();
+  async skipToNext(): Promise<{ ok: boolean; message: string }> {
+    if (!this.connected) throw new Error("Bot is not connected to TeamSpeak");
+    if (this.isAdvancing) return { ok: false, message: "正在切歌，请稍后" };
+    let reason: string | undefined;
+    const started = await this.playNext(3, failure => { reason = failure.message; });
     const current = this.queue.current();
-    if (current)
-      return `Now playing: ${current.name} - ${current.artist}`;
-    return "Queue is empty";
+    if (started && current) {
+      return { ok: true, message: `Now playing: ${current.name} - ${current.artist}` };
+    }
+    return { ok: false, message: reason ?? (current ? "没有可播放的下一首" : "队列为空") };
   }
 
   private async cmdPrev(): Promise<string> {

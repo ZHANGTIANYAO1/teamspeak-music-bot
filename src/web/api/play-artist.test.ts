@@ -75,8 +75,8 @@ describe("collectArtistSongs (play-artist all:true)", () => {
   });
 });
 
-describe("play-artist playback serialization", () => {
-  it("keeps the queue and audible song consistent when single-song playback overlaps artist playback", async () => {
+describe("collection playback serialization", () => {
+  it.each(["artist", "album", "playlist"])("serializes %s playback and single-song playback", async kind => {
     const queue = new PlayQueue();
     let audible: string | null = null;
     let releaseArtist!: () => void;
@@ -87,7 +87,14 @@ describe("play-artist playback serialization", () => {
     const singleArrived = new Promise<void>((resolve) => { notifySingleArrived = resolve; });
     const bot: any = {
       playGate: Promise.resolve(),
-      getProviderFor: () => ({ platform: "netease", getArtistSongs: async () => [song("A")], getArtistAllSongs: async () => page(["A"], 1, false) }),
+      getProviderFor: () => ({
+        platform: "netease",
+        getAlbumSongs: async () => [song("A")],
+        getPlaylistSongs: async () => [song("A")],
+        getArtistSongs: async () => [song("A")],
+        getArtistAllSongs: async () => page(["A"], 1, false),
+      }),
+      emit: vi.fn(),
       getPlayer: () => ({ stop: () => { audible = null; }, resetFailures: () => {} }),
       getQueueManager: () => queue,
       resolveAndPlay: async (track: Song) => {
@@ -110,7 +117,8 @@ describe("play-artist playback serialization", () => {
     app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
     app.use("/api/player/b/play-song", (_req, _res, next) => { notifySingleArrived(); next(); });
     app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
-    const artistRequest = request(app).post("/api/player/b/play-artist").send({ artistId: "artist", platform: "netease" }).then((res) => res);
+    const collectionRequest = request(app).post(`/api/player/b/play-${kind}`)
+      .send({ [`${kind}Id`]: "collection", platform: "netease" }).then((res) => res);
     await artistStarted;
     const singleRequest = request(app).post("/api/player/b/play-song").send({ song: song("B") }).then((res) => res);
     // Let the overlapping HTTP request enter the real route while A's URL is pending.
@@ -119,11 +127,50 @@ describe("play-artist playback serialization", () => {
     await Promise.resolve();
     const whileArtistPending = queue.current()?.id;
     releaseArtist();
-    const [artistResponse, singleResponse] = await Promise.all([artistRequest, singleRequest]);
-    expect(artistResponse.status).toBe(200);
+    const [collectionResponse, singleResponse] = await Promise.all([collectionRequest, singleRequest]);
+    expect(collectionResponse.status).toBe(200);
     expect(singleResponse.status).toBe(200);
     expect(whileArtistPending).toBe("A");
     expect(queue.current()?.id).toBe("B");
     expect(audible).toBe("B");
+  });
+});
+
+describe("collection preflight", () => {
+  it.each([
+    ["playlist", "empty", 200],
+    ["playlist", "unavailable", 200],
+    ["album", "empty", 200],
+    ["album", "error", 500],
+  ])("preserves current playback if the %s is %s", async (kind, result, status) => {
+    const queue = new PlayQueue();
+    queue.add(song("playing"));
+    queue.play();
+    const player = { stop: vi.fn(), resetFailures: vi.fn() };
+    const loadSongs = async () => {
+      if (result === "error") throw new Error("Upstream failed");
+      return result === "empty" ? [] : [song("next")];
+    };
+    const bot = {
+      getProviderFor: () => ({
+        platform: "qq",
+        getPlaylistSongs: loadSongs,
+        getAlbumSongs: loadSongs,
+        getPlayableSongIds: async () => new Set<string>(),
+      }),
+      getQueueManager: () => queue,
+      getPlayer: () => player,
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+    app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+
+    const response = await request(app).post(`/api/player/b/play-${kind}`).send({ [`${kind}Id`]: "id", platform: "qq" });
+
+    expect(response.status).toBe(status);
+    expect(player.stop).not.toHaveBeenCalled();
+    expect(player.resetFailures).not.toHaveBeenCalled();
+    expect(queue.current()?.id).toBe("playing");
   });
 });

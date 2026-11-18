@@ -518,6 +518,71 @@ it("does not start a track whose URL resolved after the queue was cleared", asyn
   expect(player.play).not.toHaveBeenCalled();
 });
 
+it.each(["netease", "spotify"])("keeps %s playback successful when saving history fails", async platform => {
+  const player = makePlayer();
+  const url = platform === "spotify" ? "spotify:track:abc" : "https://example.com/track";
+  const ctx = makeResolveCtx({ controller: makeController(), player, url });
+  ctx.database.addPlayHistory.mockImplementation(() => { throw new Error("Database temporarily unavailable"); });
+
+  expect(await resolveAndPlay.call(ctx, { ...spotifySong(), platform })).toBe(true);
+  expect(player.getState()).toBe("playing");
+  expect(ctx.emit).toHaveBeenCalledWith("stateChange");
+  expect(ctx.syncProfileToSong).toHaveBeenCalledTimes(1);
+});
+
+it("advances again when a track ends during a slow profile upload", async () => {
+  const player = Object.assign(new EventEmitter(), makePlayer(), {
+    getPlaybackSessionId: vi.fn(() => 1),
+  });
+  const ctx = makeResolveCtx({ controller: makeController(), player, url: "https://example.com/track" });
+  const queue = new PlayQueue();
+  for (const id of ["previous", "short", "following"]) {
+    queue.add({ ...spotifySong(), id, platform: "netease" });
+  }
+  queue.play();
+  ctx.queue = queue;
+  ctx.resumeInterruptedStream = vi.fn(async () => false);
+  ctx.resolveAndPlay = resolveAndPlay.bind(ctx);
+  ctx.playNext = playNext.bind(ctx);
+  ctx.sweepLocalAudio = vi.fn();
+  ctx.spotifyController = Object.assign(new EventEmitter(), { on: EventEmitter.prototype.on });
+  const profileStarted = deferred();
+  const finishProfile = deferred();
+  ctx.syncProfileToSong.mockImplementationOnce(() => {
+    profileStarted.resolve();
+    return finishProfile.promise;
+  });
+  setupPlayerEvents.call(ctx);
+
+  const advancing = ctx.playNext();
+  await profileStarted.promise;
+  try {
+    player.stop();
+    player.emit("trackEnd");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(queue.current()?.id).toBe("following");
+  } finally {
+    finishProfile.resolve();
+    await advancing;
+  }
+});
+
+it("reports the reason when the next track cannot be started", async () => {
+  const current = { ...spotifySong(), id: "next", platform: "netease" };
+  const ctx = {
+    connected: true,
+    queue: { current: () => current },
+    playNext: async (_maxRetries: number, report?: (failure: { message: string }) => void) => {
+      report?.({ message: "网易云暂时拒绝播放请求（-460），请稍后重试" });
+      return false;
+    },
+  };
+  expect(await BotInstance.prototype.skipToNext.call(ctx as unknown as BotInstance)).toEqual({
+    ok: false,
+    message: expect.stringContaining("-460"),
+  });
+});
+
 describe("BotInstance.resolveAndPlay — Spotify routing (C4)", () => {
   it("routes a spotify song to controller.playTrack + player.playPcmStream, not player.play", async () => {
     const controller = makeController();
