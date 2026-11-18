@@ -2,10 +2,12 @@ import { EventEmitter } from "node:events";
 import {
   TS3Client,
   type TS3ClientOptions,
+  type TS3PluginCommand,
   type TS3TextMessage,
   type TS3VoiceActivity,
   type TS3VoiceSendFailure,
 } from "../ts-protocol/client.js";
+import { OpenProtocolManager } from "../ts-protocol/open-protocol.js";
 import { AudioPlayer } from "../audio/player.js";
 import { resolveUrlWithRetry } from "./url-retry.js";
 import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
@@ -157,11 +159,27 @@ export interface BotStatus {
   effectiveDuration?: number;
 }
 
+async function sendTextReply(
+  tsClient: Pick<TS3Client, "sendTextMessage">,
+  msg: TS3TextMessage,
+  text: string,
+): Promise<void> {
+  if (msg.targetMode === 1) {
+    const targetClientId = Number(msg.invokerId);
+    if (Number.isInteger(targetClientId) && targetClientId > 0) {
+      await tsClient.sendTextMessage(text, 1, targetClientId);
+    }
+    return;
+  }
+  await tsClient.sendTextMessage(text);
+}
+
 export class BotInstance extends EventEmitter {
   readonly id: string;
   name: string;
 
   private tsClient: TS3Client;
+  private openProtocol: OpenProtocolManager;
   private player: AudioPlayer;
   private voiceDucking: VoiceDuckingController;
   private managedVoiceClients: ManagedVoiceClientRegistry;
@@ -235,6 +253,14 @@ export class BotInstance extends EventEmitter {
     this.avatarStore = options.avatarStore;
 
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
+    this.openProtocol = new OpenProtocolManager({
+      transport: this.tsClient,
+      getConfig: () => ({
+        locale: this.config.locale,
+        commandPrefix: this.config.commandPrefix,
+      }),
+      logger: this.logger,
+    });
     this.player = new AudioPlayer(this.logger);
     this.voiceDucking = new VoiceDuckingController(
       this.player,
@@ -451,6 +477,12 @@ export class BotInstance extends EventEmitter {
       });
     });
 
+    this.tsClient.on("pluginCommand", (cmd: TS3PluginCommand) => {
+      this.openProtocol?.handlePluginCommand(cmd).catch((err) => {
+        this.logger.debug({ err }, "OpenProtocol plugin command handler failed");
+      });
+    });
+
     this.tsClient.on("disconnected", () => {
       // Always reset local state — covers the case where connect() never
       // completed (hanging handshake → 60s library idle timeout) and
@@ -458,6 +490,7 @@ export class BotInstance extends EventEmitter {
       // short-circuited on !this.connected, leaving player stuck as "playing".
       this.lifecycleGeneration++;
       this.connected = false;
+      this.openProtocol?.reset();
       this._cancelIdleTimer();
       this.unregisterManagedVoiceClient(MANAGED_VOICE_CLIENT_RELEASE_GRACE_MS);
       this.voiceDucking.reset(true);
@@ -492,6 +525,7 @@ export class BotInstance extends EventEmitter {
       this.autoPaused = false;
       this._startIdlePoller();
       this._startJellyfinReportPoller();
+      this.openProtocol?.scheduleAnnounce();
     });
 
     this.tsClient.on("voiceActivity", (activity: TS3VoiceActivity) => {
@@ -530,6 +564,7 @@ export class BotInstance extends EventEmitter {
         this.profileManager.onChannelMoved(event.targetChannelID).catch((err) => {
           this.logger.warn({ err }, "Channel description move update failed");
         });
+        this.openProtocol?.scheduleAnnounce();
       } else {
         this.voiceDucking.removeSpeaker(event.id);
       }
@@ -672,6 +707,7 @@ export class BotInstance extends EventEmitter {
       this.disconnectEmitted = true;
       this.emit("disconnected");
     }
+    this.openProtocol?.reset();
     this.tsClient.disconnect();
     // Stop outbound PCM and initiate the TeamSpeak disconnect before removing
     // our id from the shared registry, minimizing the window in which another
@@ -799,13 +835,19 @@ export class BotInstance extends EventEmitter {
     );
     if (!parsed) return;
 
-    if (!(await this.isCommandAllowed(parsed.name, msg))) {
+    // A numeric invoker ID only belongs to this TeamSpeak connection.
+    const generation = this.lifecycleGeneration;
+    const isCurrent = () => this.lifecycleGeneration === generation;
+    const allowed = await this.isCommandAllowed(parsed.name, msg);
+    if (!isCurrent()) return;
+
+    if (!allowed) {
       this.logger.info(
         { command: parsed.name, invoker: msg.invokerName },
         "Command denied: invoker not in adminGroups"
       );
       try {
-        await this.tsClient.sendTextMessage(COMMAND_DENIED_MESSAGE);
+        await sendTextReply(this.tsClient, msg, COMMAND_DENIED_MESSAGE);
       } catch (sendErr) {
         this.logger.error({ err: sendErr }, "Failed to send permission-denied message to chat");
       }
@@ -823,15 +865,15 @@ export class BotInstance extends EventEmitter {
         // A single long reply (e.g. full lyrics) would exceed TeamSpeak's
         // per-message byte cap, so split it and send the chunks in order.
         for (const chunk of splitTextIntoChunks(response)) {
-          await this.tsClient.sendTextMessage(chunk);
+          if (!isCurrent()) return;
+          await sendTextReply(this.tsClient, msg, chunk);
         }
       }
     } catch (err) {
+      if (!isCurrent()) return;
       this.logger.error({ err, command: parsed.name }, "Command execution error");
       try {
-        await this.tsClient.sendTextMessage(
-          `Error: ${(err as Error).message}`
-        );
+        await sendTextReply(this.tsClient, msg, `Error: ${(err as Error).message}`);
       } catch (sendErr) {
         this.logger.error({ err: sendErr }, "Failed to send error message to chat");
       }

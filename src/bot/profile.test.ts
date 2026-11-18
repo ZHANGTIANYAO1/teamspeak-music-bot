@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { Client, generateIdentity } from "@honeybbq/teamspeak-client";
 import { BotProfileManager } from "./profile.js";
 import { TS6HttpQuery } from "../ts-protocol/http-query.js";
 import type { TS3Client } from "../ts-protocol/client.js";
@@ -419,20 +418,15 @@ describe("BotProfileManager checked TS6 profile lifecycle", () => {
 
   it("checks self clientupdate permission responses and retries only after reconnect", async () => {
     const { pm, ts, request, logger } = makeHttpProfile({ nicknameEnabled: true, awayStatusEnabled: true });
-    const client: any = new Client(generateIdentity(0), "127.0.0.1:9987", "Bot");
     const commands: string[] = [];
-    client.handler.sendPacket = vi.fn((_type, data: Buffer) => {
-      const command = data.toString();
+    ts.execCommand.mockImplementation(async (command: string) => {
       commands.push(command);
-      const returnCode = command.match(/return_code=(\d+)/)?.[1];
-      client.handler.onPacket({ typeFlagged: 2, data: Buffer.from(`error id=2568 msg=insufficient\\sclient\\spermissions${returnCode ? ` return_code=${returnCode}` : ""}`) });
+      throw new Error("insufficient client permissions (error id=2568)");
     });
-    ts.sendCommandNoWait.mockImplementation((command: string) => client.sendCommandNoWait(command));
-    ts.execCommand.mockImplementation((command: string) => client.execCommand(command));
     await pm.onSongChange(null);
     await pm.onSongChange(null);
     expect(commands).toHaveLength(1);
-    expect(commands[0]).toMatch(/^clientupdate client_nickname=Bot client_away=1 client_away_message=等待播放 return_code=\d+$/);
+    expect(commands[0]).toBe("clientupdate client_nickname=Bot client_away=1 client_away_message=等待播放");
     expect(request).not.toHaveBeenCalled();
     expect(logger.info.mock.calls.some((call: any[]) => call[1] === "Client properties updated (nickname + away)")).toBe(false);
     pm.onConnect();
