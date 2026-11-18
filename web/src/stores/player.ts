@@ -82,6 +82,7 @@ export interface TimingState {
   serverElapsed: number;
   serverSyncTime: number;
   wasPlaying: boolean;
+  lastPolledElapsed?: number;
 }
 
 const HOME_CACHE_TTL = 5 * 60 * 1000;
@@ -312,6 +313,7 @@ export const usePlayerStore = defineStore('player', {
           serverElapsed: status.elapsed,
           serverSyncTime: Date.now(),
           wasPlaying: status.playing && !status.paused,
+          lastPolledElapsed: undefined,
         });
       }
 
@@ -321,6 +323,7 @@ export const usePlayerStore = defineStore('player', {
           serverElapsed: status.elapsed ?? 0,
           serverSyncTime: Date.now(),
           wasPlaying: status.playing && !status.paused,
+          lastPolledElapsed: undefined,
         });
       }
     },
@@ -396,6 +399,7 @@ export const usePlayerStore = defineStore('player', {
             serverElapsed: bot.elapsed,
             serverSyncTime: Date.now(),
             wasPlaying: bot.playing && !bot.paused,
+            lastPolledElapsed: undefined,
           });
         }
       }
@@ -410,10 +414,13 @@ export const usePlayerStore = defineStore('player', {
         const res = await axios.get(`/api/player/${botId}/elapsed`);
         // A newer WebSocket update or poll supersedes this result.
         if (this.timings[botId] !== timing) return;
+        const elapsed = res.data.elapsed;
+        if (!Number.isFinite(elapsed)) return;
         this._setTiming(botId, {
-          serverElapsed: res.data.elapsed,
+          serverElapsed: elapsed,
           serverSyncTime: Date.now(),
-          wasPlaying: true,
+          wasPlaying: timing?.lastPolledElapsed !== elapsed,
+          lastPolledElapsed: elapsed,
         });
       } catch {
         // ignore

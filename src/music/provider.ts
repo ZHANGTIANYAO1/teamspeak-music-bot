@@ -217,6 +217,8 @@ export interface AuthStatus {
 export interface SongUrlRequestOptions {
   /** CDN hosts that already failed around this playback position (where supported). */
   avoidHosts?: ReadonlySet<string>;
+  /** Resolve after an interruption without reusing a cached playback URL. */
+  refresh?: boolean;
 }
 
 export interface MusicProvider {

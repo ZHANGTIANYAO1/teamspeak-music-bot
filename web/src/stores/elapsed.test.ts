@@ -99,4 +99,25 @@ describe("playback request timing", () => {
     expect(store.timings.a?.serverElapsed).toBe(58);
     expect(store.timings.b?.serverElapsed).toBe(10);
   });
+
+  it("freezes steady elapsed samples and interpolates again when audio advances", async () => {
+    const store = usePlayerStore();
+    store.activeBotId = "a";
+    store.bots = [{
+      id: "a", name: "bot", connected: true, playing: true, paused: false, currentSong: track,
+      queueSize: 1, volume: 50, playMode: "sequential",
+    }];
+    const poll = vi.spyOn(axios, "get").mockResolvedValue({ data: { elapsed: 60 } });
+    vi.setSystemTime(10000);
+    await store.syncElapsed();
+    vi.setSystemTime(13000);
+    await store.syncElapsed();
+    vi.setSystemTime(14000);
+    expect(store.liveElapsed()).toBe(60);
+
+    poll.mockResolvedValue({ data: { elapsed: 61 } });
+    await store.syncElapsed();
+    vi.setSystemTime(15000);
+    expect(store.liveElapsed()).toBe(62);
+  });
 });

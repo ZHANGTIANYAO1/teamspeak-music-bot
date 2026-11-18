@@ -233,6 +233,7 @@ export class BotInstance extends EventEmitter {
   private playbackRequest?: symbol;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
+  private currentStreamIsTrial = false;
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
   private streamRecovery: {
     song: QueuedSong;
@@ -1257,6 +1258,7 @@ export class BotInstance extends EventEmitter {
         this.player.play(result.url, 0, this.effectiveDuration);
       }
       song.url = result.url;
+      this.currentStreamIsTrial = result.trialDuration !== undefined;
     } catch (err) {
       if (isCancelled()) return false;
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
@@ -1294,19 +1296,15 @@ export class BotInstance extends EventEmitter {
     return true;
   }
 
-  /** Platforms whose CDN stream can die mid-file on long content (#89, #161). */
-  private static readonly RESUMABLE_PLATFORMS: ReadonlySet<Platform> = new Set(["bilibili"]);
+  private static readonly RESUMABLE_PLATFORMS: ReadonlySet<Platform> = new Set(["bilibili", "netease", "qq", "kugou"]);
   /** A track that ends within this many seconds of its duration ended normally. */
   private static readonly STREAM_END_TOLERANCE_S = 30;
   private static readonly MAX_STREAM_RESUMES = 3;
   private static readonly MAX_STREAM_URL_LOOKUPS = 3;
 
   /**
-   * Called when the player reports a track end. If a B站 stream ended long
-   * before its known duration, the CDN dropped it (#161): fetch a fresh URL
-   * and continue from where it stopped instead of skipping the rest of a
-   * 2-3 hour video. Gives up after MAX_STREAM_RESUMES attempts that make no
-   * real progress, so a truly broken stream still advances the queue.
+   * Renew an interrupted finite CDN stream and seek to the audio clock at EOF.
+   * The existing recovery budget bounds restarts that make no progress.
    *
    * Returns true when it handled the end (resumed, or a newer track has
    * already taken over), false when the caller should advance the queue.
@@ -1316,12 +1314,19 @@ export class BotInstance extends EventEmitter {
     if (!song || !this.connected || !BotInstance.RESUMABLE_PLATFORMS.has(song.platform)) {
       return false;
     }
+    const bilibili = song.platform === "bilibili";
+    const source = song.url ? URL.parse(song.url) : null;
     const duration = this.effectiveDuration ?? song.duration;
-    const position = Math.floor(this.player.getElapsed());
+    const elapsed = this.player.getElapsed();
+    const position = bilibili ? Math.floor(elapsed) : elapsed;
     const endedSession = this.player.getPlaybackSessionId();
-    if (!(duration > 0) || duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(position) || position < 0 ||
+        duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
       return false;
     }
+    // Music previews can start at a different offset than the full song.
+    if (!bilibili && (this.currentStreamIsTrial || position <= 0 ||
+        (source?.protocol !== "http:" && source?.protocol !== "https:"))) return false;
     if (this.player.getState() !== "idle") return true;
     const generation = this.lifecycleGeneration;
 
@@ -1349,11 +1354,11 @@ export class BotInstance extends EventEmitter {
       return false;
     }
     state.position = position;
-    const failedHost = song.url ? URL.parse(song.url)?.hostname.replace(/\.$/, "") : undefined;
-    if (failedHost) state.failedHosts.add(failedHost);
+      const failedHost = source?.hostname.replace(/\.$/, "");
+      if (bilibili && failedHost) state.failedHosts.add(failedHost);
 
     this.logger.warn(
-      { songId: song.id, position, duration, attempt: state.attempts + 1 },
+      { platform: song.platform, songId: song.id, position, duration, attempt: state.attempts + 1 },
       "Stream ended before the track did — resuming with a fresh URL",
     );
     state.inFlight = true;
@@ -1375,14 +1380,23 @@ export class BotInstance extends EventEmitter {
         let reason = "no-url";
         try {
           result = await this.getProviderFor(song.platform).getSongUrl(
-            song.id, undefined, { avoidHosts: state.failedHosts },
+              song.id, undefined, bilibili ? { avoidHosts: state.failedHosts } : { refresh: true },
           );
-        } catch {
+          } catch (err) {
+            if (!isCurrent()) return cancelled();
+            if (blocksProviderForAdvance(toPlayFailure(song.platform, song.id, err).code)) return false;
           reason = "lookup-error";
         }
         // Skip, stop, reconnect, or a new playback session supersedes the lookup.
         if (!isCurrent()) return cancelled();
         if (result?.url) {
+            if (!bilibili) {
+              const stream = URL.parse(result.url);
+              if (result.trialDuration !== undefined || (stream?.protocol !== "http:" && stream?.protocol !== "https:")) {
+                this.logger.warn({ platform: song.platform, songId: song.id }, "Fresh URL cannot resume the full track");
+                return false;
+              }
+            }
           // Lookup retries do not consume the actual decoder resume budget.
           state.attempts++;
           song.url = result.url;
@@ -1393,7 +1407,7 @@ export class BotInstance extends EventEmitter {
           return true;
         }
         this.logger.warn(
-          { platform: "bilibili", sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
+            { platform: song.platform, sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
           "Fresh stream URL lookup failed",
         );
       }
