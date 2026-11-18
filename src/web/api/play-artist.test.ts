@@ -6,6 +6,7 @@ import request from "supertest";
 import { createPlayerRouter } from "./player.js";
 import { BotInstance } from "../../bot/instance.js";
 import { PlayQueue } from "../../audio/queue.js";
+import type { BotDatabase } from "../../data/database.js";
 
 function song(id: string): Song {
   return {
@@ -137,6 +138,55 @@ describe("collection playback serialization", () => {
 });
 
 describe("collection preflight", () => {
+  it.each(["playlist", "album", "artist"])("checks QQ %s availability using the room's playback account", async kind => {
+    const queue = new PlayQueue();
+    const personalTracks = [{ ...song("personal-library-track"), platform: "qq" }];
+    const readLibrary = vi.fn(async () => personalTracks);
+    const personal = {
+      platform: "qq",
+      getPlaylistSongs: readLibrary,
+      getAlbumSongs: readLibrary,
+      getArtistSongs: readLibrary,
+      getPlayableSongIds: vi.fn(async () => new Set<string>()),
+    };
+    const shared = {
+      platform: "qq",
+      withCookie: vi.fn(() => personal),
+      getPlayableSongIds: vi.fn(async () => new Set(["personal-library-track"])),
+    };
+    const bot = {
+      getProviderFor: () => shared,
+      getQueueManager: () => queue,
+      getPlayer: () => ({ stop: vi.fn(), resetFailures: vi.fn() }),
+      runExclusive: (work: () => Promise<unknown>) => work(),
+      resolveAndPlay: vi.fn(async () => true),
+      emit: vi.fn(),
+    };
+    const db = {
+      getUserMusicPreference: () => null,
+      getUserMusicCookie: () => null,
+      getGrantedMusicAccount: () => ({ cookie: "private-test-cookie", label: "Member's account", accountId: "account" }),
+    } as unknown as BotDatabase;
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as { user?: unknown }).user = { id: "member", role: "member", bots: new Set(["b"]), capabilities: new Set(["player.control"]) };
+      next();
+    });
+    app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any,
+      db, undefined, undefined, undefined, { perUserMusicAccounts: true }));
+
+    const response = await request(app).post(`/api/player/b/play-${kind}`)
+      .send({ [`${kind}Id`]: "id", platform: "qq" }).expect(200);
+
+    expect(response.body).toMatchObject({ ok: true });
+    expect(response.text).not.toContain("private-test-cookie");
+    expect(readLibrary).toHaveBeenCalledOnce();
+    expect(personal.getPlayableSongIds).not.toHaveBeenCalled();
+    expect(shared.getPlayableSongIds).toHaveBeenCalledWith(["personal-library-track"]);
+    expect(queue.current()?.id).toBe("personal-library-track");
+  });
+
   it.each([
     ["playlist", "empty", 200],
     ["playlist", "unavailable", 200],
@@ -169,6 +219,7 @@ describe("collection preflight", () => {
     const response = await request(app).post(`/api/player/b/play-${kind}`).send({ [`${kind}Id`]: "id", platform: "qq" });
 
     expect(response.status).toBe(status);
+    if (status === 200) expect(response.body).toMatchObject({ ok: false });
     expect(player.stop).not.toHaveBeenCalled();
     expect(player.resetFailures).not.toHaveBeenCalled();
     expect(queue.current()?.id).toBe("playing");

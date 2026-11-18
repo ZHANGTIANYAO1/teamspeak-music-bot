@@ -43,6 +43,21 @@ export async function collectArtistSongs(
   return songs;
 }
 
+async function filterCollectionForRoom(
+  bot: BotInstance,
+  platform: Song["platform"],
+  songs: Song[],
+): Promise<Song[]> {
+  if (platform !== "qq") return songs;
+  // Metadata can come from the caller's account. Room playback uses the
+  // bot's shared account, so its entitlements must drive the batch check too.
+  const playbackProvider = bot.getProviderFor("qq") as MusicProvider & {
+    getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null>;
+  };
+  const available = await playbackProvider.getPlayableSongIds?.(songs.map(song => song.id));
+  return available ? songs.filter(song => available.has(song.id)) : songs;
+}
+
 export function createPlayerRouter(
   botManager: BotManager,
   logger: Logger,
@@ -423,24 +438,8 @@ export function createPlayerRouter(
         return;
       }
 
-      // QQ-specific optimization: many users' QQ playlists contain a
-      // large fraction of songs that return result=104003 (region/copyright
-      // restricted). Batch-resolve URLs once and only queue the playable
-      // ones, otherwise the playback retry loop wastes time guessing.
-      let queueable = songs;
       const totalCount = songs.length;
-      const qqLike = provider as { getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null> };
-      if (typeof qqLike.getPlayableSongIds === "function") {
-        const playable = await qqLike.getPlayableSongIds(songs.map((s: { id: string }) => s.id));
-        if (playable !== null) {
-          // Authoritative answer from upstream — even an empty set means
-          // "we know none are playable", short-circuit immediately rather
-          // than wasting 20+ retries.
-          queueable = songs.filter((s: { id: string }) => playable.has(s.id));
-        }
-        // If null, the batch endpoint itself errored — fall through to
-        // the sequential retry path, which still has a chance.
-      }
+      const queueable = await filterCollectionForRoom(bot, provider.platform, songs);
       if (queueable.length === 0) {
         res.json({ ok: false, message: `歌单 ${totalCount} 首歌曲均无法播放` });
         return;
@@ -471,17 +470,8 @@ export function createPlayerRouter(
         return;
       }
 
-      // QQ-specific optimization: batch-resolve playable IDs to avoid
-      // wasting retries on region/copyright-restricted tracks.
-      let queueable = songs;
       const totalCount = songs.length;
-      const qqLike = provider as { getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null> };
-      if (typeof qqLike.getPlayableSongIds === "function") {
-        const playable = await qqLike.getPlayableSongIds(songs.map((s: { id: string }) => s.id));
-        if (playable !== null) {
-          queueable = songs.filter((s: { id: string }) => playable.has(s.id));
-        }
-      }
+      const queueable = await filterCollectionForRoom(bot, provider.platform, songs);
       if (queueable.length === 0) {
         res.json({ ok: false, message: `专辑 ${totalCount} 首歌曲均无法播放` });
         return;
@@ -528,17 +518,8 @@ export function createPlayerRouter(
         return;
       }
 
-      // Same QQ batch-resolve optimization as play-album: drop tracks that are
-      // region/copyright blocked instead of burning retries on them.
-      let queueable = songs;
       const totalCount = songs.length;
-      const qqLike = provider as { getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null> };
-      if (typeof qqLike.getPlayableSongIds === "function") {
-        const playable = await qqLike.getPlayableSongIds(songs.map((s: { id: string }) => s.id));
-        if (playable !== null) {
-          queueable = songs.filter((s: { id: string }) => playable.has(s.id));
-        }
-      }
+      const queueable = await filterCollectionForRoom(bot, provider.platform, songs);
       if (queueable.length === 0) {
         res.json({ ok: false, message: `歌手 ${totalCount} 首歌曲均无法播放` });
         return;
