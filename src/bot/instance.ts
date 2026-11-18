@@ -233,7 +233,8 @@ export class BotInstance extends EventEmitter {
   private playbackRequest?: symbol;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
-  private currentStreamIsTrial = false;
+  /** Format metadata belongs to the selected queue entry and its current URL. */
+  private currentStream?: { song: QueuedSong; url: string; quality?: string; isTrial: boolean };
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
   private streamRecovery: {
     song: QueuedSong;
@@ -1123,9 +1124,13 @@ export class BotInstance extends EventEmitter {
       // click, chat !play, auto-advance, FM — shares the same budget. The
       // policy lives in url-retry.ts so it is unit tested without a bot; a
       // config without the field means 0 retries, i.e. the previous behaviour.
+      let selectedQuality: string | undefined;
       const result = await resolveUrlWithRetry({
         retries: this.config?.playUrlRetries,
-        resolve: (quality) => provider.getSongUrl(song.id, quality),
+        resolve: (quality) => {
+          selectedQuality = quality;
+          return provider.getSongUrl(song.id, quality);
+        },
         // NetEase's quality ladder is not continuous: a track can play at 192k
         // while both 320k and 128k return null, so every lower level is tried.
         // Providers without a quality knob return [] and keep one attempt.
@@ -1258,7 +1263,7 @@ export class BotInstance extends EventEmitter {
         this.player.play(result.url, 0, this.effectiveDuration);
       }
       song.url = result.url;
-      this.currentStreamIsTrial = result.trialDuration !== undefined;
+      this.currentStream = { song, url: result.url, quality: selectedQuality, isTrial: result.trialDuration !== undefined };
     } catch (err) {
       if (isCancelled()) return false;
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
@@ -1316,6 +1321,8 @@ export class BotInstance extends EventEmitter {
     }
     const bilibili = song.platform === "bilibili";
     const source = song.url ? URL.parse(song.url) : null;
+    const playback = this.currentStream?.song === song && this.currentStream.url === song.url
+      ? this.currentStream : undefined;
     const duration = this.effectiveDuration ?? song.duration;
     const elapsed = this.player.getElapsed();
     const position = bilibili ? Math.floor(elapsed) : elapsed;
@@ -1325,7 +1332,7 @@ export class BotInstance extends EventEmitter {
       return false;
     }
     // Music previews can start at a different offset than the full song.
-    if (!bilibili && (this.currentStreamIsTrial || position <= 0 ||
+    if (!bilibili && (playback?.isTrial || position <= 0 ||
         (source?.protocol !== "http:" && source?.protocol !== "https:"))) return false;
     if (this.player.getState() !== "idle") return true;
     const generation = this.lifecycleGeneration;
@@ -1354,8 +1361,8 @@ export class BotInstance extends EventEmitter {
       return false;
     }
     state.position = position;
-      const failedHost = source?.hostname.replace(/\.$/, "");
-      if (bilibili && failedHost) state.failedHosts.add(failedHost);
+    const failedHost = source?.hostname.replace(/\.$/, "");
+    if (bilibili && failedHost) state.failedHosts.add(failedHost);
 
     this.logger.warn(
       { platform: song.platform, songId: song.id, position, duration, attempt: state.attempts + 1 },
@@ -1380,26 +1387,27 @@ export class BotInstance extends EventEmitter {
         let reason = "no-url";
         try {
           result = await this.getProviderFor(song.platform).getSongUrl(
-              song.id, undefined, bilibili ? { avoidHosts: state.failedHosts } : { refresh: true },
+            song.id, playback?.quality, bilibili ? { avoidHosts: state.failedHosts } : { refresh: true },
           );
-          } catch (err) {
-            if (!isCurrent()) return cancelled();
-            if (blocksProviderForAdvance(toPlayFailure(song.platform, song.id, err).code)) return false;
+        } catch (err) {
+          if (!isCurrent()) return cancelled();
+          if (blocksProviderForAdvance(toPlayFailure(song.platform, song.id, err).code)) return false;
           reason = "lookup-error";
         }
         // Skip, stop, reconnect, or a new playback session supersedes the lookup.
         if (!isCurrent()) return cancelled();
         if (result?.url) {
-            if (!bilibili) {
-              const stream = URL.parse(result.url);
-              if (result.trialDuration !== undefined || (stream?.protocol !== "http:" && stream?.protocol !== "https:")) {
-                this.logger.warn({ platform: song.platform, songId: song.id }, "Fresh URL cannot resume the full track");
-                return false;
-              }
+          if (!bilibili) {
+            const stream = URL.parse(result.url);
+            if (result.trialDuration !== undefined || (stream?.protocol !== "http:" && stream?.protocol !== "https:")) {
+              this.logger.warn({ platform: song.platform, songId: song.id }, "Fresh URL cannot resume the full track");
+              return false;
             }
+          }
           // Lookup retries do not consume the actual decoder resume budget.
           state.attempts++;
           song.url = result.url;
+          if (playback) playback.url = result.url;
           this.player.play(result.url, position, duration);
           state.session = this.player.getPlaybackSessionId();
           if (state.pauseRequested) this.player.pause();
@@ -1407,7 +1415,7 @@ export class BotInstance extends EventEmitter {
           return true;
         }
         this.logger.warn(
-            { platform: song.platform, sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
+          { platform: song.platform, sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
           "Fresh stream URL lookup failed",
         );
       }

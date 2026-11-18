@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { BotInstance } from "./instance.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue } from "../audio/queue.js";
-import type { Platform } from "../music/provider.js";
+import type { Platform, SongUrlRequestOptions } from "../music/provider.js";
 import { BiliBiliProvider } from "../music/bilibili.js";
 import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
 
@@ -107,9 +107,55 @@ describe("finite music CDN recovery", () => {
     expect(bot.playNext).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["netease", "higher"],
+    ["qq", "320"],
+  ] as const)("renews %s with its successful %s quality only for that song", async (platform, fallback) => {
+    const bot = makeMusicBot(platform);
+    const song = bot.queue.current();
+    bot.voteSkipUsers = new Set();
+    bot.database = { addPlayHistory: vi.fn() };
+    bot.provider.getFallbackQualities = () => [fallback];
+    bot.provider.getSongUrl.mockImplementation(async (id: string, quality?: string, options?: SongUrlRequestOptions) => {
+      if (id === song.id && quality !== fallback) return null;
+      return { url: options?.refresh ? "https://cdn.test/renewed.wav" : "https://cdn.test/initial.wav" };
+    });
+
+    const initial = bot.resolveAndPlay(song);
+    await vi.advanceTimersByTimeAsync(120);
+    await expect(initial).resolves.toBe(true);
+
+    bot.player.state = "idle";
+    bot.player.elapsed = 60.28;
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenLastCalledWith(song.id, fallback, { refresh: true });
+    expect(bot.player.play).toHaveBeenLastCalledWith("https://cdn.test/renewed.wav", 60.28, 240);
+    expect(bot.provider.getSongUrl).toHaveBeenCalledTimes(3);
+
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenLastCalledWith(song.id, fallback, { refresh: true });
+    expect(bot.provider.getSongUrl).toHaveBeenCalledTimes(4);
+
+    // A different queue entry may carry a cached URL, but it has no prior
+    // quality evidence even when the URL happens to match.
+    const next = { ...song, id: "another" };
+    bot.queue.add(next);
+    bot.queue.playAt(1);
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenLastCalledWith(next.id, undefined, { refresh: true });
+  });
+
   it.each(["preview", "zero progress", "infinite duration", "local URL"])("does not recover %s streams", async condition => {
     const bot = makeMusicBot();
-    if (condition === "preview") bot.currentStreamIsTrial = true;
+    if (condition === "preview") {
+      const song = bot.queue.current();
+      bot.currentStream = { song, url: song.url, isTrial: true };
+    }
     if (condition === "zero progress") bot.player.elapsed = 0;
     if (condition === "infinite duration") bot.effectiveDuration = Infinity;
     if (condition === "local URL") bot.queue.current().url = "file:///example.wav";
