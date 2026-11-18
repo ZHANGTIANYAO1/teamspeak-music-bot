@@ -905,6 +905,10 @@ OAuth 相关端点：`/api/spotify/login`、`/api/spotify/callback`、`/api/spot
 
 ## 常见问题
 
+**点歌时提示网易云 `-460` 或酷狗 `20028` 怎么办？**
+
+网易云 `-460` 表示上游拒绝本次取流，可稍后用同一首歌重试。酷狗 `20028` 表示平台要求验证，请在酷狗检查账号状态。自动切歌时，机器人会在本次切歌中跳过要求验证或已限制请求的音源，并尝试队列里的其他音源。反馈时提供机器人版本、音源、歌曲 ID、时间点和错误码即可。
+
 **Q：支持 TeamSpeak 6 Server 吗？**
 A：支持。本项目内置 TS3/TS6 双协议支持，连接时会自动检测服务器类型。如果自动检测失败（例如 Query 端口被防火墙屏蔽），可以在创建机器人时手动指定 `serverProtocol: "ts6"`。TS6 Server 的 HTTP Query API（端口 10080）也已适配，需要时可配置 `ts6ApiKey`。
 
@@ -993,7 +997,14 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.16.0：播放可靠性、音乐账号与 OpenProtocol
+### 最新版本 — v1.16.1 播放、续播与队列修复
+
+- B 站长视频中断后优先尝试其他 CDN。网易云、QQ 音乐和酷狗的完整曲目提前断流时，机器人会在有限次数内刷新地址，从已播位置续播。停止、切歌和断开连接会取消旧曲目的恢复。
+- 网页加载空歌单、预检失败或选择无效队列位置时会保留原播放。进度条会跟随实际音频进度，切歌失败会显示原因。更新机器人头像时结束的短曲也能正常推进队列。
+- QQ 音乐使用内嵌 API 支持的歌曲 MID 和音质参数。批量预检会区分上游错误与确实不可播的曲目，启动时也会识别 QQ 端口被其他服务占用。酷狗要求验证时会显示平台错误码。
+- 机器人只会因听众进入自己所在的频道而恢复自动暂停的播放。混合队列遇到音源限制时，会继续尝试其他音源。
+
+### v1.16.0：播放可靠性、音乐账号与 OpenProtocol
 
 - **播放恢复**：临时取流失败会按上限重试，支持的音源可尝试更低音质。`playUrlRetries` 默认为 2，可设为 0–5，设为 0 时关闭重试。切歌、停止或断线会取消旧请求。网易云返回上游限制时会提示具体类型，并停止同一来源的连续重试。网易云播放请求的 User-Agent 与登录客户端配置一致。 [#185](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/185) · [#190](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/190)
 - **B 站**：点播链接保留分 P 参数，修复部分 CDN 的 403。 [#191](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/191)
