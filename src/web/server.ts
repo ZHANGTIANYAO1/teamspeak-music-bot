@@ -8,6 +8,7 @@ import type { MusicProvider } from "../music/provider.js";
 import type { BotDatabase } from "../data/database.js";
 import type { BotConfig, GuestModeConfig } from "../data/config.js";
 import type { Logger } from "../logger.js";
+import { APP_VERSION } from "../version.js";
 import type { CookieStore } from "../music/auth.js";
 import type { AvatarStore } from "../data/avatars.js";
 import { createBotRouter } from "./api/bot.js";
@@ -116,7 +117,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
   });
 
   app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", version: "0.1.0" });
+    res.json({ status: "ok", version: APP_VERSION });
   });
 
   app.get("/api/config/public-url", (_req, res) => {
