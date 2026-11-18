@@ -1,5 +1,8 @@
 import { Router } from "express";
+import type { ParamsDictionary } from "express-serve-static-core";
 import type { MusicProvider } from "../../music/provider.js";
+import type { QQMusicProvider } from "../../music/qq.js";
+import { normalizeCookie } from "../../music/cookie-normalize.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { CookieStore } from "../../music/auth.js";
 import type { Logger } from "../../logger.js";
@@ -11,7 +14,7 @@ import { resolveMusicCookie } from "./provider-scope.js";
 
 export function createAuthRouter(
   neteaseProvider: MusicProvider,
-  qqProvider: MusicProvider,
+  qqProvider: MusicProvider & Partial<Pick<QQMusicProvider, "managedSession">>,
   bilibiliProvider: MusicProvider,
   logger: Logger,
   cookieStore?: CookieStore,
@@ -24,6 +27,7 @@ export function createAuthRouter(
   database?: BotDatabase,
 ): Router {
   const router = Router();
+  const qqSession = qqProvider.managedSession;
   // YouTube is auth-less; we only use this instance so /auth/status can
   // report whether yt-dlp is actually installed (loggedIn=false otherwise).
   const youtubeProvider: MusicProvider = new YouTubeProvider();
@@ -84,8 +88,9 @@ export function createAuthRouter(
       }
 
       const status = await provider.getAuthStatus();
-      logger.debug({ platform, status }, "Auth status check");
-      res.json({ platform: provider.platform, source: "shared", ...status });
+      logger.debug({ platform, loggedIn: status.loggedIn }, "Auth status check");
+      const renewal = platform === "qq" ? qqSession?.getStatus() : undefined;
+      res.json({ platform: provider.platform, source: "shared", ...status, ...renewal });
     } catch (err) {
       logger.error({ err }, "Auth status check failed");
       res.status(500).json({ error: (err as Error).message });
@@ -97,7 +102,7 @@ export function createAuthRouter(
       const { platform } = req.body;
       const provider = getProvider(platform);
       const qr = await provider.getQrCode();
-      logger.info({ platform, key: qr.key }, "QR code generated");
+      logger.info({ platform }, "QR code generated");
       res.json(qr);
     } catch (err) {
       logger.error({ err }, "QR code generation failed");
@@ -105,7 +110,11 @@ export function createAuthRouter(
     }
   });
 
-  router.get("/qrcode/status", requireNotGuest, async (req, res) => {
+  const requirePlatformAuth = requirePermission<ParamsDictionary>("platform.auth");
+  router.get("/qrcode/status", requireNotGuest, (req, res, next) => {
+    if (qqSession && req.query.platform === "qq") requirePlatformAuth(req, res, next);
+    else next();
+  }, async (req, res) => {
     try {
       const { key, platform } = req.query;
       if (!key) {
@@ -114,10 +123,10 @@ export function createAuthRouter(
       }
       const provider = getProvider(platform as string);
       const status = await provider.checkQrCodeStatus(key as string);
-      logger.info({ platform, status, key }, "QR status check");
+      logger.info({ platform, status }, "QR status check");
 
       // When confirmed, persist cookie
-      if (status === "confirmed") {
+      if (status === "confirmed" && !(platform === "qq" && qqSession)) {
         const cookie = provider.getCookie();
         const plat = (platform as string) === "bilibili" ? "bilibili" as const
           : (platform as string) === "kugou" ? "kugou" as const
@@ -133,6 +142,19 @@ export function createAuthRouter(
       logger.error({ err }, "QR status check failed");
       res.status(500).json({ error: (err as Error).message });
     }
+  });
+
+  router.post("/qq/refresh", requirePlatformAuth, async (_req, res) => {
+    if (!qqSession) {
+      res.status(404).json({ outcome: "disabled" });
+      return;
+    }
+    const outcome = await qqSession.refresh();
+    const status = outcome === "refreshed" ? 200
+      : outcome === "cooldown" || outcome === "rate_limited" ? 429
+      : outcome === "reauth_required" || outcome === "superseded" ? 409
+      : outcome === "persist_failed" ? 503 : 502;
+    res.status(status).json({ outcome, ...qqSession.getStatus() });
   });
 
   // Jellyfin has no QR/cookie flow — the connection is admin-configured. This
@@ -216,7 +238,8 @@ export function createAuthRouter(
   });
 
   router.post("/cookie", requirePermission("platform.auth"), (req, res) => {
-    const { platform, cookie } = req.body;
+    const { platform, cookie: raw } = req.body;
+    const cookie = typeof raw === "string" ? normalizeCookie(raw) : "";
     if (!cookie) {
       res.status(400).json({ error: "cookie is required" });
       return;
@@ -238,10 +261,21 @@ export function createAuthRouter(
       return;
     }
     const provider = getProvider(platform);
+    if (platform === "qq") {
+      try {
+        if (!qqSession) cookieStore?.save("qq", cookie);
+        provider.setCookie(cookie);
+        res.json({ success: true });
+      } catch {
+        logger.warn("Could not save imported QQ cookie");
+        res.status(503).json({ error: "Could not save QQ cookie" });
+      }
+      return;
+    }
     provider.setCookie(cookie);
     const plat = platform === "bilibili" ? "bilibili" as const
       : platform === "kugou" ? "kugou" as const
-      : platform === "qq" ? "qq" as const : "netease" as const;
+      : "netease" as const;
     if (cookieStore) {
       cookieStore.save(plat, cookie);
     }

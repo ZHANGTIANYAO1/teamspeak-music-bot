@@ -38,26 +38,25 @@
 
     <p class="hint">
       <template v-if="status.source === 'granted'">
-        这个账号是管理员分配给你的，搜索、歌单、每日推荐和播放都会用它。想换成自己的账号，直接扫码绑定即可 — 自己的账号优先。
+        网页搜索、歌单和每日推荐默认使用管理员分配的账号。自己的绑定优先。
       </template>
       <template v-else-if="status.supportsQrLogin">
-        绑定后，{{ PLATFORM_LABEL[current] ?? current }}的搜索、歌单、每日推荐和播放地址都按你自己的账号获取，
-        看不到管理员的歌单和收藏。仅保存在服务器上，不会显示给任何人。
+        管理员开启每用户独立账号后，可使用你绑定的{{ PLATFORM_LABEL[current] ?? current }}账号查看网页搜索、歌单和推荐。登录凭据保存在服务器。
       </template>
       <template v-else>
         该平台暂不支持在网页端自助绑定，需要账号请联系管理员分配。
       </template>
     </p>
 
-    <!-- 播放用哪个账号。只有真的持有个人/分配账号、且管理员开了这个功能时
+    <!-- 网页用哪个账号。只有真的持有个人/分配账号、且管理员开了这个功能时
          才有得选；否则本来就走共享账号。 -->
     <div
       v-if="status.featureEnabled && status.linked"
       class="account-choice"
       role="radiogroup"
-      aria-label="播放使用哪个账号"
+      aria-label="网页端使用哪个账号"
     >
-      <div class="account-choice-title">网页端播放使用哪个账号</div>
+      <div class="account-choice-title">网页端使用哪个账号</div>
 
       <div
         class="account-choice-option"
@@ -73,8 +72,7 @@
         <span class="account-choice-text">
           <strong>我的账号</strong>
           <em>
-            {{ status.source === 'granted' ? '管理员分配给我的那个' : '我自己扫码绑定的' }}；
-            播放不了时自动改用共享账号
+            {{ status.source === 'granted' ? '管理员分配的账号' : '我扫码绑定的账号' }}
           </em>
         </span>
       </div>
@@ -92,13 +90,12 @@
         <span class="account-choice-dot" :class="{ on: status.preferShared }" />
         <span class="account-choice-text">
           <strong>共享账号（管理员的）</strong>
-          <em>会员曲目可以完整播放，但播放记录会记到管理员账号名下</em>
+          <em>查看共享账号的歌单和推荐</em>
         </span>
       </div>
 
       <div class="account-choice-note">
-        这个选择只影响本站的搜索、歌单和试听。房间里播歌
-        （网页点歌后由机器人播放、<code>!play</code>）一直用共享账号，无论这里怎么选。
+        这个选择影响网页端的搜索、歌单和推荐。房间播歌使用机器人共享账号。
       </div>
     </div>
 

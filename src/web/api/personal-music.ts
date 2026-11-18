@@ -132,8 +132,8 @@ export function createPersonalMusicRouter(
         featureEnabled,
         ...status,
       });
-    } catch (err) {
-      logger.warn({ err, platform, source: account.source }, "Personal music status check failed");
+    } catch {
+      logger.warn({ platform, source: account.source }, "Personal music status check failed");
       res.json({
         linked: true,
         loggedIn: false,

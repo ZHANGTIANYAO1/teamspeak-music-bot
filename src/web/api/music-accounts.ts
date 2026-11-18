@@ -90,6 +90,9 @@ export function createMusicAccountsRouter(
   const nonEmpty = (v: unknown, max: number): v is string =>
     typeof v === "string" && v.trim().length > 0 && v.length <= max;
 
+  const validCapacity = (value: unknown): value is number | undefined =>
+    value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+
   /** Every real (non-guest) user, for the assign dropdown. */
   const assignableUsers = () =>
     users.listUsers().map((u) => ({ id: u.id, username: u.username, role: u.role }));
@@ -122,8 +125,8 @@ export function createMusicAccountsRouter(
       res.status(400).json({ error: "cookie is required" });
       return;
     }
-    if (capacity !== undefined && (typeof capacity !== "number" || capacity < 0)) {
-      res.status(400).json({ error: "capacity must be a non-negative number" });
+    if (!validCapacity(capacity)) {
+      res.status(400).json({ error: "capacity must be a non-negative integer" });
       return;
     }
     if (ownerId !== undefined && ownerId !== null && typeof ownerId !== "string") {
@@ -163,8 +166,8 @@ export function createMusicAccountsRouter(
       res.status(400).json({ error: "invalid cookie" });
       return;
     }
-    if (capacity !== undefined && (typeof capacity !== "number" || capacity < 0)) {
-      res.status(400).json({ error: "capacity must be a non-negative number" });
+    if (!validCapacity(capacity)) {
+      res.status(400).json({ error: "capacity must be a non-negative integer" });
       return;
     }
     if (enabled !== undefined && typeof enabled !== "boolean") {
@@ -174,12 +177,16 @@ export function createMusicAccountsRouter(
     // Replacing the cookie invalidates any device-bound session (Kugou binds
     // the token to guid/mid) — the existing grants keep pointing at the row,
     // so the admin only has to paste a fresh cookie to fix everyone at once.
-    database.updateMusicAccount(account.id, {
+    const updated = database.updateMusicAccount(account.id, {
       label: label === undefined ? undefined : label.trim(),
       cookie: cookie === undefined ? undefined : cookie.trim(),
       capacity,
       enabled,
     });
+    if (!updated) {
+      res.status(409).json({ error: "capacity_below_existing_grants" });
+      return;
+    }
     logger.info(
       { accountId: account.id, enabled: enabled ?? account.enabled },
       "Music account updated",
@@ -268,7 +275,7 @@ export function createMusicAccountsRouter(
       res.status(404).json({ error: "not found" });
       return;
     }
-    const removed = database.deleteMusicAccountGrant(req.params.userId, account.platform);
+    const removed = database.deleteMusicAccountGrant(req.params.userId, account.platform, account.id);
     logger.info(
       { accountId: account.id, userId: req.params.userId, removed },
       "Music account assignment revoked",
@@ -291,9 +298,9 @@ export function createMusicAccountsRouter(
     try {
       const status = await provider.withCookie(account.cookie).getAuthStatus();
       res.json({ ok: true, ...status });
-    } catch (err) {
-      logger.warn({ err, accountId: account.id }, "Music account probe failed");
-      res.status(502).json({ error: (err as Error).message, loggedIn: false });
+    } catch {
+      logger.warn({ accountId: account.id }, "Music account probe failed");
+      res.status(502).json({ error: "music_account_probe_failed", loggedIn: false });
     }
   });
 
@@ -315,8 +322,8 @@ export function createMusicAccountsRouter(
       res.status(400).json({ error: "unsupported platform" });
       return;
     }
-    if (capacity !== undefined && (typeof capacity !== "number" || capacity < 0)) {
-      res.status(400).json({ error: "capacity must be a non-negative number" });
+    if (!validCapacity(capacity)) {
+      res.status(400).json({ error: "capacity must be a non-negative integer" });
       return;
     }
     // 没有 qq provider（例如单测只挂了 netease）时仍然回落到 cookie store，

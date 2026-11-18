@@ -6,6 +6,8 @@ import { createLogger } from "./logger.js";
 import { createApiServerManager } from "./music/api-server.js";
 import { NeteaseProvider } from "./music/netease.js";
 import { QQMusicProvider } from "./music/qq.js";
+import { createQqLoginClient } from "./music/qq-login.js";
+import { createQqSessionStore, QQManagedSession } from "./music/qq-session.js";
 import { BiliBiliProvider } from "./music/bilibili.js";
 import { LocalMusicProvider } from "./music/local.js";
 import { KugouProvider } from "./music/kugou.js";
@@ -66,7 +68,6 @@ async function main() {
   await apiServer.start();
 
   const neteaseProvider = new NeteaseProvider(apiServer.getNeteaseBaseUrl());
-  const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl());
   const bilibiliProvider = new BiliBiliProvider();
   const localProvider = new LocalMusicProvider(LOCAL_AUDIO_DIR);
   const kugouProvider = new KugouProvider();
@@ -79,12 +80,23 @@ async function main() {
     spotifyProvider.setCreds(config.spotify.clientId, config.spotify.clientSecret);
   }
 
-  const cookieStore = createCookieStore(COOKIE_DIR);
+  const qqStore = createQqSessionStore(path.join(COOKIE_DIR, "qq-session.json"), path.join(COOKIE_DIR, "qq.json"));
+  const cookieStore = createCookieStore(COOKIE_DIR, qqStore);
   const avatarStore = createAvatarStore(AVATAR_DIR);
   const neteaseCookie = cookieStore.load("netease");
   if (neteaseCookie) neteaseProvider.setCookie(neteaseCookie);
-  const qqCookie = cookieStore.load("qq");
-  if (qqCookie) qqProvider.setCookie(qqCookie);
+  const qqSession = (process.env.QQ_MUSIC_MANAGED_SESSION ?? "1") === "1" && isProviderEnabled(config, "qq")
+    ? new QQManagedSession(createQqLoginClient(), qqStore, logger)
+    : undefined;
+  const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl(), qqSession);
+  if (!qqSession) {
+    try {
+      const cookie = cookieStore.load("qq");
+      if (cookie) qqProvider.setCookie(cookie);
+    } catch {
+      logger.warn("Could not read QQ session");
+    }
+  }
   const bilibiliCookie = cookieStore.load("bilibili");
   if (bilibiliCookie) bilibiliProvider.setCookie(bilibiliCookie);
   const kugouCookie = cookieStore.load("kugou");
@@ -175,6 +187,7 @@ async function main() {
 
   const shutdown = () => {
     logger.info("Shutting down...");
+    qqSession?.stop();
     botManager.shutdown();
     webServer.stop();
     apiServer.stop();

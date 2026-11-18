@@ -181,10 +181,8 @@ export function createPlayerRouter(
         rejectDisabledLocalAudio(res);
         return;
       }
-      // A caller who linked their own account gets FM from THEIR taste instead
-      // of the bot's shared login (#164). With per-user accounts enabled the
-      // same account now also resolves playback, so VIP/high-quality tracks
-      // come from that account rather than the admin's.
+      // Resolve FM recommendations with the caller's account. The bot resolves
+      // each queued track's playback URL using the shared account.
       const provider = fmProvider(req, bot, platform);
       const message = await bot.startFm(provider, requesterName(req));
       res.json({

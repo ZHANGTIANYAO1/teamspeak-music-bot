@@ -677,12 +677,12 @@ describe("bot router /settings jellyfin block + enabledProviders", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function mountBot(): express.Express {
+  function mountBot(user: unknown = { role: "admin" }): express.Express {
     const fakeManager = { getAllBots: () => [] } as unknown as BotManager;
     const avatarStore = createAvatarStore(tmpDir);
     const app = express();
     app.use(express.json());
-    app.use((req, _res, next) => { (req as { user?: unknown }).user = { role: "admin" }; next(); });
+    app.use((req, _res, next) => { (req as { user?: unknown }).user = user; next(); });
     app.use(
       "/api/bot",
       createBotRouter(
@@ -693,6 +693,14 @@ describe("bot router /settings jellyfin block + enabledProviders", () => {
     );
     return app;
   }
+
+  it("reserves the music-account policy toggle for administrators", async () => {
+    const member = mountBot({ role: "member", capabilities: new Set(["bot.manage"]) });
+    await request(member).post("/api/bot/settings").send({ perUserMusicAccounts: true }).expect(403);
+    expect(config.perUserMusicAccounts).toBe(false);
+    await request(mountBot()).post("/api/bot/settings").send({ perUserMusicAccounts: true }).expect(200);
+    expect(config.perUserMusicAccounts).toBe(true);
+  });
 
   it("GET /settings exposes a masked jellyfin block (no password/apiKey echo)", async () => {
     config.jellyfin.serverUrl = "https://jf.example.com";

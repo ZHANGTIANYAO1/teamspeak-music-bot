@@ -133,11 +133,8 @@ export interface BotConfig {
   /**
    * Per-user music accounts (admin-controlled, default false). When on, a web
    * user who linked their own platform account (Settings → 我的音乐账号) reads
-   * search results, playlists, daily recommendations and playback URLs from
-   * THAT account instead of the bot's shared login — so a member stops seeing
-   * the admin's library. When off (or when the user has no linked account, or
-   * the source has no per-account login) everything falls back to the shared
-   * login, which is exactly the pre-existing behaviour.
+   * search results, playlists and recommendations through their linked account
+   * or an account assigned by an admin. Room playback uses the shared account.
    */
   perUserMusicAccounts: boolean;
   /**

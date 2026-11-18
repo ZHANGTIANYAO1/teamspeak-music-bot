@@ -15,6 +15,7 @@
  * residential IP is required. QR login and VIP audio could not be verified in
  * the build environment.
  */
+import { normalizeCookie } from "./cookie-normalize.js";
 import axios, { type AxiosInstance } from "axios";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
@@ -442,7 +443,9 @@ export class KugouProvider implements MusicProvider {
   // --- Cookie persistence (CookieStore stores a flat "k=v; k=v" string) ------
   setCookie(cookie: string): void {
     const map: CookieMap = {};
-    for (const part of (cookie || "").split(";")) {
+    // Normalise first: a pasted `Set-Cookie` line would otherwise land
+    // Max-Age/Expires/Path in the map as cookie names.
+    for (const part of normalizeCookie(cookie).split(";")) {
       const eq = part.indexOf("=");
       if (eq < 0) continue;
       const k = part.slice(0, eq).trim();

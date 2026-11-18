@@ -106,9 +106,11 @@ export function createBotRouter(
 
     const hasAutoPause = typeof autoPauseOnEmpty === "boolean";
     const hasLocalAudioEnabled = typeof localAudioEnabled === "boolean";
-    // Per-user music accounts: admin-only toggle (this route already requires
-    // bot.manage). Strictly boolean — anything else leaves the value alone.
     const hasPerUserMusicAccounts = typeof perUserMusicAccounts === "boolean";
+    if (hasPerUserMusicAccounts && req.user?.role !== "admin") {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
 
     if (hasIdle) config.idleTimeoutMinutes = idleTimeoutMinutes;
     if (hasAutoPause) config.autoPauseOnEmpty = autoPauseOnEmpty;

@@ -172,6 +172,28 @@ describe("admin music account pool", () => {
     expect(db.getGrantedMusicAccount("u1", "netease")).toBeNull();
   });
 
+  it("preserves a replacement assignment when an old assignment is revoked", async () => {
+    const { app, db } = mount();
+    const first = await seed(app, { label: "一号" });
+    const second = await seed(app, { label: "二号" });
+    for (const account of [first, second]) {
+      await request(app).post(`/api/music-accounts/${account.body.id}/assign`).send({ userId: "u1" }).expect(200);
+    }
+    const res = await request(app).delete(`/api/music-accounts/${first.body.id}/assign/u1`).expect(200);
+    expect(res.body.removed).toBe(false);
+    expect(db.getGrantedMusicAccount("u1", "netease")?.accountId).toBe(second.body.id);
+  });
+
+  it("does not lower the capacity below the current number of assignees", async () => {
+    const { app, db } = mount();
+    const id = (await seed(app)).body.id;
+    for (const userId of ["u1", "u2"]) {
+      await request(app).post(`/api/music-accounts/${id}/assign`).send({ userId }).expect(200);
+    }
+    await request(app).patch(`/api/music-accounts/${id}`).send({ capacity: 1 }).expect(409);
+    expect(db.getMusicAccount(id)?.capacity).toBe(0);
+  });
+
   // Deleting the account must not leave grants pointing at a dead row.
   it("cascades grantees when the account is deleted", async () => {
     const { app, db } = mount();

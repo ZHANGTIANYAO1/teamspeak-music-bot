@@ -212,7 +212,7 @@ export interface BotDatabase {
     enabled?: boolean;
   }): MusicAccount;
   /**
-   * Partial update; false when the id does not exist.
+   * Partial update; false when the id does not exist or the capacity is too low.
    *
    * `platform` is intentionally NOT patchable: grants are keyed by
    * (userId, platform) while pointing at `accountId`, so moving an account to
@@ -242,7 +242,7 @@ export interface BotDatabase {
   ):
     | { ok: true; replacedAccountId: string | null }
     | { ok: false; reason: "not_found" | "disabled" | "exclusive" | "full" };
-  deleteMusicAccountGrant(userId: string, platform: string): boolean;
+  deleteMusicAccountGrant(userId: string, platform: string, accountId: string): boolean;
   /** The account an admin assigned to `userId`, or null. Disabled accounts are skipped. */
   getGrantedMusicAccount(userId: string, platform: string): GrantedMusicAccount | null;
   // Saved queues (Feature 1) — upsert by (ownerId, name), capped.
@@ -669,6 +669,9 @@ export function createDatabase(dbPath: string): BotDatabase {
     SET platform = @platform, label = @label, cookie = @cookie,
         capacity = @capacity, enabled = @enabled, updatedAt = datetime('now')
     WHERE id = @id
+      AND (@capacity = 0 OR @capacity >= (
+        SELECT COUNT(*) FROM music_account_grants WHERE accountId = @id
+      ))
   `);
   const deleteMusicAccountStmt = db.prepare(`DELETE FROM music_accounts WHERE id = ?`);
   const countGrantsByAccount = db.prepare(
@@ -689,7 +692,7 @@ export function createDatabase(dbPath: string): BotDatabase {
       grantedAt = datetime('now')
   `);
   const deleteGrantStmt = db.prepare(
-    `DELETE FROM music_account_grants WHERE userId = ? AND platform = ?`,
+    `DELETE FROM music_account_grants WHERE userId = ? AND platform = ? AND accountId = ?`,
   );
   // A disabled account is invisible to the resolver, so switching it off is an
   // instant, reversible rollback for everyone holding it (shared login returns).
@@ -994,7 +997,7 @@ export function createDatabase(dbPath: string): BotDatabase {
     updateMusicAccount(id, patch) {
       const current = getAccountById(id);
       if (!current) return false;
-      updateMusicAccountStmt.run({
+      return updateMusicAccountStmt.run({
         id,
         // Platform is immutable (see the interface doc): existing grants are
         // keyed by the OLD platform and would be orphaned by a move.
@@ -1006,8 +1009,7 @@ export function createDatabase(dbPath: string): BotDatabase {
             ? current.capacity
             : Math.max(0, Math.trunc(patch.capacity)),
         enabled: (patch.enabled ?? current.enabled) ? 1 : 0,
-      });
-      return true;
+      }).changes > 0;
     },
 
     deleteMusicAccount(id) {
@@ -1031,8 +1033,8 @@ export function createDatabase(dbPath: string): BotDatabase {
       return assignMusicAccountTx(userId, accountId, grantedBy);
     },
 
-    deleteMusicAccountGrant(userId, platform) {
-      return deleteGrantStmt.run(userId, platform).changes > 0;
+    deleteMusicAccountGrant(userId, platform, accountId) {
+      return deleteGrantStmt.run(userId, platform, accountId).changes > 0;
     },
 
     getGrantedMusicAccount(userId, platform) {

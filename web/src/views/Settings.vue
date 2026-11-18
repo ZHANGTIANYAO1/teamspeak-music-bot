@@ -444,6 +444,12 @@
             <div class="account-status" :class="{ logged: qqAuth.loggedIn }">
               {{ qqAuth.loggedIn ? `已登录: ${qqAuth.nickname}` : '未登录' }}
             </div>
+            <div v-if="qqRenewalMessage" class="account-status">
+              {{ qqRenewalMessage }}
+            </div>
+            <div v-if="qqAuth.renewalStatus" class="account-status">
+              上次成功续期 {{ qqAuth.lastRefreshAt ? new Date(qqAuth.lastRefreshAt).toLocaleString() : '暂无记录' }}
+            </div>
           </div>
         </div>
 
@@ -976,7 +982,7 @@
       <label v-if="session.isAdmin.value" class="profile-toggle behavior-toggle">
         <div class="profile-toggle-text">
           <div class="profile-toggle-label">每个成员使用自己的音乐账号</div>
-          <div class="profile-toggle-hint">开启后，成员在「我的音乐账号」里绑定自己的网易云，<strong>网页端</strong>的搜索、歌单、每日推荐和试听地址都按他自己的账号获取，看不到管理员的歌单和收藏。未绑定、游客或未开启时沿用机器人的共享账号。默认关闭。目前仅网易云支持个人绑定。<br />房间里的播放（网页点歌后由机器人播放、<code>!play</code>、自动切歌）始终使用共享账号 —— 成员没有会员也能正常听歌，只是播放记录会集中到共享账号上。这就是「会员可共享、数据可隔离」的组合。</div>
+          <div class="profile-toggle-hint">开启后，成员可用自己绑定或管理员分配的账号访问网页搜索、歌单和推荐。仅网易云支持成员扫码绑定。没有专属账号时使用机器人共享账号。房间播歌始终使用共享账号。</div>
         </div>
         <input
           v-model="perUserMusicAccounts"
@@ -1445,7 +1451,22 @@ const kugouLoginMode = ref<'qr' | 'cookie' | null>(null);
 
 // Auth status
 const neteaseAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
-const qqAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
+const qqAuth = reactive({
+  loggedIn: false, nickname: '', avatarUrl: '',
+  renewalStatus: '' as '' | 'cookie_only' | 'scheduled' | 'retrying' | 'reauth_required',
+  nextRefreshAt: null as string | null,
+  lastRefreshAt: null as string | null,
+});
+const qqRenewalMessage = computed(() => {
+  const next = qqAuth.nextRefreshAt ? new Date(qqAuth.nextRefreshAt).toLocaleString() : '';
+  switch (qqAuth.renewalStatus) {
+    case 'cookie_only': return '没有续期凭据，请扫码授权';
+    case 'reauth_required': return '续期已暂停，请重新扫码';
+    case 'scheduled': return `下次自动续期 ${next}`;
+    case 'retrying': return `续期将于 ${next} 重试`;
+    default: return '';
+  }
+});
 const bilibiliAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const kugouAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const jellyfinAuth = reactive({ loggedIn: false, nickname: '' });

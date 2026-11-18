@@ -113,7 +113,7 @@ export function createMusicRouter(
       return null;
     }
     // Per-user accounts: with the feature on, a user who linked their own
-    // account reads search/playlists/lyrics/artists/playback through THAT
+    // account reads search/playlists/lyrics/artists through THAT
     // login instead of the bot's shared one, so members stop seeing the
     // admin's library. Everyone else keeps the shared provider unchanged.
     return resolveProviderForRequest(req, target, getProvider(target), {
