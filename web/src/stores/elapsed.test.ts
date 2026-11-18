@@ -59,7 +59,7 @@ describe("playback request timing", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(["playSong", "playPlaylist", "playAlbum", "playArtist", "next"] as const)(
+  it.each(["playSong", "playPlaylist", "playAlbum", "playArtist", "next", "playAtIndex"] as const)(
     "keeps the current clock when %s fails",
     async (action) => {
       const store = usePlayerStore();
@@ -70,6 +70,7 @@ describe("playback request timing", () => {
 
       if (action === "playSong") await store.playSong(track);
       else if (action === "next") await store.next();
+      else if (action === "playAtIndex") await store.playAtIndex(1);
       else await store[action]("collection");
 
       expect(store.timings.a).toEqual(current);

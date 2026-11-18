@@ -402,7 +402,8 @@ export const usePlayerStore = defineStore('player', {
     },
 
     /** Poll the same bot for authoritative elapsed time. */
-    async syncElapsed(botId = this.activeBotId) {
+    async syncElapsed(botId?: string) {
+      botId ??= this.activeBotId ?? undefined;
       if (!botId || !this.bots.some(bot => bot.id === botId && bot.playing && !bot.paused)) return;
       const timing = this.timings[botId];
       try {
@@ -449,10 +450,11 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playAtIndex(index: number) {
-      if (!this.activeBotId) return;
-      await axios.post(`/api/player/${this.activeBotId}/play-at`, { index });
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
+      const botId = this.activeBotId;
+      if (!botId) return;
+      const res = await axios.post(`/api/player/${botId}/play-at`, { index });
+      if (res.data?.ok === false && res.data?.message) this.notify(res.data.message, 'error');
+      if (res.data?.ok === true) void this.syncElapsed(botId);
     },
 
     async play(query: string, platform = 'netease') {

@@ -128,7 +128,7 @@ export function createPlayerRouter(
       let failure: PlayFailure | undefined;
       const capture = (reason: PlayFailure) => { failure = reason; };
       let started = first ? await bot.resolveAndPlay(first, capture) : false;
-      if (first && !started && !blocksProviderForAdvance(failure?.code) && queue.current() === first) {
+      if (first && !started && failure && !blocksProviderForAdvance(failure.code) && queue.current() === first) {
         // Many collections contain several consecutive unavailable tracks.
         started = await bot.playNext(20, capture);
       }
@@ -346,10 +346,10 @@ export function createPlayerRouter(
   // Jump to a specific index in the queue (without clearing it)
   router.post("/:botId/play-at", authorize({ capability: "player.control" }), async (req, res) => {
     try {
-      const bot = (req as any).bot;
+      const bot: BotInstance = (req as any).bot;
       const { index } = req.body;
-      if (typeof index !== "number" || index < 0) {
-        res.status(400).json({ error: "index is required" });
+      if (!Number.isSafeInteger(index) || index < 0) {
+        res.status(400).json({ error: "index must be a non-negative integer" });
         return;
       }
       // Serialize the index-validation + stop/reset/playAt/resolveAndPlay so a
@@ -360,21 +360,23 @@ export function createPlayerRouter(
         // Validate the index BEFORE stopping current playback — otherwise an
         // invalid index silently kills the user's current song and leaves the
         // queue idle.
-        if (index >= queue.size()) {
-          return { status: 400 as const, body: { error: "Invalid queue index" } };
-        }
-        bot.getPlayer().stop(true);
-        bot.getPlayer().resetFailures();
         const song = queue.playAt(index);
         if (!song) {
           return { status: 400 as const, body: { error: "Invalid queue index" } };
         }
-        const ok = await bot.resolveAndPlay(song);
+        const player = bot.getPlayer();
+        player.stop(true);
+        player.resetFailures();
+        const session = player.getPlaybackSessionId();
+        bot.emit("stateChange");
+        let reason: string | undefined;
+        const ok = await bot.resolveAndPlay(song, failure => { reason = failure.message; });
         if (!ok) {
-          bot.getPlayer().stop();
-          return { body: { message: `Cannot play: ${song.name}` } };
+          // Abandon this transition's silence loop, leaving newer playback alone.
+          if (queue.current() === song && player.getPlaybackSessionId() === session) player.stop();
+          return { body: { ok: false, message: whyUnplayable(song, reason) } };
         }
-        return { body: { message: `Now playing: ${song.name} - ${song.artist}` } };
+        return { body: { ok: true, message: `Now playing: ${song.name} - ${song.artist}` } };
       });
       if (result.status) {
         res.status(result.status).json(result.body);

@@ -174,3 +174,43 @@ describe("collection preflight", () => {
     expect(queue.current()?.id).toBe("playing");
   });
 });
+
+describe("play a queue position", () => {
+  function fixture() {
+    const queue = new PlayQueue();
+    queue.add(song("playing"));
+    queue.add(song("unavailable"));
+    queue.play();
+    const player = { stop: vi.fn(), resetFailures: vi.fn(), getPlaybackSessionId: () => 1 };
+    const bot = {
+      getQueueManager: () => queue,
+      getPlayer: () => player,
+      runExclusive: (work: () => Promise<unknown>) => work(),
+      resolveAndPlay: vi.fn(async (_song: Song, onFailure?: (failure: { message: string }) => void) => {
+        onFailure?.({ message: "Source returned no stream" });
+        return false;
+      }),
+      emit: vi.fn(),
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+    app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+    return { app, bot, player, queue };
+  }
+
+  it("rejects fractional positions without stopping the playing track", async () => {
+    const { app, player, queue } = fixture();
+    expect((await request(app).post("/api/player/b/play-at").send({ index: 0.5 })).status).toBe(400);
+    expect(player.stop).not.toHaveBeenCalled();
+    expect(queue.current()?.id).toBe("playing");
+  });
+
+  it("returns the URL failure and publishes the selected stopped track", async () => {
+    const { app, bot, queue } = fixture();
+    const response = await request(app).post("/api/player/b/play-at").send({ index: 1 });
+    expect(response.body).toEqual({ ok: false, message: expect.stringContaining("Source returned no stream") });
+    expect(bot.emit).toHaveBeenCalledWith("stateChange");
+    expect(queue.current()?.id).toBe("unavailable");
+  });
+});
