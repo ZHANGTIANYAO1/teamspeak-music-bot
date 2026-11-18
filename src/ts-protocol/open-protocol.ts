@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
 import { PlayMode } from "../audio/queue.js";
 import type { Logger } from "../logger.js";
+import { APP_VERSION } from "../version.js";
 import type { PluginCommandTarget, TS3PluginCommand } from "./client.js";
 
 export const OPEN_PROTOCOL_VERSION = 1;
@@ -99,21 +99,6 @@ const CORE_COMMAND_ARGS_EN: Readonly<Record<string, string>> = {
   remove: "<index>",
   playlist: "<id|url>",
 };
-
-function loadAppVersion(): string {
-  try {
-    const raw = readFileSync(new URL("../../package.json", import.meta.url), "utf8");
-    const parsed = JSON.parse(raw) as { version?: unknown };
-    if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
-      return truncateChars(parsed.version.trim(), MAX_APP_META_CHARS);
-    }
-  } catch {
-    // Fallback below if package.json is unavailable in a custom bundle
-  }
-  return "0.1.0";
-}
-
-export const APP_VERSION = loadAppVersion();
 
 function truncateChars(value: string, maxChars: number): string {
   const sanitized = value.replace(/[\u0000-\u001F\u007F]/g, "");

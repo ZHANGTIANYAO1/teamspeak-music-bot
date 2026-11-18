@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import pino from "pino";
+import { APP_VERSION } from "../version.js";
 import {
   ACK_GLOBAL_BURST,
   ANNOUNCE_DEBOUNCE_MS,
   ANNOUNCE_RETRY_DELAY_MS,
   APP_NAME,
-  APP_VERSION,
   BOT_CAPABILITIES,
   COMMANDS_LIST_REQ_COOLDOWN_MS,
   COMMANDS_PLUGIN,

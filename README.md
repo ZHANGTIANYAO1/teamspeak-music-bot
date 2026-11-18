@@ -993,7 +993,24 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.15.2：长视频续播与语音发送故障处理
+### 最新版本 — v1.16.0：播放可靠性、音乐账号与 OpenProtocol
+
+- **播放恢复**：临时取流失败会按上限重试，支持的音源可尝试更低音质。`playUrlRetries` 默认为 2，可设为 0–5，设为 0 时关闭重试。切歌、停止或断线会取消旧请求。网易云返回上游限制时会提示具体类型，并停止同一来源的连续重试。网易云播放请求的 User-Agent 与登录客户端配置一致。 [#185](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/185) · [#190](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/190)
+- **B 站**：点播链接保留分 P 参数，修复部分 CDN 的 403。 [#191](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/191)
+- **音乐登录**：支持多行 `Set-Cookie` 导入及 QQ 扫码会话自动续期。启用网页个人音乐账号后，搜索、歌单和推荐可使用个人登录或管理员分配的账号；房间语音播放使用共享账号。 [#184](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/184) · [#188](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/188) · [#186](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/186)
+- **网页播放历史**：有权限的用户可按机器人单条删除、批量删除或清空历史。 [#182](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/182)
+- **TeamSpeak**：新增 OpenProtocol v1 命令发现和结构化回复，更新 TS3/TS6 客户端 SDK，补齐音频淡入淡出的回归测试。 [#194](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/194) · [#178](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/178)
+- **隐私与部署**：音乐 API 请求失败时，日志保留诊断码并省略请求和响应数据；Docker 文档新增官方镜像离线导入和按版本标签本地构建的步骤。 [#197](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/197) · [#196](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/196)
+
+### v1.15.4：播放控制淡入淡出
+
+- 暂停、恢复、切歌和停止时使用音量渐变，减少操作时的爆音。 [#177](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/177)
+
+### v1.15.3：设置和外观偏好
+
+- 重整设置页，并同步账号的界面外观偏好。 [#176](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/176)
+
+### v1.15.2：长视频续播与语音发送故障处理
 
 - 修复播放停滞的误判：一帧音频成功发送后，即使缓冲恰好被读空，也会重置断流计数。真实断流仍保留超时检测。
 - B站 CDN 按实际域名识别，补齐 `szbdyd.com` 等回退节点的请求头和断点定位，避免续播时从头下载、解码长视频。
