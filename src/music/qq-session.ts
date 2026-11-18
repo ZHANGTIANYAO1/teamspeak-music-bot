@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Logger } from "../logger.js";
 import type { QrCodeResult } from "./provider.js";
+import { normalizeCookie } from "./cookie-normalize.js";
 import { hasQqRenewalMaterial, parseQqCredential, qqPlaybackCookie, type QqCredential, type QqLoginClient, type QqPollResult } from "./qq-login.js";
 
 interface QqSessionRecord {
@@ -37,7 +38,8 @@ export function createQqSessionStore(file: string, legacyFile?: string) {
     try {
       if (fs.statSync(legacyFile).mtimeMs <= newerThan) return;
       const { cookie } = JSON.parse(fs.readFileSync(legacyFile, "utf8"));
-      if (typeof cookie === "string" && cookie) return { cookie };
+      const clean = typeof cookie === "string" ? normalizeCookie(cookie) : "";
+      if (clean) return { cookie: clean };
     } catch { /* The legacy cookie is missing or unreadable. */ }
   }
 
@@ -58,11 +60,12 @@ export function createQqSessionStore(file: string, legacyFile?: string) {
         if (legacy) return legacy;
       }
       const credential = parseQqCredential(data.credential);
-      if (data.credential && (!credential || qqPlaybackCookie(credential) !== data.cookie)) {
+      const cookie = normalizeCookie(data.cookie);
+      if (data.credential && (!credential || qqPlaybackCookie(credential) !== cookie)) {
         throw new Error("Invalid QQ session credential");
       }
       return {
-        cookie: data.cookie,
+        cookie,
         credential,
         reauthRequired: data.reauthRequired === true,
         authorizedAt: timestamp(data.authorizedAt),
@@ -72,7 +75,7 @@ export function createQqSessionStore(file: string, legacyFile?: string) {
     save(data: QqSessionRecord): void {
       const temp = path.join(path.dirname(file), `.qq-session-${randomUUID()}.tmp`);
       try {
-        fs.writeFileSync(temp, JSON.stringify({ version: 1, shared: true, ...data }), {
+        fs.writeFileSync(temp, JSON.stringify({ version: 1, shared: true, ...data, cookie: normalizeCookie(data.cookie) }), {
           encoding: "utf8", mode: 0o600, flag: "wx", flush: true,
         });
         fs.renameSync(temp, file);
@@ -136,7 +139,7 @@ export class QQManagedSession {
   }
 
   setCookie(cookie: string): void {
-    this.replace({ cookie });
+    this.replace({ cookie: normalizeCookie(cookie) });
     this.qrGeneration++;
     this.qr = undefined;
   }

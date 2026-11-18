@@ -353,7 +353,7 @@ QQ 音源启用时，`QQ_MUSIC_MANAGED_SESSION` 默认为 `1`。在 **设置 →
 
 已有 `cookies/qq.json` 可继续播放，扫码授权后才会获得续期所需的凭据。手动导入 Cookie 会替换当前登录并取消该账号的自动续期。设置页会显示上次成功续期时间、下次续期时间、重试状态或重新扫码提示。具备平台登录权限的用户也可以调用 `POST /api/auth/qq/refresh` 手动尝试续期。
 
-设置 `QQ_MUSIC_MANAGED_SESSION=0` 并重启可关闭自动续期并使用原来的 `qq.json`。
+设置 `QQ_MUSIC_MANAGED_SESSION=0` 并重启可关闭自动续期。机器人继续使用当前的 QQ 播放 Cookie，并从 `cookies/qq.json` 兼容读取旧部署的 Cookie。
 
 ### WebUI 页面说明
 

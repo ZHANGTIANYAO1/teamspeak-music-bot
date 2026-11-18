@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { ParamsDictionary } from "express-serve-static-core";
 import type { MusicProvider } from "../../music/provider.js";
 import type { QQMusicProvider } from "../../music/qq.js";
+import { normalizeCookie } from "../../music/cookie-normalize.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { CookieStore } from "../../music/auth.js";
 import type { Logger } from "../../logger.js";
@@ -190,8 +191,9 @@ export function createAuthRouter(
   });
 
   router.post("/cookie", requirePermission("platform.auth"), (req, res) => {
-    const { platform, cookie } = req.body;
-    if (typeof cookie !== "string" || !cookie.trim()) {
+    const { platform, cookie: raw } = req.body;
+    const cookie = typeof raw === "string" ? normalizeCookie(raw) : "";
+    if (!cookie) {
       res.status(400).json({ error: "cookie is required" });
       return;
     }

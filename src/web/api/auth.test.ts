@@ -124,6 +124,14 @@ describe("managed QQ authentication routes", () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
+  it("keeps the current QQ login when an import contains only response attributes", async () => {
+    const { app, qq } = mount(true);
+    await request(app).post("/api/auth/cookie")
+      .send({ platform: "qq", cookie: "Path=/; HttpOnly" })
+      .expect(400);
+    expect(qq.setCookie).not.toHaveBeenCalled();
+  });
+
   it("continues persisting the legacy cookie when the feature is disabled", async () => {
     const { app, legacyStore } = mount(false);
     await request(app).get("/api/auth/qrcode/status").query({ platform: "qq", key: "legacy" }).expect(200);

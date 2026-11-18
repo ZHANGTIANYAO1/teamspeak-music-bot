@@ -1,3 +1,4 @@
+import { normalizeCookie } from "./cookie-normalize.js";
 import axios, { type AxiosInstance } from "axios";
 import type {
   MusicProvider,
@@ -820,7 +821,7 @@ export class QQMusicProvider implements MusicProvider {
     const body = res.data;
     if (body?.isOk === true) {
       const cookie: string = body.session?.cookie ?? "";
-      if (cookie) this.legacyCookie = cookie;
+      if (cookie) this.setCookie(cookie);
       return "confirmed";
     }
     if (body?.refresh === true) return "expired";
@@ -831,7 +832,7 @@ export class QQMusicProvider implements MusicProvider {
 
   setCookie(cookie: string): void {
     if (this.managedSession) this.managedSession.setCookie(cookie);
-    else this.legacyCookie = cookie;
+    else this.legacyCookie = normalizeCookie(cookie);
     // Reset radar pagination so a re-login (different account) starts from the
     // first page rather than inheriting the previous account's cursor.
     this.radarPage = 1;

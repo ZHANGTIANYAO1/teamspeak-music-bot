@@ -245,6 +245,24 @@ describe("managed QQ session", () => {
     expect(client.refresh).not.toHaveBeenCalled();
   });
 
+  it("normalises manual cookies in memory and at the shared session store", () => {
+    const raw = "Set-Cookie: uin=999; Path=/\r\nSet-Cookie: qm_keyst=manual; Secure";
+    const expected = "uin=999; qm_keyst=manual";
+    session.setCookie(raw);
+    expect(session.getCookie()).toBe(expected);
+    expect(store.load()?.cookie).toBe(expected);
+    createCookieStore(dir, store).save("qq", raw);
+    expect(store.load()?.cookie).toBe(expected);
+  });
+
+  it("normalises cookies migrated from old installations", () => {
+    const legacyFile = path.join(dir, "qq.json");
+    const raw = "uin=999; Path=/;;qm_keyst=legacy; Secure";
+    fs.writeFileSync(legacyFile, JSON.stringify({ cookie: raw }));
+    store = createQqSessionStore(file, legacyFile);
+    expect(store.load()).toEqual({ cookie: "uin=999; qm_keyst=legacy" });
+  });
+
   it("uses the newer login when both older session files already exist", () => {
     const legacyFile = path.join(dir, "qq.json");
     const legacyCookie = "uin=999; qm_keyst=legacy";
