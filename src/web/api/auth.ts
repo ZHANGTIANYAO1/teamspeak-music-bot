@@ -3,12 +3,15 @@ import type { ParamsDictionary } from "express-serve-static-core";
 import type { MusicProvider } from "../../music/provider.js";
 import type { QQMusicProvider } from "../../music/qq.js";
 import { normalizeCookie } from "../../music/cookie-normalize.js";
+import { musicRequestError } from "../../music/request-error.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { CookieStore } from "../../music/auth.js";
 import type { Logger } from "../../logger.js";
 import type { BotConfig, JellyfinConfig } from "../../data/config.js";
+import type { BotDatabase } from "../../data/database.js";
 import { requirePermission } from "../middleware/requirePermission.js";
 import { requireNotGuest } from "../middleware/requireNotGuest.js";
+import { resolveMusicCookie } from "./provider-scope.js";
 
 export function createAuthRouter(
   neteaseProvider: MusicProvider,
@@ -19,7 +22,10 @@ export function createAuthRouter(
   kugouProvider?: MusicProvider,
   spotifyProvider?: MusicProvider,
   jellyfinProvider?: MusicProvider,
-  config?: BotConfig
+  config?: BotConfig,
+  // Per-user music accounts (#164 follow-up). Omitted by unit-test routers →
+  // every caller keeps seeing the bot's shared login status.
+  database?: BotDatabase,
 ): Router {
   const router = Router();
   const qqSession = qqProvider.managedSession;
@@ -40,13 +46,56 @@ export function createAuthRouter(
     try {
       const platform = req.query.platform as string;
       const provider = getProvider(platform);
+      // Per-user accounts (#164 follow-up). Two different questions, two
+      // different answers:
+      //
+      //   /api/auth/status      → "is the BOT's shared login alive?" This is the
+      //                           admin console (Settings → 音乐平台), so an
+      //                           admin always gets the shared status even if
+      //                           they linked or were assigned a personal one.
+      //   /api/me/music/status  → "which account does THIS user actually play
+      //                           through?" (personal-music.ts) — that one does
+      //                           report the personal/granted view.
+      //
+      // For a non-admin the shared nickname/avatar must never be returned: that
+      // is exactly the leak this feature exists to close, so they get
+      // loggedIn:false instead until they have an account of their own.
+      const user = (req as { user?: { id?: string; role?: string } }).user;
+      // A platform without per-account login support (spotify / jellyfin /
+      // youtube) keeps reporting the shared status for everyone: the toggle only
+      // governs sources that can actually build a per-user view.
+      const perUser =
+        config?.perUserMusicAccounts === true &&
+        user?.role !== "admin" &&
+        typeof provider.withCookie === "function";
+
+      if (perUser) {
+        const own = resolveMusicCookie(req, provider.platform, { database, config });
+        if (own && typeof provider.withCookie === "function") {
+          const view = provider.withCookie(own.cookie);
+          const status = await view.getAuthStatus();
+          res.json({
+            platform: provider.platform,
+            personal: true,
+            source: own.source,
+            // Admin-facing name for an assigned account; absent for self-linked.
+            label: own.label,
+            ...status,
+          });
+          return;
+        }
+        res.json({ platform: provider.platform, loggedIn: false, personal: true, source: "none" });
+        return;
+      }
+
       const status = await provider.getAuthStatus();
       logger.debug({ platform, loggedIn: status.loggedIn }, "Auth status check");
       const renewal = platform === "qq" ? qqSession?.getStatus() : undefined;
-      res.json({ platform: provider.platform, ...status, ...renewal });
+      res.json({ platform: provider.platform, source: "shared", ...status, ...renewal });
     } catch (err) {
-      logger.error({ err }, "Auth status check failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Auth status check failed");
+      res.status(500).json({ error: error.message });
     }
   });
 

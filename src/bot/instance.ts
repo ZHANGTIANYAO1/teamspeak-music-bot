@@ -9,9 +9,9 @@ import {
 import { AudioPlayer } from "../audio/player.js";
 import { resolveUrlWithRetry } from "./url-retry.js";
 import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
-import type { PlayFailure } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
-import type { MusicProvider, Platform, Song, SongUrlResult } from "../music/provider.js";
+import type { MusicProvider, Platform, PlayFailure, Song, SongUrlResult } from "../music/provider.js";
+import { musicRequestError } from "../music/request-error.js";
 import {
   parseCommand,
   canRunCommand,
@@ -201,6 +201,7 @@ export class BotInstance extends EventEmitter {
   private profileManager: BotProfileManager;
   private isFmMode = false;
   private fmProvider: MusicProvider | null = null;
+  private resolveFmProvider?: () => MusicProvider;
   private fmRequesterName: string | undefined;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
@@ -984,6 +985,7 @@ export class BotInstance extends EventEmitter {
   private disableFmMode(): void {
     this.isFmMode = false;
     this.fmProvider = null;
+    this.resolveFmProvider = undefined;
     this.fmRequesterName = undefined;
   }
 
@@ -1879,7 +1881,11 @@ export class BotInstance extends EventEmitter {
     return this.startFm(this.getProvider(cmd.flags), requesterName);
   }
 
-  async startFm(provider: MusicProvider = this.neteaseProvider, requesterName?: string): Promise<string> {
+  async startFm(
+    provider: MusicProvider = this.neteaseProvider,
+    requesterName?: string,
+    resolveProvider?: () => MusicProvider,
+  ): Promise<string> {
     // Match the !fm chat-command guard: refuse before mutating the queue when
     // offline, so the web /fm route can't wipe the queue + flip into FM mode
     // while nothing can actually play.
@@ -1901,6 +1907,7 @@ export class BotInstance extends EventEmitter {
     this.queue.setMode(PlayMode.Random);
     this.isFmMode = true;
     this.fmProvider = provider;
+    this.resolveFmProvider = resolveProvider;
     this.fmRequesterName = requesterName?.trim() || undefined;
     this.player.resetFailures();
 
@@ -1946,17 +1953,23 @@ export class BotInstance extends EventEmitter {
   }
 
   private async refillFm(): Promise<void> {
-    const provider = this.fmProvider;
-    if (!this.isFmMode || !provider?.getPersonalFm) return;
+    if (!this.isFmMode || !this.fmProvider) return;
+    const resolveProvider = this.resolveFmProvider;
     try {
+      const current = this.fmProvider;
+      const resolved = resolveProvider?.() ?? current;
+      // Keep a provider's FM cursor while its login remains unchanged.
+      const provider = resolved !== current && resolved.getCookie() !== current.getCookie() ? resolved : current;
+      this.fmProvider = provider;
+      if (!provider.getPersonalFm) return;
       const songs = await provider.getPersonalFm();
-      if (songs.length === 0) return;
+      if (!this.isFmMode || this.fmProvider !== provider || this.resolveFmProvider !== resolveProvider || songs.length === 0) return;
       for (const song of songs) {
         this.queue.add(this.withRequester({ ...song, platform: provider.platform }, this.fmRequesterName));
       }
       this.logger.debug({ count: songs.length, platform: provider.platform }, "FM queue refilled");
     } catch (err) {
-      this.logger.error({ err }, "Failed to refill FM queue");
+      this.logger.error({ err: musicRequestError(err) }, "Failed to refill FM queue");
     }
   }
 
@@ -2109,6 +2122,7 @@ export class BotInstance extends EventEmitter {
     if (st.isFmMode && st.fmPlatform) {
       this.isFmMode = true;
       this.fmProvider = this.getProviderFor(st.fmPlatform as Platform);
+      this.resolveFmProvider = undefined;
     }
     const current = this.queue.current();
     if (current) {
