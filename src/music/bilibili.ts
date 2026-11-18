@@ -1,3 +1,4 @@
+import { normalizeCookie } from "./cookie-normalize.js";
 import { createHash } from "node:crypto";
 import axios, { type AxiosInstance } from "axios";
 import type {
@@ -461,7 +462,7 @@ export class BiliBiliProvider implements MusicProvider {
   }
 
   setCookie(cookie: string): void {
-    this.cookie = cookie;
+    this.cookie = normalizeCookie(cookie);
   }
 
   getCookie(): string {

@@ -69,7 +69,11 @@ export function parseSongRef(raw: string): SongRef | null {
   // a "BV..." token never collides with them).
   const bv = /BV[0-9A-Za-z]{8,12}/.exec(q);
   if (bv && (/^BV[0-9A-Za-z]{8,12}$/.test(q) || /bilibili\.com|b23\.tv/i.test(q))) {
-    return { id: bv[0], platform: "bilibili" };
+    // Extract the query attached to this BV id, including in [URL=...] tags.
+    const suffix = q.slice(bv.index + bv[0].length);
+    const query = /^\/?\?([^#\s[\]]*)/.exec(suffix)?.[1];
+    const page = new URLSearchParams(query).get("p");
+    return { id: page && /^\d+$/.test(page) ? `${bv[0]}?p=${page}` : bv[0], platform: "bilibili" };
   }
 
   // NetEase song URL. Only treat `id=N` as a SONG id when the URL is not a
