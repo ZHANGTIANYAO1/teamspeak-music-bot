@@ -8,7 +8,6 @@ import {
   renameSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { isIP } from "node:net";
 import type { BotAccess, GuestPermissions } from "./permissions.js";
 import { GUEST_PERMISSION_FLAGS } from "./permissions.js";
 
@@ -115,8 +114,6 @@ export interface BotConfig {
   commandPrefix: string;
   commandAliases: Record<string, string>;
   neteaseApiPort: number;
-  /** NetEase API realIP override; empty keeps the API's default IP handling. */
-  neteaseRealIP: string;
   qqMusicApiPort: number;
   adminPassword: string;
   adminGroups: number[];
@@ -179,7 +176,6 @@ export function getDefaultConfig(): BotConfig {
     commandPrefix: "!",
     commandAliases: { p: "play", s: "skip", n: "next" },
     neteaseApiPort: 3001,
-    neteaseRealIP: "",
     qqMusicApiPort: 3200,
     adminPassword: "",
     adminGroups: [],
@@ -453,10 +449,6 @@ export function loadConfig(path: string): BotConfig {
     return {
       ...defaults,
       ...partial,
-      neteaseRealIP:
-        typeof partial.neteaseRealIP === "string" && isIP(partial.neteaseRealIP.trim())
-          ? partial.neteaseRealIP.trim()
-          : defaults.neteaseRealIP,
       adminGroups,
       guestMode: gm,
       spotify,
