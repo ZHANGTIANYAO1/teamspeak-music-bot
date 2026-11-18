@@ -204,14 +204,7 @@ export class BotInstance extends EventEmitter {
   private fmRequesterName: string | undefined;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
-  /**
-   * Why the most recent resolveAndPlay produced nothing, or null.
-   *
-   * Kept as an instance field rather than a second return value: `resolveAndPlay`
-   * has ~20 call sites and its boolean is load-bearing in tests, while only the
-   * web routes need the explanation. They read this right after a false.
-   */
-  private lastPlayFailure: PlayFailure | null = null;
+  private playbackRequest?: symbol;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
@@ -1032,53 +1025,41 @@ export class BotInstance extends EventEmitter {
     return requestedBy ? { ...song, requestedBy } : { ...song };
   }
 
-  /**
-   * Why the last `resolveAndPlay(false)` produced nothing, or null after a
-   * success. Web routes read this to say what actually went wrong instead of
-   * the old catch-all 「区域/版权限制」.
-   */
-  getLastPlayFailure(): PlayFailure | null {
-    return this.lastPlayFailure;
-  }
-
-  /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
-  async resolveAndPlay(song: QueuedSong): Promise<boolean> {
-    this.lastPlayFailure = null;
+  /** Resolve the URL and start playback if this request still owns the queue. */
+  async resolveAndPlay(song: QueuedSong, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
+    const request = Symbol();
+    this.playbackRequest = request;
+    const generation = this.lifecycleGeneration;
+    const current = this.queue.current();
+    const isCancelled = () => !this.connected || this.lifecycleGeneration !== generation ||
+      this.playbackRequest !== request || this.queue.current() !== current;
+    const fail = (message: string) => onFailure?.({
+      platform: song.platform,
+      songId: song.id,
+      code: "unknown",
+      message,
+    });
     if (!this.connected) {
-      this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
-      // Recorded so the web route can say this instead of blaming copyright:
-      // every early return used to leave lastPlayFailure null, which made the
-      // UI fall back to the catch-all 「区域/版权限制」 for unrelated causes.
-      this.lastPlayFailure = {
-        platform: song.platform,
-        songId: song.id,
-        code: "unknown",
-        message: "机器人未连接，无法播放",
-      };
+      fail("机器人未连接");
       return false;
     }
     if (song.platform === "local" && !this.isLocalAudioEnabled()) {
-      this.logger.warn({ songId: song.id, name: song.name }, "Local audio playback disabled — refusing track");
-      this.lastPlayFailure = {
-        platform: song.platform,
-        songId: song.id,
-        code: "unknown",
-        message: "该机器人已关闭本地音频播放",
-      };
+      fail("该机器人已关闭本地音频播放");
       return false;
     }
     // Clear any accumulated skip votes — every fresh track starts with a
     // clean slate, regardless of which code path loaded it (cmdPlay,
     // cmdPlaylist, cmdAlbum, cmdFm, trackEnd auto-advance, etc.).
     this.voteSkipUsers.clear();
-    const provider = this.getProviderFor(song.platform);
     try {
+      const provider = this.getProviderFor(song.platform);
       if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
         // Detail is metadata only (duration / canonical id). A failure here used
         // to abort the whole resolve before the retry budget even started, so a
         // transient 4xx turned into an instant 「无法播放」.
         try {
           const detail = await provider.getSongDetail(song.id);
+          if (isCancelled()) return false;
           if (detail) {
             song.duration = detail.duration;
             song.name = detail.name;
@@ -1101,7 +1082,7 @@ export class BotInstance extends EventEmitter {
         fallbacks: provider.getFallbackQualities?.() ?? [],
         // Stop / disconnect must abort the budget: retrying into a dead
         // connection only delays the queue.
-        isCancelled: () => !this.connected,
+        isCancelled,
         onAttemptFailed: ({ attempt, total, quality, error }) => {
           const fields = { songId: song.id, name: song.name, attempt, total, quality };
           if (error instanceof RiskControlError) {
@@ -1130,7 +1111,7 @@ export class BotInstance extends EventEmitter {
                 code: "unknown" as const,
                 message: `没有拿到播放地址（${quality ?? "默认音质"}）`,
               };
-          this.lastPlayFailure = failure;
+          onFailure?.(failure);
           this.logger.warn(
             {
               songId: song.id,
@@ -1145,29 +1126,17 @@ export class BotInstance extends EventEmitter {
           );
         },
       });
-      if (!result?.url) {
-        return false;
-      }
-      // Re-check connection state AFTER the network round-trip — the URL
-      // resolve can take multiple seconds and the user may have called stop
-      // during that window. Without this, we'd spawn ffmpeg on a
-      // disconnected bot and land back in the same "connected=false but
-      // playing=true" inconsistency that Bug C was about.
-      if (!this.connected) {
-        this.logger.warn(
-          { songId: song.id, name: song.name },
-          "bot disconnected during URL resolve — aborting playback",
-        );
-        return false;
-      }
+      if (!result?.url || isCancelled()) return false;
       // Stage 2: a `spotify:` sentinel URI means the go-librespot sidecar
       // serves the audio, NOT ffmpeg. Start the per-bot sidecar on demand; if
       // it can't run (disabled / non-Linux / binary missing) keep the Stage-1
       // fallback message + skip so the queue keeps moving.
       if (isSpotifyUri(result.url)) {
         const ready = await this.spotifyController.ensureStarted();
+        if (isCancelled()) return false;
         if (!ready) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify backend unavailable — skipping");
+          fail(SPOTIFY_UNAVAILABLE_MESSAGE);
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
           return false;
         }
@@ -1177,8 +1146,10 @@ export class BotInstance extends EventEmitter {
         // sidecar failed the play (dead/errored backend): never attach the
         // player to a dead stream — send the same fallback and skip.
         const played = await this.spotifyController.playTrack(result.url);
+        if (isCancelled()) return false;
         if (!played) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify playTrack failed — skipping");
+          fail(SPOTIFY_UNAVAILABLE_MESSAGE);
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
           return false;
         }
@@ -1278,11 +1249,9 @@ export class BotInstance extends EventEmitter {
       this.emit("stateChange");
       return true;
     } catch (err) {
+      if (isCancelled()) return false;
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
-      // Anything thrown outside the retry budget (detail lookup, spotify
-      // handoff, player start) still needs a cause, otherwise the web route
-      // prints the old 「区域/版权限制」 for a cause that is not copyright.
-      this.lastPlayFailure = toPlayFailure(song.platform, song.id, err);
+      onFailure?.(toPlayFailure(song.platform, song.id, err));
       return false;
     }
   }
@@ -1466,8 +1435,9 @@ export class BotInstance extends EventEmitter {
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const song0 = song!;
-    const ok = await this.playSingleSong(song0, requesterName);
-    if (!ok) return `Cannot play: ${song0.name}`;
+    let why: string | undefined;
+    const ok = await this.playSingleSong(song0, requesterName, failure => { why = failure.message; });
+    if (!ok) return why ? `Cannot play: ${song0.name} — ${why}` : `Cannot play: ${song0.name}`;
     return `Now playing: ${song0.name} - ${song0.artist}`;
   }
 
@@ -1483,7 +1453,7 @@ export class BotInstance extends EventEmitter {
    * Shared by chat !play and the web /play-song route so the toggle decision
    * lives in exactly one place (#119). Returns true if a track started playing.
    */
-  async playSingleSong(song: QueuedSong, requesterName?: string): Promise<boolean> {
+  async playSingleSong(song: QueuedSong, requesterName?: string, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
     const s = this.withRequester(song, requesterName);
     if (this.config.playKeepsQueue && !this.queue.isEmpty()) {
       const insertedAt =
@@ -1496,7 +1466,7 @@ export class BotInstance extends EventEmitter {
       this.queue.playAt(insertedAt);
       this.player.resetFailures();
       // No sweep here: the queue is kept, so no local uploads were released.
-      return this.resolveAndPlay(this.queue.current()!);
+      return this.resolveAndPlay(this.queue.current()!, onFailure);
     }
     // Legacy replace behavior (default).
     const previous = this.queue.current();
@@ -1510,7 +1480,7 @@ export class BotInstance extends EventEmitter {
 
     // Reset failure counter on user-initiated play
     this.player.resetFailures();
-    const ok = await this.resolveAndPlay(this.queue.current()!);
+    const ok = await this.resolveAndPlay(this.queue.current()!, onFailure);
     // Sweep AFTER the new song is queued+resolved: the replaced songs are no
     // longer referenced (and get deleted), but the song — if it is the same
     // local upload that was already playing — stays referenced and is preserved.
@@ -2202,24 +2172,39 @@ export class BotInstance extends EventEmitter {
    *
    * Returns true if a song actually started playing, false otherwise.
    */
-  async playNext(maxRetries = 3): Promise<boolean> {
+  async playNext(maxRetries = 3, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
     if (this.isAdvancing || !this.connected) return false;
     this.isAdvancing = true;
     let started = false;
+    let riskControlled = false;
+    const captureFailure = (failure: PlayFailure) => {
+      riskControlled = failure.code === "risk_control";
+      onFailure?.(failure);
+    };
+    const generation = this.lifecycleGeneration;
+    const unchanged = (song: QueuedSong, request: symbol | undefined) =>
+      this.connected && this.lifecycleGeneration === generation &&
+      this.queue.current() === song && this.playbackRequest === request;
     try {
       if (this.player.getState() !== "idle") this.player.stop(true);
       this.voteSkipUsers.clear();
       const next = this.queue.next();
       if (next) {
-        started = await this.resolveAndPlay(next);
+        const playback = this.resolveAndPlay(next, captureFailure);
+        const request = this.playbackRequest;
+        started = await playback;
+        if (!started && !unchanged(next, request)) return false;
         if (!started) {
-          for (let i = 0; i < maxRetries && this.connected; i++) {
+          for (let i = 0; i < maxRetries && this.connected && !riskControlled; i++) {
             const retry = this.queue.next();
             if (!retry) break;
-            if (await this.resolveAndPlay(retry)) {
+            const retryPlayback = this.resolveAndPlay(retry, captureFailure);
+            const retryRequest = this.playbackRequest;
+            if (await retryPlayback) {
               started = true;
               break;
             }
+            if (!unchanged(retry, retryRequest)) return false;
           }
         }
         if (!started) {
@@ -2235,7 +2220,10 @@ export class BotInstance extends EventEmitter {
           await this.refillFm();
           const refillNext = this.queue.next();
           if (refillNext) {
-            started = await this.resolveAndPlay(refillNext);
+            const refillPlayback = this.resolveAndPlay(refillNext, captureFailure);
+            const refillRequest = this.playbackRequest;
+            started = await refillPlayback;
+            if (!started && !unchanged(refillNext, refillRequest)) return false;
           }
           if (!started) {
             this.player.stop();

@@ -167,12 +167,14 @@ export async function resolveUrlWithRetry(
 
     let error: unknown;
     requestsMade += 1;
+    let result: SongUrlResult | null = null;
     try {
-      const result = await opts.resolve(step.quality);
-      if (result?.url) return result;
+      result = await opts.resolve(step.quality);
     } catch (err) {
       error = err;
     }
+    if (opts.isCancelled?.()) return null;
+    if (result?.url) return result;
     riskControlled = error instanceof RiskControlError;
     lastError = error;
     lastQuality = step.quality;

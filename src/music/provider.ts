@@ -34,24 +34,7 @@ export interface SongUrlResult {
   trialDuration?: number;
 }
 
-/**
- * NetEase rate-limits by IP, not by request shape. When it decides the caller's
- * network looks risky it answers **HTTP 400** with
- *
- *   {"code":-460,"message":"检测到您的网络环境存在风险，请稍后再试"}
- *
- * Cloud-host IPs hit this constantly; it clears up on its own after a few
- * seconds. Because it is a 4xx, axios reports `ERR_BAD_REQUEST` — identical to
- * a genuinely malformed request — so the only way to tell them apart is to read
- * the response body. The distinction matters: -460 is worth retrying, a bad
- * request never is.
- *
- * Measured on a live host: the anonymous call `?id=…&level=exhigh` answered
- * 400/-460 every time, while the same call with the account cookie answered 200
- * and returned a full 320k URL. Intermittently, the cookie version is also
- * rejected — which is exactly the "click play five times until it works"
- * behaviour users report.
- */
+/** NetEase upstream risk-control response code. */
 export const RISK_CONTROL_CODE = -460;
 
 export class RiskControlError extends Error {
@@ -109,45 +92,17 @@ export class SongUrlUnavailable extends Error {
   }
 }
 
-/** Build the -460 flavour. Kept here so every provider names it identically. */
-export function riskControlFailure(
-  platform: string,
-  songId: string,
-  detail?: string,
-): PlayFailure {
-  return {
-    platform,
-    songId,
-    code: "risk_control",
-    // 「约 5 秒」是有依据的：实测同一 IP 连续请求一般是 -460 几次之后放行，
-    // 重试预算也已经只留一次（RISK_CONTROL_BACKOFF_MS）。给一个具体的等待值，
-    // 比「请稍后重试」更能让人知道该干嘛。
-    message: "被网易云风控拦截（-460），约 5 秒后再试",
-    upstream: detail ? { detail } : undefined,
-  };
-}
-
-/**
- * Normalise anything a failed attempt threw into a `PlayFailure`, so callers
- * never have to pattern-match on error classes themselves.
- *
- * The `unknown` branch truncates the message: axios errors carry the whole
- * request config (including the cookie) and would otherwise put kilobytes into
- * a UI toast and the log.
- */
 export function toPlayFailure(platform: string, songId: string, error: unknown): PlayFailure {
   if (error instanceof SongUrlUnavailable) return error.failure;
   if (error instanceof RiskControlError) {
-    return riskControlFailure(platform, songId, error.message);
+    return {
+      platform,
+      songId,
+      code: "risk_control",
+      message: "网易云暂时拒绝播放请求（-460），请稍后重试",
+    };
   }
-  const raw = error instanceof Error ? error.message : "";
-  const short = raw.replace(/\s+/g, " ").trim().slice(0, 120);
-  return {
-    platform,
-    songId,
-    code: "unknown",
-    message: short ? `解析播放地址失败：${short}` : "解析播放地址失败",
-  };
+  return { platform, songId, code: "unknown", message: "解析播放地址失败" };
 }
 
 export interface Playlist {

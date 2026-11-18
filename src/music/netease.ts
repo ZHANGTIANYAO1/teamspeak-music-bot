@@ -124,10 +124,10 @@ export function parseNeteaseTrial(item: any): number | undefined {
  */
 function riskControlFrom(err: unknown): RiskControlError | null {
   const e = err as {
-    response?: { status?: number; data?: { code?: number; message?: string } };
+    response?: { status?: number; data?: { code?: number } };
   };
   if (e?.response?.status === 400 && e.response.data?.code === RISK_CONTROL_CODE) {
-    return new RiskControlError(e.response.data.message ?? "网络环境风险 (-460)");
+    return new RiskControlError("网易云请求被风控拦截 (-460)");
   }
   return null;
 }

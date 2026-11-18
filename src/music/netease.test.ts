@@ -442,11 +442,11 @@ describe("NetEase risk control (-460)", () => {
     await expect(p.getSongUrl("1827600686")).rejects.toBeInstanceOf(RiskControlError);
   });
 
-  it("keeps the upstream message so the log says what happened", async () => {
+  it("returns a fixed risk-control error without exposing the upstream message", async () => {
     const p = providerWithApi(async () => {
-      throw httpError(400, { code: -460, message: "检测到您的网络环境存在风险，请稍后再试" });
+      throw httpError(400, { code: -460, message: "upstream sample detail" });
     });
-    await expect(p.getSongUrl("1827600686")).rejects.toThrow(/风险/);
+    await expect(p.getSongUrl("1827600686")).rejects.toThrow("网易云请求被风控拦截 (-460)");
   });
 
   it("does not disguise a genuine bad request", async () => {
