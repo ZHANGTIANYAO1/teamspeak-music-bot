@@ -110,6 +110,8 @@ describe("parseSongRef (#90 exact-song selection)", () => {
     "https://www.bilibili.com/video/BV1yxHQeYEuE/?p=%32",
     "[URL]https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2[/URL]",
     "[url]https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2#reply[/url]",
+    "[URL=https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2]点击播放[/URL]",
+    "参考 https://example.com/?p=9 视频 https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2 请播放",
   ])("preserves the Bilibili page query in %s", (input) => {
     expect(parseSongRef(input)).toEqual({ id: "BV1yxHQeYEuE?p=2", platform: "bilibili" });
   });
