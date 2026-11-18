@@ -134,6 +134,14 @@ export interface MusicProvider {
   setCookie(cookie: string): void;
   getCookie(): string;
   getAuthStatus(): Promise<AuthStatus>;
+  /**
+   * A view of this same provider logged in as another account, without
+   * disturbing the shared instance. Implemented by the sources that support
+   * per-account logins — NetEase since #164, QQ / Kugou / Bilibili following in
+   * the #164 follow-up. The rest simply omit it and the web layer falls back to
+   * the shared login (see web/api/provider-scope.ts).
+   */
+  withCookie?(cookie: string): MusicProvider;
   getPersonalFm?(): Promise<Song[]>;
   getDailyRecommendSongs?(): Promise<Song[]>;
   getUserPlaylists?(): Promise<Playlist[]>;

@@ -1,12 +1,13 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import type { BotManager } from "../../bot/manager.js";
 import type { BotDatabase } from "../../data/database.js";
 import type { MusicProvider, Song, ArtistSongPage } from "../../music/provider.js";
+import { musicRequestError } from "../../music/request-error.js";
 import type { Logger } from "../../logger.js";
 import { parseCommand } from "../../bot/commands.js";
 import { requireBotAccess } from "../middleware/requirePermission.js";
 import { authorize } from "../middleware/authorize.js";
-import { supportsPersonalLogin } from "./personal-music.js";
+import { resolveProviderForRequest } from "./provider-scope.js";
 
 /** Hard cap on how many tracks one "播放全部" request may queue — a safety net
  *  against a pathological catalogue (and against an upstream paging bug). */
@@ -46,8 +47,38 @@ export function createPlayerRouter(
   neteaseProvider?: MusicProvider,
   qqProvider?: MusicProvider,
   bilibiliProvider?: MusicProvider,
+  // Per-user music accounts (#164 follow-up). Omitted by unit-test routers →
+  // the feature reads as off and every request uses the shared login.
+  config?: { perUserMusicAccounts?: boolean },
 ): Router {
   const router = Router();
+
+  /** Platform names the bot resolves as-is; anything else means NetEase. */
+  const PASSTHROUGH = new Set(["bilibili", "qq", "youtube", "local", "kugou", "jellyfin"]);
+  const sharedProviderFor = (bot: any, platform: unknown): MusicProvider =>
+    bot.getProviderFor(PASSTHROUGH.has(platform as string) ? platform : "netease");
+
+  /**
+   * The provider this request should read from. With per-user accounts enabled,
+   * a caller who linked their own account gets a view built from THEIR cookie;
+   * otherwise the bot's shared provider comes back untouched.
+   */
+  const scopedProvider = (req: Request, bot: any, platform: unknown): MusicProvider => {
+    const shared = sharedProviderFor(bot, platform);
+    return resolveProviderForRequest(req, shared.platform, shared, { database, config });
+  };
+
+  /**
+   * Personal FM predates the admin toggle (#164), so a linked account has always
+   * driven it. `alwaysPersonal` keeps that guarantee while the toggle is off;
+   * with the toggle on, FM simply inherits the same account as everything else.
+   */
+  const fmProvider = (req: Pick<Request, "user">, bot: any, platform: unknown): MusicProvider => {
+    const shared = sharedProviderFor(bot, platform);
+    return resolveProviderForRequest(req, shared.platform, shared, { database, config }, {
+      alwaysPersonal: true,
+    });
+  };
 
   // Access check runs BEFORE the existence/resolver check so a member who is
   // not allowed a bot always gets a uniform 403 — whether or not the bot
@@ -156,20 +187,11 @@ export function createPlayerRouter(
         rejectDisabledLocalAudio(res);
         return;
       }
-      let provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
-          ? platform
-          : "netease"
-      );
-      // A signed-in user who linked their own NetEase account gets FM from
-      // THEIR taste, not the bot's shared login (#164). Songs still resolve
-      // through the shared provider when played.
-      const user = (req as any).user;
-      if (provider.platform === "netease" && user && user.role !== "guest" && database) {
-        const cookie = database.getUserMusicCookie(user.id, "netease");
-        if (cookie && supportsPersonalLogin(provider)) provider = provider.withCookie(cookie);
-      }
-      const message = await bot.startFm(provider, requesterName(req));
+      // Resolve FM recommendations with the caller's account. The bot resolves
+      // each queued track's playback URL using the shared account.
+      const scope = { user: req.user };
+      const resolveFmProvider = () => fmProvider(scope, bot, platform);
+      const message = await bot.startFm(resolveFmProvider(), requesterName(req), resolveFmProvider);
       res.json({
         ok:
           !message.startsWith("No FM songs") &&
@@ -178,7 +200,7 @@ export function createPlayerRouter(
         message,
       });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -340,11 +362,7 @@ export function createPlayerRouter(
       }
       // Use the bot's own provider lookup — it already knows about youtube,
       // which the router's constructor params did not.
-      const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
-          ? platform
-          : "netease"
-      );
+      const provider = scopedProvider(req, bot, platform);
 
       // Stop current playback
       bot.getPlayer().stop();
@@ -419,8 +437,9 @@ export function createPlayerRouter(
         res.json({ ok: false, message: `${loadedMsg}，但无法开始播放。` });
       }
     } catch (err) {
-      logger.error({ err }, "Play playlist failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Play playlist failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -433,11 +452,7 @@ export function createPlayerRouter(
         rejectDisabledLocalAudio(res);
         return;
       }
-      const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
-          ? platform
-          : "netease"
-      );
+      const provider = scopedProvider(req, bot, platform);
 
       // Stop current playback
       bot.getPlayer().stop();
@@ -497,8 +512,9 @@ export function createPlayerRouter(
         res.json({ ok: false, message: `${loadedMsg}，但无法开始播放。` });
       }
     } catch (err) {
-      logger.error({ err }, "play-album failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "play-album failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -518,11 +534,7 @@ export function createPlayerRouter(
         rejectDisabledLocalAudio(res);
         return;
       }
-      const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
-          ? platform
-          : "netease"
-      );
+      const provider = scopedProvider(req, bot, platform);
       if (typeof provider.getArtistSongs !== "function") {
         res.status(501).json({ error: "Not supported by this provider" });
         return;
@@ -590,8 +602,9 @@ export function createPlayerRouter(
       });
       res.json(body);
     } catch (err) {
-      logger.error({ err }, "play-artist failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "play-artist failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -754,11 +767,7 @@ export function createPlayerRouter(
         rejectDisabledLocalAudio(res);
         return;
       }
-      const provider = bot.getProviderFor(
-        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
-          ? platform
-          : "netease"
-      );
+      const provider = scopedProvider(req, bot, platform);
 
       const song = await provider.getSongDetail(songId);
       if (!song) {
@@ -777,7 +786,7 @@ export function createPlayerRouter(
 
       res.json({ message: `Added: ${song.name} - ${song.artist} (position ${queue.size()})` });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 

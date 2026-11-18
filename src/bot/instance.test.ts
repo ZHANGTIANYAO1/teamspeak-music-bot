@@ -396,6 +396,20 @@ const resolveAndPlay = BotInstance.prototype.resolveAndPlay as (
   this: unknown,
   song: any,
 ) => Promise<boolean>;
+
+it("re-resolves an active web FM account before fetching more songs", async () => {
+  const old = { platform: "netease", getCookie: () => "old", getPersonalFm: vi.fn(async () => []) };
+  const shared = { platform: "netease", getCookie: () => "shared", getPersonalFm: vi.fn(async () => []) };
+  const context = {
+    isFmMode: true,
+    fmProvider: old,
+    resolveFmProvider: () => shared,
+    logger: { error: vi.fn() },
+  };
+  await (BotInstance.prototype as unknown as { refillFm(): Promise<void> }).refillFm.call(context);
+  expect(old.getPersonalFm).not.toHaveBeenCalled();
+  expect(shared.getPersonalFm).toHaveBeenCalledOnce();
+});
 const setupPlayerEvents = (BotInstance.prototype as any).setupPlayerEvents as (
   this: unknown,
 ) => void;

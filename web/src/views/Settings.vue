@@ -116,7 +116,10 @@
       </form>
       <p v-if="ownPwError" class="user-error">{{ ownPwError }}</p>
       <p v-if="ownPwSuccess" class="user-success">{{ ownPwSuccess }}</p>
-      <PersonalNeteaseAccount v-if="providerOn('netease') && !session.isGuest.value" />
+      <PersonalMusicAccount
+        v-if="!session.isGuest.value && personalPlatforms.length > 0"
+        :platforms="personalPlatforms"
+      />
     </section>
 
     <!-- Bot Management (create/edit/delete/start-stop) requires bot.manage -->
@@ -973,6 +976,29 @@
           @change="savePlayKeepsQueue"
         />
       </label>
+
+      <!-- Admin-only: per-user music accounts. Off by default so an existing
+           deployment keeps sharing one login with everyone. -->
+      <label v-if="session.isAdmin.value" class="profile-toggle behavior-toggle">
+        <div class="profile-toggle-text">
+          <div class="profile-toggle-label">每个成员使用自己的音乐账号</div>
+          <div class="profile-toggle-hint">开启后，成员可用自己绑定或管理员分配的账号访问网页搜索、歌单和推荐。仅网易云支持成员扫码绑定。没有专属账号时使用机器人共享账号。房间播歌始终使用共享账号。</div>
+        </div>
+        <input
+          v-model="perUserMusicAccounts"
+          type="checkbox"
+          class="profile-toggle-switch"
+          @change="savePerUserMusicAccounts"
+        />
+      </label>
+
+      <!-- Admin-only: the pool of logins that can be handed to members. Only
+           meaningful while the toggle above is on. -->
+      <div v-if="session.isAdmin.value && perUserMusicAccounts" class="pool-wrap">
+        <div class="pool-title">音乐账号分配</div>
+        <div class="pool-hint">添加管理员拥有的账号，分配给指定成员（也可以分配给其他管理员）。成员自己绑定的账号优先；未绑定的人使用分配给自己的账号；都没有时回到机器人的共享账号。这些账号同样只作用于<strong>网页端</strong>，房间里的播放始终用共享账号。</div>
+        <MusicAccountPool />
+      </div>
     </section>
 
     <!-- Guest Mode (admin only) -->
@@ -1311,7 +1337,8 @@ import axios from 'axios';
 import AvatarUpload from '../components/AvatarUpload.vue';
 import CustomAvatarRow from '../components/CustomAvatarRow.vue';
 import AccentColorPicker from '../components/AccentColorPicker.vue';
-import PersonalNeteaseAccount from '../components/PersonalNeteaseAccount.vue';
+import PersonalMusicAccount from '../components/PersonalMusicAccount.vue';
+import MusicAccountPool from '../components/MusicAccountPool.vue';
 import QRCode from 'qrcode';
 import { usePlayerStore } from '../stores/player.js';
 import { useSession } from '../composables/useSession.js';
@@ -1451,6 +1478,11 @@ const enabledProviders = ref<string[]>([]);
 function providerOn(p: string): boolean {
   return enabledProviders.value.length === 0 || enabledProviders.value.includes(p);
 }
+
+// Sources the member can hold a personal account for. Only enabled ones are
+// offered — /api/me/music serves a fixed set regardless of config.
+const PERSONAL_PLATFORMS = ['netease', 'qq', 'kugou', 'bilibili'] as const;
+const personalPlatforms = computed(() => PERSONAL_PLATFORMS.filter((p) => providerOn(p)));
 
 // --- Default music source (issue #126) ---
 // Chinese labels for the gateable providers, shown in the default-source select.
@@ -1846,6 +1878,8 @@ const localAudioEnabled = ref(true);
 // Saved-queues + play-keeps-queue toggles (#119), both default OFF.
 const savedQueuesEnabled = ref(false);
 const playKeepsQueue = ref(false);
+// Per-user music accounts (#164 follow-up). Admin toggle, default OFF.
+const perUserMusicAccounts = ref(false);
 
 function normalizeVoiceDuckingVolume(): number {
   const raw = voiceDuckingVolumePercent.value as number | string;
@@ -1886,6 +1920,7 @@ async function loadIdleTimeout() {
     localAudioEnabled.value = res.data.localAudioEnabled ?? true;
     savedQueuesEnabled.value = res.data.savedQueuesEnabled ?? false;
     playKeepsQueue.value = res.data.playKeepsQueue ?? false;
+    perUserMusicAccounts.value = res.data.perUserMusicAccounts ?? false;
     store.savedQueuesEnabled = savedQueuesEnabled.value;
     applyGuestModeFromServer(res.data.guestMode);
     applyAdminGroupsFromServer(res.data.adminGroups);
@@ -1961,6 +1996,15 @@ async function savePlayKeepsQueue() {
   try {
     const res = await axios.post('/api/bot/settings', { playKeepsQueue: playKeepsQueue.value });
     playKeepsQueue.value = res.data.playKeepsQueue ?? playKeepsQueue.value;
+  } catch { /* ignore */ }
+}
+
+async function savePerUserMusicAccounts() {
+  try {
+    const res = await axios.post('/api/bot/settings', {
+      perUserMusicAccounts: perUserMusicAccounts.value,
+    });
+    perUserMusicAccounts.value = res.data.perUserMusicAccounts ?? perUserMusicAccounts.value;
   } catch { /* ignore */ }
 }
 
@@ -3402,6 +3446,26 @@ onUnmounted(() => {
   color: var(--text-secondary);
   margin: -8px 0 16px;
   line-height: 1.5;
+}
+
+// --- Music account pool (admin) ---
+.pool-wrap {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.pool-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.pool-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+  margin-bottom: 8px;
 }
 
 .empty-hint {
