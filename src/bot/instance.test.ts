@@ -396,6 +396,20 @@ const resolveAndPlay = BotInstance.prototype.resolveAndPlay as (
   this: unknown,
   song: any,
 ) => Promise<boolean>;
+
+it("re-resolves an active web FM account before fetching more songs", async () => {
+  const old = { platform: "netease", getCookie: () => "old", getPersonalFm: vi.fn(async () => []) };
+  const shared = { platform: "netease", getCookie: () => "shared", getPersonalFm: vi.fn(async () => []) };
+  const context = {
+    isFmMode: true,
+    fmProvider: old,
+    resolveFmProvider: () => shared,
+    logger: { error: vi.fn() },
+  };
+  await (BotInstance.prototype as unknown as { refillFm(): Promise<void> }).refillFm.call(context);
+  expect(old.getPersonalFm).not.toHaveBeenCalled();
+  expect(shared.getPersonalFm).toHaveBeenCalledOnce();
+});
 const setupPlayerEvents = (BotInstance.prototype as any).setupPlayerEvents as (
   this: unknown,
 ) => void;
@@ -1544,6 +1558,36 @@ describe("BotInstance live-queue persistence (#119)", () => {
 });
 
 describe("BotInstance Bilibili multi-P resolution", () => {
+  it("passes the page from a TeamSpeak video link to the Bilibili provider", async () => {
+    const song = {
+      id: "BV1yxHQeYEuE?p=2",
+      name: "Video - P2",
+      artist: "Uploader",
+      album: "",
+      duration: 180,
+      coverUrl: "",
+      platform: "bilibili" as const,
+    };
+    const provider = { platform: "bilibili", getSongDetail: vi.fn().mockResolvedValue(song) };
+    const ctx = {
+      config: { commandPrefix: "!" },
+      assertProviderEnabled: vi.fn(),
+      getProviderFor: vi.fn().mockReturnValue(provider),
+    };
+    const args = "[URL]https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2[/URL]";
+
+    const result = await (BotInstance.prototype as any).resolvePlayQuery.call(ctx, {
+      name: "play",
+      args,
+      rawArgs: [args],
+      flags: new Set(),
+    });
+
+    expect(ctx.getProviderFor).toHaveBeenCalledWith("bilibili");
+    expect(provider.getSongDetail).toHaveBeenCalledWith("BV1yxHQeYEuE?p=2");
+    expect(result.song).toEqual(song);
+  });
+
   it("resolves multi-P search result to P1 with accurate duration and name", async () => {
     const multiPSongDetail = {
       id: "BV1multiP?p=1",
@@ -1780,6 +1824,10 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     player.getPlaybackSessionId = AudioPlayer.prototype.getPlaybackSessionId;
     player.pause = AudioPlayer.prototype.pause;
     player.resume = AudioPlayer.prototype.resume;
+    // The real pause()/resume() drive the de-click transport ramp
+    // (a0f0b49..6f165b5). A stub player must expose it too, or the prototype
+    // methods throw "setTransportRamp is not a function".
+    player.setTransportRamp = vi.fn();
     player.play = vi.fn(() => { player.sessionId++; player.state = "playing"; });
     const provider = { getSongUrl: vi.fn(async () => ({ url: "fresh" })) };
     const advances: string[] = [];

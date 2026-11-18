@@ -1,5 +1,6 @@
 import express, { Router, type Request, type Response } from "express";
 import type { MusicProvider, Song, Album, SearchResult } from "../../music/provider.js";
+import { musicRequestError } from "../../music/request-error.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { Logger } from "../../logger.js";
 import { isProviderEnabled, defaultPlatform, saveConfig, type BotConfig } from "../../data/config.js";
@@ -193,8 +194,9 @@ export function createMusicRouter(
       );
       res.json(result);
     } catch (err) {
-      logger.error({ err }, "Search failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Search failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -263,8 +265,9 @@ export function createMusicRouter(
 
       res.json({ songs, albums, playlists, artists });
     } catch (err) {
-      logger.error({ err }, "Unified search failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Unified search failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -283,7 +286,7 @@ export function createMusicRouter(
       }
       res.json(song);
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -294,7 +297,7 @@ export function createMusicRouter(
       const songs = await provider.getPlaylistSongs(req.params.id);
       res.json({ songs });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -305,7 +308,7 @@ export function createMusicRouter(
       const playlists = await provider.getRecommendPlaylists();
       res.json({ playlists });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -316,7 +319,7 @@ export function createMusicRouter(
       const songs = await provider.getAlbumSongs(req.params.id);
       res.json({ songs });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -327,7 +330,7 @@ export function createMusicRouter(
       const lyrics = await provider.getLyrics(req.params.id);
       res.json({ lyrics });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -357,7 +360,7 @@ export function createMusicRouter(
       }
       res.json({ artist, songs, albums });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -372,8 +375,9 @@ export function createMusicRouter(
       const songs = await provider.getDailyRecommendSongs();
       res.json({ songs });
     } catch (err) {
-      logger.error({ err }, "Get daily recommend songs failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Get daily recommend songs failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -388,8 +392,9 @@ export function createMusicRouter(
       const songs = await provider.getPersonalFm();
       res.json({ songs });
     } catch (err) {
-      logger.error({ err }, "Get personal FM failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Get personal FM failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -404,8 +409,9 @@ export function createMusicRouter(
       const playlists = await provider.getUserPlaylists();
       res.json({ playlists });
     } catch (err) {
-      logger.error({ err }, "Get user playlists failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Get user playlists failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -424,8 +430,9 @@ export function createMusicRouter(
       }
       res.json({ playlist: detail });
     } catch (err) {
-      logger.error({ err }, "Get playlist detail failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Get playlist detail failed");
+      res.status(500).json({ error: error.message });
     }
   });
 

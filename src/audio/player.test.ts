@@ -50,6 +50,7 @@ describe("buildFfmpegArgs", () => {
     "https://szbdyd.com/audio.m4s",
     "https://stream.mcdn.szbdyd.com/audio.m4s",
     "https://xy219x131x72x38xy.mcdn.bilivideo.cn.szbdyd.com/audio.m4s",
+    "https://b-bacb4fc51cs41d5p0dxdau053w.edge.mountaintoys.cn/audio.m4s",
     "HTTPS://UPOS-SZ-MIRRORCOS.BILIVIDEO.COM:443/audio.m4s",
     "https://upos-sz-mirrorcos.bilivideo.com./audio.m4s",
   ])("uses Bilibili headers and input-side seeking for the actual CDN host in %s", (url) => {
@@ -70,6 +71,8 @@ describe("buildFfmpegArgs", () => {
     "https://bilibili.com.evil.example/audio.m4s",
     "https://evilbilibili.com/audio.m4s",
     "https://szbdyd.com.evil.example/audio.m4s",
+    "https://mountaintoys.cn.evil.example/audio.m4s",
+    "https://evilmountaintoys.cn/audio.m4s",
     "https://evil.example/audio.m4s?redirect=https://upos-sz-mirrorcos.bilivideo.com/x",
     "https://bilibili.com@evil.example/audio.m4s",
   ])("does not trust Bilibili text outside an allowed hostname in %s", (url) => {

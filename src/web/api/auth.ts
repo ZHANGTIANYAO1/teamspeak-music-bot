@@ -3,6 +3,7 @@ import type { ParamsDictionary } from "express-serve-static-core";
 import type { MusicProvider } from "../../music/provider.js";
 import type { QQMusicProvider } from "../../music/qq.js";
 import { normalizeCookie } from "../../music/cookie-normalize.js";
+import { musicRequestError } from "../../music/request-error.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { CookieStore } from "../../music/auth.js";
 import type { Logger } from "../../logger.js";
@@ -92,8 +93,9 @@ export function createAuthRouter(
       const renewal = platform === "qq" ? qqSession?.getStatus() : undefined;
       res.json({ platform: provider.platform, source: "shared", ...status, ...renewal });
     } catch (err) {
-      logger.error({ err }, "Auth status check failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Auth status check failed");
+      res.status(500).json({ error: error.message });
     }
   });
 

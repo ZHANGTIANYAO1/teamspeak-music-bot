@@ -2,6 +2,7 @@ import { Router, type Request } from "express";
 import type { BotManager } from "../../bot/manager.js";
 import type { BotDatabase } from "../../data/database.js";
 import type { MusicProvider, Song, ArtistSongPage } from "../../music/provider.js";
+import { musicRequestError } from "../../music/request-error.js";
 import type { Logger } from "../../logger.js";
 import { parseCommand } from "../../bot/commands.js";
 import { requireBotAccess } from "../middleware/requirePermission.js";
@@ -67,7 +68,7 @@ export function createPlayerRouter(
    * driven it. `alwaysPersonal` keeps that guarantee while the toggle is off;
    * with the toggle on, FM simply inherits the same account as everything else.
    */
-  const fmProvider = (req: Request, bot: any, platform: unknown): MusicProvider => {
+  const fmProvider = (req: Pick<Request, "user">, bot: any, platform: unknown): MusicProvider => {
     const shared = sharedProviderFor(bot, platform);
     return resolveProviderForRequest(req, shared.platform, shared, { database, config }, {
       alwaysPersonal: true,
@@ -183,8 +184,9 @@ export function createPlayerRouter(
       }
       // Resolve FM recommendations with the caller's account. The bot resolves
       // each queued track's playback URL using the shared account.
-      const provider = fmProvider(req, bot, platform);
-      const message = await bot.startFm(provider, requesterName(req));
+      const scope = { user: req.user };
+      const resolveFmProvider = () => fmProvider(scope, bot, platform);
+      const message = await bot.startFm(resolveFmProvider(), requesterName(req), resolveFmProvider);
       res.json({
         ok:
           !message.startsWith("No FM songs") &&
@@ -193,7 +195,7 @@ export function createPlayerRouter(
         message,
       });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 
@@ -430,8 +432,9 @@ export function createPlayerRouter(
         res.json({ ok: false, message: `${loadedMsg}，但无法开始播放。` });
       }
     } catch (err) {
-      logger.error({ err }, "Play playlist failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "Play playlist failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -504,8 +507,9 @@ export function createPlayerRouter(
         res.json({ ok: false, message: `${loadedMsg}，但无法开始播放。` });
       }
     } catch (err) {
-      logger.error({ err }, "play-album failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "play-album failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -593,8 +597,9 @@ export function createPlayerRouter(
       });
       res.json(body);
     } catch (err) {
-      logger.error({ err }, "play-artist failed");
-      res.status(500).json({ error: (err as Error).message });
+      const error = musicRequestError(err);
+      logger.error({ err: error }, "play-artist failed");
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -776,7 +781,7 @@ export function createPlayerRouter(
 
       res.json({ message: `Added: ${song.name} - ${song.artist} (position ${queue.size()})` });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(500).json({ error: musicRequestError(err).message });
     }
   });
 

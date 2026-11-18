@@ -3,6 +3,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import request from "supertest";
 import pino from "pino";
+import { AxiosError } from "axios";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,6 +58,18 @@ describe("music router GET /search offset pagination", () => {
     const res = await request(app).get("/api/music/search?q=hello&limit=20&offset=-5");
     expect(res.status).toBe(200);
     expect(netease.search).toHaveBeenCalledWith("hello", 20, 0);
+  });
+
+  it("keeps provider request credentials out of search errors", async () => {
+    const logger = pino({ level: "silent" });
+    const logError = vi.spyOn(logger, "error");
+    const privateCookie = "MUSIC_U=test-private-session";
+    vi.mocked(netease.search).mockRejectedValueOnce(new AxiosError(`Provider request failed: ${privateCookie}`));
+    const route = express();
+    route.use("/api/music", createMusicRouter(netease, fakeProvider("qq"), fakeProvider("bilibili"), logger));
+    const res = await request(route).get("/api/music/search?q=test").expect(500);
+    expect(res.text).not.toContain(privateCookie);
+    expect(JSON.stringify(logError.mock.calls)).not.toContain(privateCookie);
   });
 });
 

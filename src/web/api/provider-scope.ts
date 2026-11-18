@@ -43,6 +43,8 @@ interface ScopedUser {
   role?: string;
 }
 
+type ScopeRequest = Pick<Request, "user">;
+
 /** Whether per-user music accounts are switched on for this router instance. */
 export function perUserMusicEnabled(deps: MusicScopeDeps): boolean {
   return deps.config?.perUserMusicAccounts === true;
@@ -53,7 +55,7 @@ export function perUserMusicEnabled(deps: MusicScopeDeps): boolean {
  * qualify: they all map to one anonymous identity, so a linked or assigned
  * account would leak across every guest on the instance.
  */
-function scopedUser(req: Request | undefined, deps: MusicScopeDeps): ScopedUser | null {
+function scopedUser(req: ScopeRequest | undefined): ScopedUser | null {
   if (!req) return null;
   const user = (req as { user?: ScopedUser }).user;
   if (!user?.id || user.role === "guest") return null;
@@ -70,13 +72,13 @@ function scopedUser(req: Request | undefined, deps: MusicScopeDeps): ScopedUser 
  * on only widens the scope to search/playlists/playback URLs.
  */
 export function personalCookieFor(
-  req: Request | undefined,
+  req: ScopeRequest | undefined,
   platform: string,
   deps: MusicScopeDeps,
   alwaysPersonal = false,
 ): string | null {
   if (!alwaysPersonal && !perUserMusicEnabled(deps)) return null;
-  const user = scopedUser(req, deps);
+  const user = scopedUser(req);
   if (!user || !deps.database) return null;
   const cookie = deps.database.getUserMusicCookie(user.id!, platform);
   return cookie && cookie.trim() ? cookie : null;
@@ -92,12 +94,12 @@ export function personalCookieFor(
  * the feature.
  */
 export function grantedAccountFor(
-  req: Request | undefined,
+  req: ScopeRequest | undefined,
   platform: string,
   deps: MusicScopeDeps,
 ): GrantedMusicAccount | null {
   if (!perUserMusicEnabled(deps)) return null;
-  const user = scopedUser(req, deps);
+  const user = scopedUser(req);
   if (!user || !deps.database) return null;
   return deps.database.getGrantedMusicAccount(user.id!, platform);
 }
@@ -111,12 +113,12 @@ export function grantedAccountFor(
  * assignment — it is an explicit instruction, not a fallback.
  */
 export function preferSharedFor(
-  req: Request | undefined,
+  req: ScopeRequest | undefined,
   platform: string,
   deps: MusicScopeDeps,
 ): boolean {
   if (!perUserMusicEnabled(deps)) return false;
-  const user = scopedUser(req, deps);
+  const user = scopedUser(req);
   if (!user || !deps.database) return false;
   return deps.database.getUserMusicPreference(user.id!, platform)?.preferShared === true;
 }
@@ -136,7 +138,7 @@ export interface ResolvedMusicCookie {
  * Returns null when the shared login applies.
  */
 export function resolveMusicCookie(
-  req: Request | undefined,
+  req: ScopeRequest | undefined,
   platform: string,
   deps: MusicScopeDeps,
   options: { alwaysPersonal?: boolean } = {},
@@ -201,7 +203,7 @@ function withSharedPlaybackFallback(view: MusicProvider, shared: MusicProvider):
  * not break search/playback for that user.
  */
 export function resolveProviderForRequest(
-  req: Request | undefined,
+  req: ScopeRequest | undefined,
   platform: string,
   shared: MusicProvider,
   deps: MusicScopeDeps,
