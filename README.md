@@ -103,12 +103,12 @@ npm start
 
 ### 方式三：Docker 一键部署
 
-所有依赖已内置（Node.js、FFmpeg、Opus 编码器），无需安装任何额外软件。
+需要 Docker 和 Docker Compose v2。默认从 GitHub Container Registry（GHCR）拉取预构建镜像，镜像已包含 Node.js、FFmpeg 和 Opus 编码器。
 
 ```bash
 git clone https://github.com/ZHANGTIANYAO1/teamspeak-music-bot.git
 cd teamspeak-music-bot/scripts/docker
-docker-compose up -d
+docker compose up -d
 ```
 
 打开浏览器访问 **http://localhost:3000**
@@ -116,15 +116,14 @@ docker-compose up -d
 <details>
 <summary>Docker 详细说明</summary>
 
-- 首次构建需要几分钟（编译原生模块）
 - 默认使用 `host` 网络模式，机器人可直接连接局域网 TS3 服务器
 - 数据持久化在 Docker 命名卷 `tsmusicbot-data` 中（数据库、Cookie、日志）
 - 内置健康检查（`/api/health`），支持 Docker 自动重启
 
 ```bash
 docker logs -f tsmusicbot          # 查看日志
-docker-compose down                # 停止
-docker-compose up -d --build       # 代码更新后重新构建
+docker compose down                # 停止
+docker compose pull && docker compose up -d   # 更新预构建镜像
 ```
 
 如果 TS3 服务器在其他机器上，编辑 `docker-compose.yml`：
@@ -135,6 +134,36 @@ ports:
 ```
 
 </details>
+
+#### 无法访问 GHCR 时部署
+
+**离线导入发布镜像。** 在能访问 GHCR 的机器上拉取项目官方发布镜像并导出。下面以 `1.15.4` 和 `linux/amd64` 为例，请选择所需发布版本以及部署服务器的架构（`linux/amd64` 或 `linux/arm64`）。Git 发布标签带 `v`，镜像标签不带 `v`。
+
+```bash
+image=ghcr.io/zhangtianyao1/teamspeak-music-bot:1.15.4
+docker pull --platform linux/amd64 "$image"
+docker image save -o tsmusicbot-1.15.4.tar "$image"
+```
+
+将归档和同版本的 `scripts/docker/docker-compose.yml` 复制到部署服务器。在 Compose 文件中把 `image:` 改为上面导入的完整镜像名和标签，然后在该文件所在目录运行：
+
+```bash
+docker image load -i tsmusicbot-1.15.4.tar
+docker compose config --images
+docker compose up -d --pull never
+```
+
+升级时导入新版本的镜像并更新 `image:` 的标签，再在同一部署目录运行启动命令，以继续使用现有的数据卷。
+
+**从发布源码本地构建。** 若部署机可以访问构建依赖但无法访问 GHCR，可下载或克隆对应发布标签的源码。在 `scripts/docker/docker-compose.yml` 中把 `image:` 替换成下列配置，保持它位于 `services.tsmusicbot` 下：
+
+```yaml
+    build:
+      context: ../..
+      dockerfile: scripts/docker/Dockerfile
+```
+
+进入源码的 `scripts/docker` 目录，运行 `docker compose up -d --build`。构建需要获取 `node:22-slim` 基础镜像，以及 Dockerfile 使用的 apt、npm 和原生依赖下载源。升级时切换到所需的新发布标签并重新构建。
 
 ### 方式四：Linux 安装脚本
 
@@ -302,11 +331,8 @@ npm start
 ```bash
 cd scripts/docker
 
-# 拉取最新代码
-git pull
-
-# 重新构建并启动（数据自动保留）
-docker-compose up -d --build
+# 拉取预构建镜像并重新启动
+docker compose pull && docker compose up -d
 ```
 
 > 数据（数据库、Cookie、日志）保存在 Docker 命名卷 `tsmusicbot-data` 中，更新不会丢失。
@@ -929,7 +955,7 @@ A：B站搜索需要 buvid3 匿名 Cookie（程序启动时自动获取）。如
 A：YouTube 是可选音源，需要手动安装 `yt-dlp`。详见 [可选：YouTube 音源](#可选youtube-音源) 章节。快速验证：在项目根目录执行 `bin/yt-dlp --version`（或系统 `yt-dlp --version`），能打印版本号即可。若 yt-dlp 已安装但仍搜索失败，通常是网络/地域问题或 yt-dlp 版本过旧（执行 `yt-dlp -U` 升级）。
 
 **Q：如何更新到新版本？**
-A：`git pull` 拉取最新代码，然后 `npm install && npm run build && npm start` 重新构建启动。Docker 用户执行 `docker-compose up -d --build`。
+A：`git pull` 拉取最新代码，然后 `npm install && npm run build && npm start` 重新构建启动。使用预构建镜像的 Docker 用户执行 `docker compose pull && docker compose up -d`，离线导入或本地构建用户按各自的部署步骤升级。
 
 **Q：忘记管理员密码怎么办？**
 A：直接操作 SQLite 数据库。最简单的办法是清空 `users` 表然后重新进入 first-run 流程：`sqlite3 data/tsmusicbot.db "DELETE FROM users; DELETE FROM sessions;"`，重启后浏览器会自动跳转 `/first-run` 让你重新创建管理员。详细方法见 [从 WebUI 无鉴权版本升级](#从-webui-无鉴权版本升级重要)。
