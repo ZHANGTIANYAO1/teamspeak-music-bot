@@ -1397,6 +1397,7 @@ const playSingleSong = BotInstance.prototype.playSingleSong as (
   this: unknown,
   song: unknown,
   requesterName?: string,
+  onFailure?: (failure: PlayFailure, currentTrackContinues?: boolean) => void,
 ) => Promise<boolean>;
 const loadSavedQueue = BotInstance.prototype.loadSavedQueue as (
   this: unknown,
@@ -1439,7 +1440,10 @@ describe("BotInstance.playSingleSong / playKeepsQueue (#119)", () => {
       isSameSong,
       disableFmMode: vi.fn(),
       sweepLocalAudio: vi.fn(),
-      resolveAndPlay: vi.fn(async () => true),
+      resolveAndPlay: vi.fn(async (_song, _onFailure, commitQueue?: () => void) => {
+        commitQueue?.();
+        return true;
+      }),
     } as any;
   }
 
@@ -1472,6 +1476,93 @@ describe("BotInstance.playSingleSong / playKeepsQueue (#119)", () => {
     await playSingleSong.call(ctx, song119("b"), "alice");
     expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["b"]);
     expect(ctx.queue.current()?.id).toBe("b");
+  });
+
+  it.each([
+    [false, "new"], [false, "old"], [true, "new"], [true, "old"],
+  ] as const)("retains the current queue and stream after a failed direct start (keep=%s, requested=%s)", async (keep, id) => {
+    const ctx = makeCtx(keep);
+    const current = song119("old");
+    ctx.queue.add(current);
+    ctx.queue.add(song119("following"));
+    ctx.queue.play();
+    ctx.player._play();
+    ctx.player.getPlaybackSessionId = () => 3;
+    ctx.resolveAndPlay.mockImplementation(async (_track: QueuedSong, onFailure?: (failure: PlayFailure) => void) => {
+      onFailure?.({ platform: "netease", songId: id, code: "unknown", message: "No URL" });
+      return false;
+    });
+    const failure = vi.fn();
+
+    expect(await playSingleSong.call(ctx, song119(id), "alice", failure)).toBe(false);
+    expect(ctx.queue.current()).toBe(current);
+    expect(ctx.queue.list().map((song: QueuedSong) => song.id)).toEqual(["old", "following"]);
+    expect(ctx.player.stop).not.toHaveBeenCalled();
+    expect(ctx.disableFmMode).not.toHaveBeenCalled();
+    expect(ctx.sweepLocalAudio).not.toHaveBeenCalled();
+    expect(failure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: "No URL" }), id === "old");
+  });
+
+  function makeRealStartCtx() {
+    const queue = new PlayQueue();
+    queue.add(song119("old"));
+    queue.add(song119("following"));
+    queue.play();
+    const player = Object.assign(new EventEmitter(), makePlayer(), {
+      resetFailures: vi.fn(), getPlaybackSessionId: () => 1,
+    });
+    const ctx = Object.assign(makeResolveCtx({ controller: makeController(), player, url: "" }), {
+      queue, player, withRequester, isSameSong, disableFmMode: vi.fn(),
+      sweepLocalAudio: vi.fn(), spotifyController: new EventEmitter(),
+      resumeInterruptedStream: async () => false,
+    });
+    ctx.playNext = BotInstance.prototype.playNext.bind(ctx);
+    ctx.resolveAndPlay = BotInstance.prototype.resolveAndPlay.bind(ctx);
+    setupPlayerEvents.call(ctx);
+    return ctx;
+  }
+
+  it("looks up a successful direct play once and commits the queue before status publication", async () => {
+    const ctx = makeRealStartCtx();
+    const getSongUrl = vi.fn(async () => ({ url: "https://example.test/new.mp3" }));
+    ctx.getProviderFor.mockReturnValue({ platform: "netease", getSongUrl });
+    ctx.emit.mockImplementation((event: string) => {
+      if (event === "stateChange") expect(ctx.queue.current()?.id).toBe("new");
+    });
+
+    expect(await playSingleSong.call(ctx, song119("new"), "alice")).toBe(true);
+    expect(getSongUrl).toHaveBeenCalledTimes(1);
+    expect(ctx.queue.current()).toMatchObject({ id: "new", requestedBy: "alice", url: "https://example.test/new.mp3" });
+    expect(ctx.emit).toHaveBeenCalledExactlyOnceWith("stateChange");
+  });
+
+  it("lets the current track end normally during an unresolved direct request", async () => {
+    const ctx = makeRealStartCtx();
+    ctx.player.play("https://example.test/old.mp3");
+    ctx.player.play.mockClear();
+    const lookupStarted = deferred();
+    const directLookup = deferred<{ url: string }>();
+    const getSongUrl = vi.fn(async (id: string) => {
+      if (id === "new") {
+        lookupStarted.resolve();
+        return directLookup.promise;
+      }
+      return { url: "https://example.test/following.mp3" };
+    });
+    ctx.getProviderFor.mockReturnValue({ platform: "netease", getSongUrl });
+    const request = playSingleSong.call(ctx, song119("new"));
+    await lookupStarted.promise;
+    expect(ctx.queue.current()?.id).toBe("old");
+    expect(ctx.player.getState()).toBe("playing");
+    ctx.player.stop();
+    ctx.player.emit("trackEnd");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    directLookup.resolve({ url: "https://example.test/stale.mp3" });
+
+    expect(await request).toBe(false);
+    expect(ctx.queue.current()?.id).toBe("following");
+    expect(getSongUrl.mock.calls.map(([id]) => id)).toEqual(["new", "following"]);
+    expect(ctx.player.play).toHaveBeenCalledExactlyOnceWith("https://example.test/following.mp3", 0, 1);
   });
 });
 

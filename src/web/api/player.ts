@@ -540,7 +540,7 @@ export function createPlayerRouter(
   // requests can't interleave the queue mutation + playback (#119).
   router.post("/:botId/play-song", authorize({ capability: "player.control" }), async (req, res) => {
     try {
-      const bot = (req as any).bot;
+      const bot: BotInstance = (req as any).bot;
       const { song } = req.body;
       if (!song || !song.id || !song.platform) {
         res.status(400).json({ error: "song object with id and platform is required" });
@@ -554,11 +554,15 @@ export function createPlayerRouter(
       // clear branch — do NOT also call it here, or it would delete retained
       // local uploads in keep-queue mode.
       const body = await bot.runExclusive(async () => {
-        let reason: string | undefined;
-        const ok = await bot.playSingleSong({ ...song }, requesterName(req), (failure: PlayFailure) => { reason = failure.message; });
+        let errorMessage = whyUnplayable(song);
+        const ok = await bot.playSingleSong({ ...song }, requesterName(req), (failure, currentTrackContinues) => {
+          errorMessage = currentTrackContinues
+            ? `未能重新播放「${song.name || song.id}」，当前曲目继续播放：${failure.message}`
+            : whyUnplayable(song, failure.message);
+        });
         return ok
           ? { ok: true, message: `正在播放：${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` }
-          : { ok: false, message: whyUnplayable(song, reason) };
+          : { ok: false, message: errorMessage };
       });
       res.json(body);
     } catch (err) {
@@ -653,7 +657,7 @@ export function createPlayerRouter(
 
   router.post("/:botId/add-song", authorize({ capability: "player.queue", guestFlag: "addToQueue" }), async (req, res) => {
     try {
-      const bot = (req as any).bot;
+      const bot: BotInstance = (req as any).bot;
       const { song } = req.body;
       if (!song || !song.id || !song.platform) {
         res.status(400).json({ error: "song object with id and platform is required" });
@@ -672,13 +676,18 @@ export function createPlayerRouter(
 
         // If nothing was playing, start this newly-added song immediately.
         if (wasIdle) {
-          queue.playAt(queue.size() - 1);
+          const added = queue.playAt(queue.size() - 1)!;
           bot.getPlayer().resetFailures();
-          await bot.resolveAndPlay(queue.current()!);
-          return { message: `Now playing: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` };
+          let reason: string | undefined;
+          const ok = await bot.resolveAndPlay(added, failure => { reason = failure.message; });
+          if (!ok) {
+            bot.emit("stateChange");
+            return { ok: false, message: `已加入队列，但${whyUnplayable(added, reason)}` };
+          }
+          return { ok: true, message: `Now playing: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` };
         }
 
-        return { message: `Added to queue: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'} (position ${queue.size()})` };
+        return { ok: true, message: `Added to queue: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'} (position ${queue.size()})` };
       });
       res.json(body);
     } catch (err) {

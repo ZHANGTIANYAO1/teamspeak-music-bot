@@ -265,3 +265,44 @@ describe("play a queue position", () => {
     expect(queue.current()?.id).toBe("unavailable");
   });
 });
+
+it("reports a failed restart while the existing track is still playing", async () => {
+  const bot = {
+    runExclusive: (work: () => Promise<unknown>) => work(),
+    async playSingleSong(_song: Song, _requester: string, failure: (error: { message: string }, continues: boolean) => void) {
+      failure({ message: "No URL" }, true);
+      return false;
+    },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+  app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+
+  const response = await request(app).post("/api/player/b/play-song").send({ song: song("playing") });
+  expect(response.body).toEqual({ ok: false, message: expect.stringContaining("当前曲目继续播放") });
+});
+
+it("tries the newly appended track when idle and reports a failed URL lookup", async () => {
+  const queue = new PlayQueue();
+  queue.add(song("already-queued"));
+  const bot = {
+    getQueueManager: () => queue,
+    getPlayer: () => ({ getState: () => "idle", resetFailures: vi.fn() }),
+    runExclusive: (work: () => Promise<unknown>) => work(),
+    resolveAndPlay: vi.fn(async (_track: Song, onFailure?: (failure: { message: string }) => void) => {
+      onFailure?.({ message: "No URL" });
+      return false;
+    }),
+    emit: vi.fn(),
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+  app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+
+  const response = await request(app).post("/api/player/b/add-song").send({ song: song("newly-added") });
+  expect(bot.resolveAndPlay.mock.calls.map(([track]) => track.id)).toEqual(["newly-added"]);
+  expect(queue.list().map(track => track.id)).toEqual(["already-queued", "newly-added"]);
+  expect(response.body).toEqual({ ok: false, message: expect.stringContaining("No URL") });
+});

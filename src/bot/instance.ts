@@ -1077,7 +1077,11 @@ export class BotInstance extends EventEmitter {
   }
 
   /** Resolve the URL and start playback if this request still owns the queue. */
-  async resolveAndPlay(song: QueuedSong, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
+  async resolveAndPlay(
+    song: QueuedSong,
+    onFailure?: (failure: PlayFailure) => void,
+    commitQueue?: () => void,
+  ): Promise<boolean> {
     const request = Symbol();
     this.playbackRequest = request;
     const generation = this.lifecycleGeneration;
@@ -1098,10 +1102,6 @@ export class BotInstance extends EventEmitter {
       fail("该机器人已关闭本地音频播放");
       return false;
     }
-    // Clear any accumulated skip votes — every fresh track starts with a
-    // clean slate, regardless of which code path loaded it (cmdPlay,
-    // cmdPlaylist, cmdAlbum, cmdFm, trackEnd auto-advance, etc.).
-    this.voteSkipUsers.clear();
     try {
       const provider = this.getProviderFor(song.platform);
       if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
@@ -1221,7 +1221,8 @@ export class BotInstance extends EventEmitter {
         // frame counter is not reset, so player.getElapsed() over-reads for the
         // 2nd+ consecutive Spotify track. Cosmetic only — the authoritative
         // elapsed shown to users is status.track.position from the backend poll.
-        if (!this.player.isExternalActive()) {
+        if (commitQueue) this.player.resetFailures();
+        if (commitQueue || !this.player.isExternalActive()) {
           this.player.playPcmStream(this.spotifyController.getPcmStream(), {
             // The sidecar PCM pipe is long-lived; per-track end arrives via the
             // controller "trackEnded" WS event, not stream EOF. A real EOF here
@@ -1259,6 +1260,7 @@ export class BotInstance extends EventEmitter {
             this.logger.warn({ err }, "Failed to pause Spotify sidecar on source switch"));
           this.currentSourceIsSpotify = false;
         }
+        if (commitQueue) this.player.resetFailures();
         this.effectiveDuration = result.trialDuration ?? song.duration;
         this.player.play(result.url, 0, this.effectiveDuration);
       }
@@ -1271,6 +1273,9 @@ export class BotInstance extends EventEmitter {
       return false;
     }
 
+    // A direct play request commits its queue only after playback starts.
+    commitQueue?.();
+    this.voteSkipUsers.clear();
     // Playback has started. Failures in bookkeeping must not skip a track
     // or turn an otherwise successful playback request into an error.
     this.autoPaused = false;
@@ -1503,56 +1508,53 @@ export class BotInstance extends EventEmitter {
     if (error) return error;
     const song0 = song!;
     let why: string | undefined;
-    const ok = await this.playSingleSong(song0, requesterName, failure => { why = failure.message; });
-    if (!ok) return why ? `Cannot play: ${song0.name} — ${why}` : `Cannot play: ${song0.name}`;
+    const ok = await this.playSingleSong(song0, requesterName, (failure, currentTrackContinues) => {
+      why = currentTrackContinues
+        ? `Could not restart ${song0.name}. The current track is still playing: ${failure.message}`
+        : `Cannot play: ${song0.name} — ${failure.message}`;
+    });
+    if (!ok) return why ?? `Cannot play: ${song0.name}`;
     return `Now playing: ${song0.name} - ${song0.artist}`;
   }
 
-  /**
-   * Play a single resolved song immediately, honoring config.playKeepsQueue:
-   *  - false (default): clear the queue and play only this song — today's
-   *    behavior. The prior track is stopped and released local uploads swept.
-   *  - true (and the queue is non-empty): insert the song after the current
-   *    track and jump to it (reusing addNext + playAt — no new queue logic), so
-   *    the rest of the queue survives and continues after it. FM auto-refill is
-   *    stopped (manual takeover), but existing queued songs are preserved.
-   *
-   * Shared by chat !play and the web /play-song route so the toggle decision
-   * lives in exactly one place (#119). Returns true if a track started playing.
-   */
-  async playSingleSong(song: QueuedSong, requesterName?: string, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
-    const s = this.withRequester(song, requesterName);
-    if (this.config.playKeepsQueue && !this.queue.isEmpty()) {
-      const insertedAt =
-        this.queue.getCurrentIndex() < 0
-          ? this.queue.size()
-          : this.queue.getCurrentIndex() + 1;
-      this.player.stop();
-      this.disableFmMode();
-      this.queue.addNext(s);
-      this.queue.playAt(insertedAt);
-      this.player.resetFailures();
-      // No sweep here: the queue is kept, so no local uploads were released.
-      return this.resolveAndPlay(this.queue.current()!, onFailure);
-    }
-    // Legacy replace behavior (default).
+  /** Start the requested song before changing the queue or stopping FM. */
+  async playSingleSong(
+    song: QueuedSong,
+    requesterName?: string,
+    onFailure?: (failure: PlayFailure, currentTrackContinues?: boolean) => void,
+  ): Promise<boolean> {
+    const requested = this.withRequester(song, requesterName);
     const previous = this.queue.current();
-    if (previous && !this.isSameSong(previous, s)) {
-      this.player.stop();
+    const previousSession = this.isSameSong(previous, requested) ? this.player.getPlaybackSessionId() : undefined;
+    const keepQueue = this.config.playKeepsQueue && !this.queue.isEmpty();
+    let failure: PlayFailure | undefined;
+    const started = await this.resolveAndPlay(requested, reason => { failure = reason; }, () => {
+      this.disableFmMode();
+      if (keepQueue) {
+        const currentIndex = this.queue.getCurrentIndex();
+        const index = currentIndex < 0 ? this.queue.size() : currentIndex + 1;
+        this.queue.addNext(requested);
+        this.queue.playAt(index);
+      } else {
+        this.queue.clear();
+        this.queue.add(requested);
+        this.queue.play();
+      }
+    });
+    if (!started) {
+      const currentTrackContinues = previousSession !== undefined &&
+        this.queue.current() === previous && this.player.getPlaybackSessionId() === previousSession &&
+        this.player.getState() === "playing";
+      onFailure?.(failure ?? {
+        platform: song.platform,
+        songId: song.id,
+        code: "unknown",
+        message: "播放请求已取消",
+      }, currentTrackContinues);
+      return false;
     }
-    this.queue.clear();
-    this.disableFmMode();
-    this.queue.add(s);
-    this.queue.play();
-
-    // Reset failure counter on user-initiated play
-    this.player.resetFailures();
-    const ok = await this.resolveAndPlay(this.queue.current()!, onFailure);
-    // Sweep AFTER the new song is queued+resolved: the replaced songs are no
-    // longer referenced (and get deleted), but the song — if it is the same
-    // local upload that was already playing — stays referenced and is preserved.
-    this.sweepLocalAudio("replaced");
-    return ok;
+    if (!keepQueue) this.sweepLocalAudio("replaced");
+    return true;
   }
 
   /**

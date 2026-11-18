@@ -585,7 +585,8 @@ export const usePlayerStore = defineStore('player', {
         const handled = await this.checkBilibiliMultiPart(song, 'add');
         if (handled) return;
       }
-      await axios.post(`/api/player/${this.activeBotId}/add-song`, { song });
+      const res = await axios.post(`/api/player/${this.activeBotId}/add-song`, { song });
+      if (res.data?.ok === false && res.data?.message) this.notify(res.data.message, 'error');
     },
 
     async playPlaylist(playlistId: string, platform = 'netease') {
