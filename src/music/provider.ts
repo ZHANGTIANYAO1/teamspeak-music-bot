@@ -108,6 +108,7 @@ export function playbackRequestFailure(
     ? status : undefined;
   const name = platform === "qq" ? "QQ 音乐 API" : "酷狗";
   const message = httpStatus ? `${name}播放请求失败（HTTP ${httpStatus}）`
+    : raw?.code === "QQ_API_PORT_CONFLICT" && platform === "qq" ? "QQ 音乐 API 端口被其他服务占用，请检查 qqMusicApiPort"
     : raw?.code === "ECONNREFUSED" && platform === "qq" ? "无法连接 QQ 音乐 API，请检查服务启动与端口"
     : raw?.code === "ECONNABORTED" || raw?.code === "ETIMEDOUT" ? `${name}播放请求超时`
     : `${name}播放请求失败，请检查服务与网络连接`;

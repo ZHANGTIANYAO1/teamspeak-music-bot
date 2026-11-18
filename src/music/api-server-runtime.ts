@@ -34,6 +34,38 @@ export function isApiPortFree(port: number): Promise<boolean> {
   });
 }
 
+/** Identify the QQ wrapper without credentials or a request to QQ upstream. */
+export async function isQqMusicApi(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/getMusicPlay`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (response.status !== 400 || !response.headers.get("content-type")?.includes("application/json")) {
+      await response.body?.cancel();
+      return false;
+    }
+    const reader = response.body?.getReader();
+    if (!reader) return false;
+    const buffer = Buffer.alloc(1024);
+    let length = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (length + value.length > buffer.length) return false;
+        buffer.set(value, length);
+        length += value.length;
+      }
+    } finally {
+      await reader.cancel();
+    }
+    return JSON.parse(buffer.toString("utf8", 0, length))?.data?.message === "no songmid";
+  } catch {
+    return false;
+  }
+}
+
 function waitForListening(server: Server): Promise<void> {
   if (server.listening) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -80,7 +112,10 @@ export async function startEmbeddedApi(provider: ApiProvider, port: number): Pro
       if (!app || typeof app.listen !== "function") throw new Error("QQ API did not expose a Koa app");
       // Historical packages listened during import. Their listener remains
       // owned by this child and closes when the child exits.
-      if (!(await isApiPortFree(port))) return { server: null };
+      if (!(await isApiPortFree(port))) {
+        if (await isQqMusicApi(port)) return { server: null };
+        throw Object.assign(new Error("QQ Music API port is occupied"), { code: "EADDRINUSE" });
+      }
       server = app.listen(port, "127.0.0.1");
     }
     await waitForListening(server!);

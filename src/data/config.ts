@@ -469,15 +469,15 @@ export function loadConfig(path: string): BotConfig {
         ? (rawDefault as GateableProvider)
         : null;
 
-    // audioQuality → per-provider strings; each field falls back to its default
-    // when missing/blank/non-string (a hand-edited/legacy config must never smuggle
-    // a non-string past the gate — the value is fed straight to provider.setQuality).
+    // Normalize the two numeric QQ bitrates accepted by older settings APIs.
+    // Other missing, blank or non-string qualities use provider defaults.
     const partialAq = (partial.audioQuality ?? {}) as Partial<AudioQualityConfig>;
     const coerceQuality = (v: unknown, fallback: string): string =>
       typeof v === "string" && v.trim() ? v : fallback;
+    const qqQuality: unknown = partialAq.qq;
     const audioQuality: AudioQualityConfig = {
       netease: coerceQuality(partialAq.netease, defaults.audioQuality.netease),
-      qq: coerceQuality(partialAq.qq, defaults.audioQuality.qq),
+      qq: qqQuality === 128 || qqQuality === 320 ? String(qqQuality) : coerceQuality(qqQuality, defaults.audioQuality.qq),
       bilibili: coerceQuality(partialAq.bilibili, defaults.audioQuality.bilibili),
       kugou: coerceQuality(partialAq.kugou, defaults.audioQuality.kugou),
       jellyfin: coerceQuality(partialAq.jellyfin, defaults.audioQuality.jellyfin),

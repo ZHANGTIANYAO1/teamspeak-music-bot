@@ -34,7 +34,7 @@ describe("embedded API runtime", () => {
     listen = vi.fn(() => { queueMicrotask(() => { server.listening = true; server.emit("listening"); }); return server; });
     state.qqExport = { listen };
   });
-  afterEach(() => { if (previousPort === undefined) delete process.env.PORT; else process.env.PORT = previousPort; });
+  afterEach(() => { if (previousPort === undefined) delete process.env.PORT; else process.env.PORT = previousPort; vi.restoreAllMocks(); });
 
   it("binds NetEase to loopback/configured port without version checks and waits for listening", async () => {
     let ready = false;
@@ -74,7 +74,16 @@ describe("embedded API runtime", () => {
   });
   it("reuses a legacy module that auto-started on import without a duplicate listen", async () => {
     state.portFree = false;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ data: { message: "no songmid" } }), {
+      status: 400, headers: { "Content-Type": "application/json" },
+    }));
     expect(await startEmbeddedApi("qq", 39217)).toEqual({ server: null });
+    expect(listen).not.toHaveBeenCalled();
+  });
+  it("reports an occupied port if another service bound it during import", async () => {
+    state.portFree = false;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("not QQ", { status: 200 }));
+    await expect(startEmbeddedApi("qq", 39217)).rejects.toMatchObject({ code: "EADDRINUSE" });
     expect(listen).not.toHaveBeenCalled();
   });
   it("never reflects arbitrary startup message, stack or code values", () => {

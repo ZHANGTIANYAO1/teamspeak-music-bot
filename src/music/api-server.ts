@@ -1,6 +1,6 @@
 import { fork, type ChildProcess } from "node:child_process";
 import type { Logger } from "../logger.js";
-import { getSafeApiStartupError, isApiPortFree, safeApiErrorCode, type ApiProvider, type SafeApiStartupError } from "./api-server-runtime.js";
+import { getSafeApiStartupError, isApiPortFree, isQqMusicApi, safeApiErrorCode, type ApiProvider, type SafeApiStartupError } from "./api-server-runtime.js";
 
 export interface ApiServerOptions {
   neteasePort: number;
@@ -13,6 +13,7 @@ export interface ApiServerManager {
   stop(): void;
   getNeteaseBaseUrl(): string;
   getQQMusicBaseUrl(): string;
+  assertQqMusicApiPort(): void;
 }
 
 export function describeQqApiStartupError(err: unknown): string | null {
@@ -52,6 +53,13 @@ export function createApiServerManager(options: ApiServerOptions, logger: Logger
   let generation = 0;
   let starting: Promise<void> | null = null;
   let stopping: Promise<void> = Promise.resolve();
+  let qqPortConflict = false;
+
+  function reportQqPortConflict(port: number): void {
+    qqPortConflict = true;
+    logger.error({ provider: "qq", port, category: "port-in-use" },
+      "QQ Music API port is occupied by another service. Free the port or set qqMusicApiPort to an unused port and restart.");
+  }
 
   function launch(provider: ApiProvider, port: number, launchGeneration: number): Promise<void> {
     const source = import.meta.url.endsWith(".ts");
@@ -158,16 +166,24 @@ export function createApiServerManager(options: ApiServerOptions, logger: Logger
             const free = await isApiPortFree(port);
             if (startGeneration !== generation) return;
             if (!free) {
+              if (provider === "qq") {
+                const compatible = await isQqMusicApi(port);
+                if (startGeneration !== generation) return;
+                if (!compatible) { reportQqPortConflict(port); continue; }
+                qqPortConflict = false;
+              }
               logger.info({ port }, `${provider === "netease" ? "NetEase" : "QQ Music"} API port already in use — reusing existing instance`);
               continue;
             }
             await launch(provider, port, startGeneration);
             if (startGeneration !== generation) return;
+            if (provider === "qq") qqPortConflict = false;
             logger.info({ port }, `${name} API started`);
           } catch (error) {
             if (startGeneration !== generation) return;
             const details = error instanceof StartupFailure ? error.details : getSafeApiStartupError(error);
             if (details.category === "cancelled") return;
+            if (provider === "qq" && details.category === "port-in-use") { reportQqPortConflict(port); continue; }
             const hint = provider === "qq" ? describeQqApiStartupError(details.category === "esm" ? { code: "ERR_REQUIRE_ESM" } : details.category === "node-engine" ? { code: "EBADENGINE" } : {}) : null;
             logger.error({ provider, port, ...details }, hint ? `QQ Music API failed to start — ${hint}. QQ features (search/play/login) will be unavailable until fixed; port ${port} is down.` : `Failed to start ${name} API`);
           }
@@ -191,5 +207,10 @@ export function createApiServerManager(options: ApiServerOptions, logger: Logger
     },
     getNeteaseBaseUrl: () => `http://127.0.0.1:${options.neteasePort}`,
     getQQMusicBaseUrl: () => `http://127.0.0.1:${options.qqMusicPort}`,
+    assertQqMusicApiPort(): void {
+      if (qqPortConflict) {
+        throw Object.assign(new Error("QQ Music API port conflict; check qqMusicApiPort"), { code: "QQ_API_PORT_CONFLICT" });
+      }
+    },
   };
 }

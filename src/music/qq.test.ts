@@ -23,6 +23,15 @@ describe("QQ playback sidecar contract", () => {
     expect(mockGet).toHaveBeenLastCalledWith("/getMusicPlay", { params: expect.objectContaining({ songmid: "abc", quality: "flac" }) });
   });
 
+  it.each([320, "320"])("accepts QQ quality %j from the settings API", async (quality) => {
+    const provider = new QQMusicProvider("http://127.0.0.1:3200");
+    provider.setQuality(quality);
+    expect(provider.getQuality()).toBe("320");
+    mockGet.mockResolvedValue({ data: { data: { playUrl: { abc: { url: "https://example.com/audio" } } } } });
+    await provider.getSongUrl("abc");
+    expect(mockGet).toHaveBeenLastCalledWith("/getMusicPlay", { params: expect.objectContaining({ quality: "320" }) });
+  });
+
   it("resolves a numeric ID to a MID before asking the sidecar for playback", async () => {
     const provider = new QQMusicProvider("http://127.0.0.1:3200");
     mockGet.mockResolvedValueOnce({ data: { response: { songinfo: { data: { track_info: { mid: "abc" } } } } } });
@@ -48,6 +57,44 @@ describe("QQ playback sidecar contract", () => {
     mockGet.mockResolvedValueOnce({ data: { data: { playUrl: { def: { url: "https://example.com/audio2" } } } } });
     await expect(provider.getPlayableSongIds(["abc", "def"])).resolves.toEqual(new Set(["abc", "def"]));
     expect(mockGet).toHaveBeenNthCalledWith(2, "/getMusicPlay", { params: expect.objectContaining({ songmid: "def", quality: "128" }) });
+  });
+
+  it.each([{}, { abc: { url: "" } }, { abc: { url: "" }, def: { url: 17 } }])(
+    "does not interpret incomplete or unconfirmed HTTP 200 play maps as unavailable",
+    async (playUrl) => {
+      const provider = new QQMusicProvider("http://127.0.0.1:3200");
+      provider.setQuality("128");
+      mockGet.mockResolvedValue({ status: 200, data: { data: { playUrl } } });
+      await expect(provider.getPlayableSongIds(["abc", "def"])).resolves.toBeNull();
+    },
+  );
+
+  it("does not treat an upstream error inside HTTP 200 as a final no-URL result", async () => {
+    const provider = new QQMusicProvider("http://127.0.0.1:3200");
+    provider.setQuality("128");
+    mockGet.mockResolvedValue({ status: 200, data: { data: { code: 0, req_0: { code: 502 }, playUrl: { abc: { url: "" } } } } });
+    await expect(provider.getPlayableSongIds(["abc"])).resolves.toBeNull();
+    await expect(provider.getSongUrl("abc")).rejects.toMatchObject({
+      failure: { code: "upstream_request_failed", upstream: { code: 502 } },
+    });
+  });
+
+  it("accepts a fully confirmed no-play result and a numeric HTTP envelope success code", async () => {
+    const provider = new QQMusicProvider("http://127.0.0.1:3200");
+    provider.setQuality("128");
+    mockGet.mockResolvedValue({ status: 200, data: { code: 200, data: {
+      code: "0", req_0: { code: 0, data: { midurlinfo: [{ songmid: "abc", purl: "" }] } }, playUrl: { abc: { url: "" } },
+    } } });
+    await expect(provider.getPlayableSongIds(["abc"])).resolves.toEqual(new Set());
+  });
+
+  it("stops playback before sending a request when the sidecar port is occupied by another service", async () => {
+    const guard = () => { throw Object.assign(new Error("QQ sidecar port conflict"), { code: "QQ_API_PORT_CONFLICT" }); };
+    const provider = new QQMusicProvider("http://127.0.0.1:3200", undefined, guard);
+    await expect(provider.getSongUrl("abc")).rejects.toMatchObject({
+      failure: { code: "upstream_request_failed", message: expect.stringContaining("端口") },
+    });
+    expect(mockGet).not.toHaveBeenCalled();
   });
 });
 

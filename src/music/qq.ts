@@ -65,6 +65,34 @@ function isQqNumericId(value: string): boolean {
   return /^\d+$/.test(value);
 }
 
+interface QqPlaybackReply {
+  code?: unknown;
+  data?: {
+    code?: unknown;
+    req_0?: { code?: unknown; data?: { midurlinfo?: unknown } };
+    playUrl?: Record<string, { url?: unknown }>;
+  };
+}
+
+function readQqCode(raw: unknown): number | undefined {
+  const code = typeof raw === "string" && /^-?\d+$/.test(raw) ? Number(raw) : raw;
+  return typeof code === "number" && Number.isSafeInteger(code) ? code : undefined;
+}
+
+function qqPlaybackErrorCode(reply?: QqPlaybackReply): number | undefined {
+  const wrapper = readQqCode(reply?.code);
+  if (wrapper !== undefined && wrapper !== 0 && wrapper !== 200) return wrapper;
+  return [readQqCode(reply?.data?.code), readQqCode(reply?.data?.req_0?.code)]
+    .find(code => code !== undefined && code !== 0);
+}
+
+function confirmedQqMisses(reply: QqPlaybackReply): Set<string> {
+  const request = reply.data?.req_0;
+  const rows = request?.data?.midurlinfo;
+  if (readQqCode(request?.code) !== 0 || !Array.isArray(rows)) return new Set();
+  return new Set(rows.flatMap(row => typeof row?.songmid === "string" && row.purl === "" && !row.vkey ? [row.songmid] : []));
+}
+
 /** True when a search_type=2 album search entry really belongs to this singer.
  *  QQ fills singerMID for most albums; older entries only carry singer_list. */
 function isArtistAlbum(a: any, artistId: string): boolean {
@@ -192,24 +220,34 @@ function computeGtk(pSkey: string): number {
 
 export class QQMusicProvider implements MusicProvider {
   readonly platform = "qq" as const;
-  private api: AxiosInstance;
+  private readonly sidecar: AxiosInstance;
   private legacyCookie = "";
   private quality = "exhigh";
   private radarPage = 1;
 
-  constructor(baseUrl: string, readonly managedSession?: QQManagedSession) {
-    this.api = axios.create({
+  constructor(
+    baseUrl: string,
+    readonly managedSession?: QQManagedSession,
+    private readonly assertSidecarPort?: () => void,
+  ) {
+    this.sidecar = axios.create({
       baseURL: baseUrl,
       timeout: 10000,
     });
+  }
+
+  private get api(): AxiosInstance {
+    this.assertSidecarPort?.();
+    return this.sidecar;
   }
 
   private get cookie(): string {
     return this.managedSession?.getCookie() ?? this.legacyCookie;
   }
 
-  setQuality(quality: string): void {
-    this.quality = quality;
+  setQuality(quality: string | number): void {
+    if (quality === 128 || quality === 320) this.quality = String(quality);
+    else if (typeof quality === "string" && quality.trim()) this.quality = quality.trim();
   }
 
   getQuality(): string {
@@ -385,24 +423,32 @@ export class QQMusicProvider implements MusicProvider {
   }
 
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
-    // The sidecar's play endpoint only reads songmid. Old queues and explicit
-    // ID requests can carry numeric IDs, which the metadata endpoint resolves.
-    const songmid = isQqNumericId(songId) ? (await this.getSongDetail(songId))?.id : songId;
-    if (!songmid || isQqNumericId(songmid)) {
-      throw new SongUrlUnavailable({ platform: this.platform, songId, code: "unknown", message: "QQ 音乐未返回该曲目的 MID" });
-    }
     const format = qqPlaybackQuality(quality ?? this.quality);
-    let response;
     try {
-      response = await this.api.get("/getMusicPlay", {
-        params: { songmid, quality: format, ...this.cookieParams },
+      const api = this.api;
+      // The play endpoint only accepts MIDs. Old queues and explicit ID
+      // requests can carry a numeric ID, which the metadata endpoint resolves.
+      const songmid = isQqNumericId(songId) ? (await this.getSongDetail(songId))?.id : songId;
+      if (!songmid || isQqNumericId(songmid)) {
+        throw new SongUrlUnavailable({ platform: this.platform, songId, code: "unknown", message: "QQ 音乐未返回该曲目的 MID" });
+      }
+      const response = await api.get<QqPlaybackReply>("/getMusicPlay", {
+        params: { songmid, quality: format, resType: "full", ...this.cookieParams },
       });
+      const code = qqPlaybackErrorCode(response.data);
+      if (code !== undefined) {
+        throw new SongUrlUnavailable({
+          platform: this.platform, songId, code: "upstream_request_failed", message: `QQ 音乐播放请求返回错误（${code}）`,
+          upstream: { code },
+        });
+      }
+      const playUrl = response.data?.data?.playUrl?.[songmid];
+      if (typeof playUrl?.url === "string" && playUrl.url) {
+        return { url: playUrl.url, trialDuration: parseQqTrial(playUrl) };
+      }
     } catch (error) {
+      if (error instanceof SongUrlUnavailable) throw error;
       throw playbackRequestFailure(this.platform, songId, error);
-    }
-    const playUrl = response.data?.data?.playUrl?.[songmid];
-    if (typeof playUrl?.url === "string" && playUrl.url) {
-      return { url: playUrl.url, trialDuration: parseQqTrial(playUrl) };
     }
     throw new SongUrlUnavailable({
       platform: this.platform, songId, code: "unknown",
@@ -434,16 +480,25 @@ export class QQMusicProvider implements MusicProvider {
     const formats = [qqPlaybackQuality(this.quality), ...this.getFallbackQualities()];
     for (let i = 0; i < songIds.length; i += CHUNK) {
       let remaining = songIds.slice(i, i + CHUNK);
+      const unconfirmed = new Set<string>();
       for (const quality of formats) {
         try {
-          const res = await this.api.get("/getMusicPlay", {
-            params: { songmid: remaining.join(","), quality, ...this.cookieParams },
+          const res = await this.api.get<QqPlaybackReply>("/getMusicPlay", {
+            params: { songmid: remaining.join(","), quality, resType: "full", ...this.cookieParams },
           });
-          const playUrlMap: Record<string, { url?: string }> | undefined = res.data?.data?.playUrl;
-          if (!playUrlMap || remaining.some(mid => !Object.hasOwn(playUrlMap, mid))) return null;
+          const playUrlMap = res.data?.data?.playUrl;
+          if (qqPlaybackErrorCode(res.data) !== undefined || !playUrlMap ||
+              remaining.some(mid => !Object.hasOwn(playUrlMap, mid) || typeof playUrlMap[mid]?.url !== "string")) return null;
+          // The wrapper synthesizes empty URLs even if Tencent omitted a MID
+          // or returned a transient error. Require an upstream row before
+          // interpreting a blank URL as negative evidence for that quality.
+          const confirmed = confirmedQqMisses(res.data);
           remaining = remaining.filter(mid => {
-            const url = playUrlMap[mid]?.url;
-            if (typeof url !== "string" || !url) return true;
+            if (!playUrlMap[mid].url) {
+              if (!confirmed.has(mid)) unconfirmed.add(mid);
+              return true;
+            }
+            unconfirmed.delete(mid);
             playable.add(mid);
             return false;
           });
@@ -452,6 +507,7 @@ export class QQMusicProvider implements MusicProvider {
           return null;
         }
       }
+      if (unconfirmed.size > 0) return null;
     }
     return playable;
   }
@@ -878,11 +934,11 @@ export class QQMusicProvider implements MusicProvider {
    * A view of the same provider logged in as another account (#164 follow-up):
    * a web user's own QQ 音乐 login instead of the bot's shared one.
    *
-   * The per-user view points at the SAME API server (`this.api.defaults.baseURL`)
+   * The per-user view points at the same guarded API server
    * — only the cookie differs, so the shared login keeps its own instance.
    */
   withCookie(cookie: string): QQMusicProvider {
-    const view = new QQMusicProvider(this.api.defaults.baseURL ?? "");
+    const view = new QQMusicProvider(this.sidecar.defaults.baseURL ?? "", undefined, this.assertSidecarPort);
     view.quality = this.quality;
     view.setCookie(cookie);
     return view;

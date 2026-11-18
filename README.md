@@ -927,7 +927,7 @@ A：使用 `!move <频道名>` 命令，或在设置页面创建机器人时指�
 A：可以。在设置页面创建多个实例，分别连接不同的 TS 服务器或频道。
 
 **Q：端口 3200 被占用？**
-A：QQ 音乐 API 启动时会监听 `config.json` 里的 `qqMusicApiPort`（默认 **3200**），客户端也用同一个端口发请求，二者始终一致。如果之前的进程还在运行，程序会自动复用。如需改端口，改 `qqMusicApiPort` 后重启即可；如需重启可手动结束 `node` 进程。
+A：QQ 音乐 API 使用 `config.json` 的 `qqMusicApiPort`（默认 **3200**）。程序会验证已在该端口监听的 QQ 音乐 API，再复用它。如果端口被 WebUI、端口转发或其他服务占用，请将 `qqMusicApiPort` 改为另一个空闲端口并重启。
 
 **Q：日志里 `baseURL` 是 3200，但 QQ API 实际监听在 3300？（二维码不弹）**
 A：这是**旧版本**（或过期的 `latest` Docker 镜像）才有的问题：早期实现用的上游包默认端口是 3300，而客户端 `baseURL` 已经是 3200，两边对不上，取二维码时就 `ECONNREFUSED 127.0.0.1:3200`。当前版本已把内嵌 QQ 音乐 API **强制绑定到 `qqMusicApiPort`（默认 3200）**，并在启动前把上游包读取的 `PORT` 环境变量对齐到该端口，二者不可能再错位。修复方法：**拉取最新镜像并重启**（`docker compose pull && docker compose up -d`），或用 `npm ci && npm run build` 更新到最新代码。启动后可在日志里确认那行 `QQ Music API started`，其 `port` 字段就是实际监听端口。
