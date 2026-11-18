@@ -830,7 +830,13 @@ export class BotInstance extends EventEmitter {
     );
     if (!parsed) return;
 
-    if (!(await this.isCommandAllowed(parsed.name, msg))) {
+    // A numeric invoker ID only belongs to this TeamSpeak connection.
+    const generation = this.lifecycleGeneration;
+    const isCurrent = () => this.lifecycleGeneration === generation;
+    const allowed = await this.isCommandAllowed(parsed.name, msg);
+    if (!isCurrent()) return;
+
+    if (!allowed) {
       this.logger.info(
         { command: parsed.name, invoker: msg.invokerName },
         "Command denied: invoker not in adminGroups"
@@ -854,10 +860,12 @@ export class BotInstance extends EventEmitter {
         // A single long reply (e.g. full lyrics) would exceed TeamSpeak's
         // per-message byte cap, so split it and send the chunks in order.
         for (const chunk of splitTextIntoChunks(response)) {
+          if (!isCurrent()) return;
           await sendTextReply(this.tsClient, msg, chunk);
         }
       }
     } catch (err) {
+      if (!isCurrent()) return;
       this.logger.error({ err, command: parsed.name }, "Command execution error");
       try {
         await sendTextReply(this.tsClient, msg, `Error: ${(err as Error).message}`);

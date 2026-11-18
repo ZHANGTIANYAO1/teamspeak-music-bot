@@ -1975,6 +1975,41 @@ describe("BotInstance — OpenProtocol & command routing", () => {
     expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith("ok:now:");
   });
 
+  it("drops a private command reply when the connection changed during execution", async () => {
+    const ctx = makeGateCtx({});
+    ctx.lifecycleGeneration = 1;
+    const executed = deferred();
+    const reply = deferred<string>();
+    ctx.executeCommand = vi.fn(() => {
+      executed.resolve();
+      return reply.promise;
+    });
+
+    const pending = handleTextMessage.call(ctx, { ...makeMsg("!now"), targetMode: 1 });
+    await executed.promise;
+    ctx.lifecycleGeneration++;
+    reply.resolve("Prior connection's queue");
+    await pending;
+
+    expect(ctx.tsClient.sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("drops a command from a previous connection after the group check", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6] });
+    ctx.lifecycleGeneration = 1;
+    const groups = deferred<string[]>();
+    ctx.tsClient.getClientServerGroups.mockReturnValue(groups.promise);
+
+    const pending = handleTextMessage.call(ctx, { ...makeMsg("!stop"), targetMode: 1 });
+    expect(ctx.tsClient.getClientServerGroups).toHaveBeenCalled();
+    ctx.lifecycleGeneration++;
+    groups.resolve(["6"]);
+    await pending;
+
+    expect(ctx.executeCommand).not.toHaveBeenCalled();
+    expect(ctx.tsClient.sendTextMessage).not.toHaveBeenCalled();
+  });
+
   it("routes permission denied and execution errors privately when triggered via DM", async () => {
     const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: [] });
     const dmStop: TS3TextMessage = {
