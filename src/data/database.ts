@@ -130,6 +130,10 @@ export interface BotDatabase {
   db: Database.Database;
   addPlayHistory(entry: PlayHistoryEntry): void;
   getPlayHistory(botId: string, limit: number): PlayHistoryRecord[];
+  /** Deletes the given history rows (by primary key) for one bot. Returns affected rows. */
+  deletePlayHistory(botId: string, ids: number[]): number;
+  /** Deletes every history row of one bot. Returns affected rows. */
+  clearPlayHistory(botId: string): number;
   saveBotInstance(instance: BotInstance): void;
   getBotInstances(): BotInstance[];
   deleteBotInstance(id: string): boolean;
@@ -416,6 +420,10 @@ export function createDatabase(dbPath: string): BotDatabase {
     SELECT * FROM play_history WHERE botId = ? ORDER BY id DESC LIMIT ?
   `);
 
+  // botId is part of every predicate so one bot can never delete another bot's rows.
+  const deleteHistoryRow = db.prepare("DELETE FROM play_history WHERE botId = ? AND id = ?");
+  const deleteHistoryAll = db.prepare("DELETE FROM play_history WHERE botId = ?");
+
   const upsertInstance = db.prepare(`
     INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, autoStart, serverProtocol, ts6ApiKey, serverPassword, identity)
     VALUES (@id, @name, @serverAddress, @serverPort, @nickname, @defaultChannel, @channelId, @channelPassword, @autoStart, @serverProtocol, @ts6ApiKey, @serverPassword, @identity)
@@ -564,6 +572,22 @@ export function createDatabase(dbPath: string): BotDatabase {
 
     getPlayHistory(botId, limit) {
       return selectHistory.all(botId, limit) as PlayHistoryRecord[];
+    },
+
+    deletePlayHistory(botId, ids) {
+      let deleted = 0;
+      // Single transaction: either the whole selection goes away or nothing does.
+      const tx = db.transaction((list: number[]) => {
+        for (const id of list) {
+          deleted += deleteHistoryRow.run(botId, id).changes;
+        }
+      });
+      tx(ids);
+      return deleted;
+    },
+
+    clearPlayHistory(botId) {
+      return deleteHistoryAll.run(botId).changes;
     },
 
     saveBotInstance(instance) {

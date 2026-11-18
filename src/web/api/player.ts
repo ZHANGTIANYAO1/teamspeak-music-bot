@@ -12,6 +12,11 @@ import { supportsPersonalLogin } from "./personal-music.js";
  *  against a pathological catalogue (and against an upstream paging bug). */
 const MAX_ARTIST_QUEUE = 500;
 const ARTIST_QUEUE_PAGE = 100;
+const MAX_HISTORY_DELETE_BATCH = 500;
+
+function isHistoryRowId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
 
 /** Walks every page of an artist's catalogue (best-first, de-duplicated). */
 export async function collectArtistSongs(
@@ -805,6 +810,9 @@ export function createPlayerRouter(
     const limit = parseInt(req.query.limit as string) || 50;
     const records = database.getPlayHistory(req.params.botId, limit);
     const history = records.map((r) => ({
+      // rowId is the history row primary key — needed to delete a single record.
+      // `id` stays the platform song id so existing players keep working.
+      rowId: r.id,
       id: r.songId,
       name: r.songName,
       artist: r.artist,
@@ -817,6 +825,51 @@ export function createPlayerRouter(
     }));
     res.json({ history });
   });
+
+  // Delete one history record: /:botId/history/:rowId
+  router.delete(
+    "/:botId/history/:rowId",
+    authorize({ capability: "player.queue", guestFlag: "removeClear" }),
+    (req, res) => {
+      if (!database) {
+        res.status(404).json({ error: "history unavailable" });
+        return;
+      }
+      const rowId = Number(req.params.rowId);
+      if (!/^\d+$/.test(req.params.rowId) || !isHistoryRowId(rowId)) {
+        res.status(400).json({ error: "invalid rowId" });
+        return;
+      }
+      const deleted = database.deletePlayHistory(req.params.botId, [rowId]);
+      res.json({ deleted });
+    }
+  );
+
+  // Batch delete / clear all: body { ids: number[] } or { all: true }
+  router.delete(
+    "/:botId/history",
+    authorize({ capability: "player.queue", guestFlag: "removeClear" }),
+    (req, res) => {
+      if (!database) {
+        res.status(404).json({ error: "history unavailable" });
+        return;
+      }
+      const body = (req.body ?? {}) as { ids?: unknown; all?: unknown };
+      if (body.all === true && body.ids === undefined) {
+        const deleted = database.clearPlayHistory(req.params.botId);
+        res.json({ deleted });
+        return;
+      }
+      const { ids } = body;
+      if (body.all !== undefined || !Array.isArray(ids) || ids.length === 0 ||
+          ids.length > MAX_HISTORY_DELETE_BATCH || !ids.every(isHistoryRowId)) {
+        res.status(400).json({ error: "Provide 1 to 500 history IDs or all:true" });
+        return;
+      }
+      const deleted = database.deletePlayHistory(req.params.botId, ids);
+      res.json({ deleted });
+    }
+  );
 
   return router;
 }
