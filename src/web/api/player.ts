@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import type { BotInstance } from "../../bot/instance.js";
+import { blocksProviderForAdvance } from "../../bot/url-retry.js";
 import type { QueuedSong } from "../../audio/queue.js";
 import type { BotManager } from "../../bot/manager.js";
 import type { BotDatabase } from "../../data/database.js";
@@ -40,6 +41,21 @@ export async function collectArtistSongs(
     if (!page.hasMore || page.songs.length === 0) break;
   }
   return songs;
+}
+
+async function filterCollectionForRoom(
+  bot: BotInstance,
+  platform: Song["platform"],
+  songs: Song[],
+): Promise<Song[]> {
+  if (platform !== "qq") return songs;
+  // Metadata can come from the caller's account. Room playback uses the
+  // bot's shared account, so its entitlements must drive the batch check too.
+  const playbackProvider = bot.getProviderFor("qq") as MusicProvider & {
+    getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null>;
+  };
+  const available = await playbackProvider.getPlayableSongIds?.(songs.map(song => song.id));
+  return available ? songs.filter(song => available.has(song.id)) : songs;
 }
 
 export function createPlayerRouter(
@@ -104,14 +120,43 @@ export function createPlayerRouter(
     return reason ? `无法播放「${label}」：${reason}` : `无法播放「${label}」`;
   };
 
-  async function startCollection(bot: BotInstance, first: QueuedSong | null) {
-    let failure: PlayFailure | undefined;
-    const capture = (reason: PlayFailure) => { failure = reason; };
-    let started = first ? await bot.resolveAndPlay(first, capture) : false;
-    if (first && !started && failure?.code !== "risk_control" && bot.getQueueManager().current() === first) {
-      started = await bot.playNext(20, capture);
-    }
-    return { started, reason: failure?.message };
+  async function startCollection(
+    bot: BotInstance, songs: Song[], platform: Song["platform"], requestedBy: string | undefined, totalCount: number,
+  ) {
+    return bot.runExclusive(async () => {
+      bot.getPlayer().stop();
+      bot.getPlayer().resetFailures();
+      const queue = bot.getQueueManager();
+      queue.clear();
+      for (const song of songs) {
+        queue.add({ ...song, platform, requestedBy });
+      }
+      bot.cleanupQueuedLocalSongs?.("queue_replaced");
+
+      const mode = queue.getMode();
+      const first: QueuedSong | null = mode === "random" || mode === "rloop"
+        ? queue.playAt(Math.floor(Math.random() * queue.size()))
+        : queue.play();
+      // Publish the new idle queue even if the first URL lookup ultimately fails.
+      bot.emit("stateChange");
+
+      let failure: PlayFailure | undefined;
+      const capture = (reason: PlayFailure) => { failure = reason; };
+      let started = first ? await bot.resolveAndPlay(first, capture) : false;
+      if (first && !started && failure && !blocksProviderForAdvance(failure.code) && queue.current() === first) {
+        // Many collections contain several consecutive unavailable tracks.
+        started = await bot.playNext(20, capture);
+      }
+
+      const playing = queue.current();
+      const loaded = songs.length < totalCount
+        ? `已加载 ${songs.length}/${totalCount} 首（其余无法播放）`
+        : `已加载 ${songs.length} 首`;
+      const reason = failure?.message;
+      return started && playing
+        ? { ok: true, message: `${loaded}，正在播放：${playing.name}` }
+        : { ok: false, message: `${loaded}，但无法开始播放${reason ? `：${reason}` : "。"}` };
+    });
   }
 
   /** Map API platform string to the corresponding command flag. */
@@ -191,7 +236,14 @@ export function createPlayerRouter(
 
   router.post("/:botId/pause", authorize({ capability: "player.control", guestFlag: "transport" }), simpleCommand("!pause"));
   router.post("/:botId/resume", authorize({ capability: "player.control", guestFlag: "transport" }), simpleCommand("!resume"));
-  router.post("/:botId/next", authorize({ capability: "player.control", guestFlag: "skip" }), simpleCommand("!next"));
+  router.post("/:botId/next", authorize({ capability: "player.control", guestFlag: "skip" }), async (req, res) => {
+    try {
+      const bot: BotInstance = (req as any).bot;
+      res.json(await bot.skipToNext());
+    } catch (err) {
+      res.status(500).json({ error: musicRequestError(err).message });
+    }
+  });
   router.post("/:botId/prev", authorize({ capability: "player.control" }), simpleCommand("!prev"));
   router.post("/:botId/stop", authorize({ capability: "player.control" }), simpleCommand("!stop"));
   router.post("/:botId/clear", authorize({ capability: "player.queue", guestFlag: "removeClear" }), simpleCommand("!clear"));
@@ -210,10 +262,7 @@ export function createPlayerRouter(
       const resolveFmProvider = () => fmProvider(scope, bot, platform);
       const message = await bot.startFm(resolveFmProvider(), requesterName(req), resolveFmProvider);
       res.json({
-        ok:
-          !message.startsWith("No FM songs") &&
-          !message.includes("not available") &&
-          !message.includes("not connected"),
+        ok: message.startsWith("Personal FM started") || message.startsWith("QQ Radar FM started"),
         message,
       });
     } catch (err) {
@@ -312,10 +361,10 @@ export function createPlayerRouter(
   // Jump to a specific index in the queue (without clearing it)
   router.post("/:botId/play-at", authorize({ capability: "player.control" }), async (req, res) => {
     try {
-      const bot = (req as any).bot;
+      const bot: BotInstance = (req as any).bot;
       const { index } = req.body;
-      if (typeof index !== "number" || index < 0) {
-        res.status(400).json({ error: "index is required" });
+      if (!Number.isSafeInteger(index) || index < 0) {
+        res.status(400).json({ error: "index must be a non-negative integer" });
         return;
       }
       // Serialize the index-validation + stop/reset/playAt/resolveAndPlay so a
@@ -326,21 +375,23 @@ export function createPlayerRouter(
         // Validate the index BEFORE stopping current playback — otherwise an
         // invalid index silently kills the user's current song and leaves the
         // queue idle.
-        if (index >= queue.size()) {
-          return { status: 400 as const, body: { error: "Invalid queue index" } };
-        }
-        bot.getPlayer().stop(true);
-        bot.getPlayer().resetFailures();
         const song = queue.playAt(index);
         if (!song) {
           return { status: 400 as const, body: { error: "Invalid queue index" } };
         }
-        const ok = await bot.resolveAndPlay(song);
+        const player = bot.getPlayer();
+        player.stop(true);
+        player.resetFailures();
+        const session = player.getPlaybackSessionId();
+        bot.emit("stateChange");
+        let reason: string | undefined;
+        const ok = await bot.resolveAndPlay(song, failure => { reason = failure.message; });
         if (!ok) {
-          bot.getPlayer().stop();
-          return { body: { message: `Cannot play: ${song.name}` } };
+          // Abandon this transition's silence loop, leaving newer playback alone.
+          if (queue.current() === song && player.getPlaybackSessionId() === session) player.stop();
+          return { body: { ok: false, message: whyUnplayable(song, reason) } };
         }
-        return { body: { message: `Now playing: ${song.name} - ${song.artist}` } };
+        return { body: { ok: true, message: `Now playing: ${song.name} - ${song.artist}` } };
       });
       if (result.status) {
         res.status(result.status).json(result.body);
@@ -381,75 +432,20 @@ export function createPlayerRouter(
       // which the router's constructor params did not.
       const provider = scopedProvider(req, bot, platform);
 
-      // Stop current playback
-      bot.getPlayer().stop();
-      bot.getPlayer().resetFailures();
-
       const songs = await provider.getPlaylistSongs(playlistId);
       if (songs.length === 0) {
-        res.json({ message: "Playlist is empty" });
+        res.json({ ok: false, message: "Playlist is empty" });
         return;
       }
 
-      // QQ-specific optimization: many users' QQ playlists contain a
-      // large fraction of songs that return result=104003 (region/copyright
-      // restricted). Batch-resolve URLs once and only queue the playable
-      // ones, otherwise the playback retry loop wastes time guessing.
-      let queueable: { id: string }[] = songs;
       const totalCount = songs.length;
-      const qqLike = provider as { getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null> };
-      if (typeof qqLike.getPlayableSongIds === "function") {
-        const playable = await qqLike.getPlayableSongIds(songs.map((s: { id: string }) => s.id));
-        if (playable !== null) {
-          // Authoritative answer from upstream — even an empty set means
-          // "we know none are playable", short-circuit immediately rather
-          // than wasting 20+ retries.
-          queueable = songs.filter((s: { id: string }) => playable.has(s.id));
-        }
-        // If null, the batch endpoint itself errored — fall through to
-        // the sequential retry path, which still has a chance.
-      }
+      const queueable = await filterCollectionForRoom(bot, provider.platform, songs);
       if (queueable.length === 0) {
         res.json({ ok: false, message: `歌单 ${totalCount} 首歌曲均无法播放` });
         return;
       }
 
-      const queue = bot.getQueueManager();
-      queue.clear();
-      for (const song of queueable) {
-        queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
-      }
-      // Sweep AFTER the queue is rebuilt: the previous queue's local uploads are
-      // released and deleted, but an empty/failed playlist (early return above)
-      // leaves the previous queue — and its files — intact.
-      bot.cleanupQueuedLocalSongs?.("queue_replaced");
-
-      // Use queue.play() for sequential, or pick random index for random modes
-      const mode = queue.getMode();
-      let first;
-      if (mode === "random" || mode === "rloop") {
-        const idx = Math.floor(Math.random() * queue.size());
-        first = queue.playAt(idx);
-      } else {
-        first = queue.play();
-      }
-
-      // If the first picked song can't resolve (e.g., QQ song with no
-      // streaming entitlement → result 104003), fall back to playNext's
-      // retry-skip behavior. Use a higher retry budget than the default
-      // trackEnd auto-advance because user-initiated playlist plays
-      // commonly have long contiguous runs of unplayable songs.
-      const { started, reason } = await startCollection(bot, first);
-
-      const playing = queue.current();
-      const loadedMsg = queueable.length < totalCount
-        ? `已加载 ${queueable.length}/${totalCount} 首（其余无法播放）`
-        : `已加载 ${queueable.length} 首`;
-      if (started && playing) {
-        res.json({ ok: true, message: `${loadedMsg}，正在播放：${playing.name}` });
-      } else {
-        res.json({ ok: false, message: `${loadedMsg}，但无法开始播放${reason ? `：${reason}` : "。"}` });
-      }
+      res.json(await startCollection(bot, queueable, provider.platform, requesterName(req), totalCount));
     } catch (err) {
       const error = musicRequestError(err);
       logger.error({ err: error }, "Play playlist failed");
@@ -468,60 +464,20 @@ export function createPlayerRouter(
       }
       const provider = scopedProvider(req, bot, platform);
 
-      // Stop current playback
-      bot.getPlayer().stop();
-      bot.getPlayer().resetFailures();
-
       const songs = await provider.getAlbumSongs(albumId);
       if (songs.length === 0) {
-        res.json({ message: "Album is empty" });
+        res.json({ ok: false, message: "Album is empty" });
         return;
       }
 
-      // QQ-specific optimization: batch-resolve playable IDs to avoid
-      // wasting retries on region/copyright-restricted tracks.
-      let queueable: { id: string }[] = songs;
       const totalCount = songs.length;
-      const qqLike = provider as { getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null> };
-      if (typeof qqLike.getPlayableSongIds === "function") {
-        const playable = await qqLike.getPlayableSongIds(songs.map((s: { id: string }) => s.id));
-        if (playable !== null) {
-          queueable = songs.filter((s: { id: string }) => playable.has(s.id));
-        }
-      }
+      const queueable = await filterCollectionForRoom(bot, provider.platform, songs);
       if (queueable.length === 0) {
         res.json({ ok: false, message: `专辑 ${totalCount} 首歌曲均无法播放` });
         return;
       }
 
-      const queue = bot.getQueueManager();
-      queue.clear();
-      for (const song of queueable) {
-        queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
-      }
-      // Sweep AFTER the queue is rebuilt (see play-playlist).
-      bot.cleanupQueuedLocalSongs?.("queue_replaced");
-
-      const mode = queue.getMode();
-      let first;
-      if (mode === "random" || mode === "rloop") {
-        const idx = Math.floor(Math.random() * queue.size());
-        first = queue.playAt(idx);
-      } else {
-        first = queue.play();
-      }
-
-      const { started, reason } = await startCollection(bot, first);
-
-      const playing = queue.current();
-      const loadedMsg = queueable.length < totalCount
-        ? `已加载 ${queueable.length}/${totalCount} 首（其余无法播放）`
-        : `已加载 ${queueable.length} 首`;
-      if (started && playing) {
-        res.json({ ok: true, message: `${loadedMsg}，正在播放：${playing.name}` });
-      } else {
-        res.json({ ok: false, message: `${loadedMsg}，但无法开始播放${reason ? `：${reason}` : "。"}` });
-      }
+      res.json(await startCollection(bot, queueable, provider.platform, requesterName(req), totalCount));
     } catch (err) {
       const error = musicRequestError(err);
       logger.error({ err: error }, "play-album failed");
@@ -562,55 +518,14 @@ export function createPlayerRouter(
         return;
       }
 
-      // Same QQ batch-resolve optimization as play-album: drop tracks that are
-      // region/copyright blocked instead of burning retries on them.
-      let queueable: { id: string }[] = songs;
       const totalCount = songs.length;
-      const qqLike = provider as { getPlayableSongIds?: (ids: string[]) => Promise<Set<string> | null> };
-      if (typeof qqLike.getPlayableSongIds === "function") {
-        const playable = await qqLike.getPlayableSongIds(songs.map((s: { id: string }) => s.id));
-        if (playable !== null) {
-          queueable = songs.filter((s: { id: string }) => playable.has(s.id));
-        }
-      }
+      const queueable = await filterCollectionForRoom(bot, provider.platform, songs);
       if (queueable.length === 0) {
         res.json({ ok: false, message: `歌手 ${totalCount} 首歌曲均无法播放` });
         return;
       }
 
-      // Catalogue and copyright lookups leave current playback running. Only
-      // the queue replacement and playback itself occupy the shared play gate.
-      const body = await bot.runExclusive(async () => {
-        bot.getPlayer().stop();
-        bot.getPlayer().resetFailures();
-        const queue = bot.getQueueManager();
-        queue.clear();
-        for (const song of queueable) {
-          queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
-        }
-        // Sweep AFTER the queue is rebuilt (see play-playlist).
-        bot.cleanupQueuedLocalSongs?.("queue_replaced");
-
-        const mode = queue.getMode();
-        let first;
-        if (mode === "random" || mode === "rloop") {
-          const idx = Math.floor(Math.random() * queue.size());
-          first = queue.playAt(idx);
-        } else {
-          first = queue.play();
-        }
-
-        const { started, reason } = await startCollection(bot, first);
-
-        const playing = queue.current();
-        const loadedMsg = queueable.length < totalCount
-          ? `已加载 ${queueable.length}/${totalCount} 首（其余无法播放）`
-          : `已加载 ${queueable.length} 首`;
-        return started && playing
-          ? { ok: true, message: `${loadedMsg}，正在播放：${playing.name}` }
-          : { ok: false, message: `${loadedMsg}，但无法开始播放${reason ? `：${reason}` : "。"}` };
-      });
-      res.json(body);
+      res.json(await startCollection(bot, queueable, provider.platform, requesterName(req), totalCount));
     } catch (err) {
       const error = musicRequestError(err);
       logger.error({ err: error }, "play-artist failed");
@@ -625,7 +540,7 @@ export function createPlayerRouter(
   // requests can't interleave the queue mutation + playback (#119).
   router.post("/:botId/play-song", authorize({ capability: "player.control" }), async (req, res) => {
     try {
-      const bot = (req as any).bot;
+      const bot: BotInstance = (req as any).bot;
       const { song } = req.body;
       if (!song || !song.id || !song.platform) {
         res.status(400).json({ error: "song object with id and platform is required" });
@@ -639,11 +554,15 @@ export function createPlayerRouter(
       // clear branch — do NOT also call it here, or it would delete retained
       // local uploads in keep-queue mode.
       const body = await bot.runExclusive(async () => {
-        let reason: string | undefined;
-        const ok = await bot.playSingleSong({ ...song }, requesterName(req), (failure: PlayFailure) => { reason = failure.message; });
+        let errorMessage = whyUnplayable(song);
+        const ok = await bot.playSingleSong({ ...song }, requesterName(req), (failure, currentTrackContinues) => {
+          errorMessage = currentTrackContinues
+            ? `未能重新播放「${song.name || song.id}」，当前曲目继续播放：${failure.message}`
+            : whyUnplayable(song, failure.message);
+        });
         return ok
           ? { ok: true, message: `正在播放：${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` }
-          : { ok: false, message: whyUnplayable(song, reason) };
+          : { ok: false, message: errorMessage };
       });
       res.json(body);
     } catch (err) {
@@ -738,7 +657,7 @@ export function createPlayerRouter(
 
   router.post("/:botId/add-song", authorize({ capability: "player.queue", guestFlag: "addToQueue" }), async (req, res) => {
     try {
-      const bot = (req as any).bot;
+      const bot: BotInstance = (req as any).bot;
       const { song } = req.body;
       if (!song || !song.id || !song.platform) {
         res.status(400).json({ error: "song object with id and platform is required" });
@@ -757,13 +676,18 @@ export function createPlayerRouter(
 
         // If nothing was playing, start this newly-added song immediately.
         if (wasIdle) {
-          queue.playAt(queue.size() - 1);
+          const added = queue.playAt(queue.size() - 1)!;
           bot.getPlayer().resetFailures();
-          await bot.resolveAndPlay(queue.current()!);
-          return { message: `Now playing: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` };
+          let reason: string | undefined;
+          const ok = await bot.resolveAndPlay(added, failure => { reason = failure.message; });
+          if (!ok) {
+            bot.emit("stateChange");
+            return { ok: false, message: `已加入队列，但${whyUnplayable(added, reason)}` };
+          }
+          return { ok: true, message: `Now playing: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'}` };
         }
 
-        return { message: `Added to queue: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'} (position ${queue.size()})` };
+        return { ok: true, message: `Added to queue: ${song.name || 'Unknown'} - ${song.artist || 'Unknown'} (position ${queue.size()})` };
       });
       res.json(body);
     } catch (err) {

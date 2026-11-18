@@ -6,6 +6,7 @@ import request from "supertest";
 import { createPlayerRouter } from "./player.js";
 import { BotInstance } from "../../bot/instance.js";
 import { PlayQueue } from "../../audio/queue.js";
+import type { BotDatabase } from "../../data/database.js";
 
 function song(id: string): Song {
   return {
@@ -75,8 +76,8 @@ describe("collectArtistSongs (play-artist all:true)", () => {
   });
 });
 
-describe("play-artist playback serialization", () => {
-  it("keeps the queue and audible song consistent when single-song playback overlaps artist playback", async () => {
+describe("collection playback serialization", () => {
+  it.each(["artist", "album", "playlist"])("serializes %s playback and single-song playback", async kind => {
     const queue = new PlayQueue();
     let audible: string | null = null;
     let releaseArtist!: () => void;
@@ -87,7 +88,14 @@ describe("play-artist playback serialization", () => {
     const singleArrived = new Promise<void>((resolve) => { notifySingleArrived = resolve; });
     const bot: any = {
       playGate: Promise.resolve(),
-      getProviderFor: () => ({ platform: "netease", getArtistSongs: async () => [song("A")], getArtistAllSongs: async () => page(["A"], 1, false) }),
+      getProviderFor: () => ({
+        platform: "netease",
+        getAlbumSongs: async () => [song("A")],
+        getPlaylistSongs: async () => [song("A")],
+        getArtistSongs: async () => [song("A")],
+        getArtistAllSongs: async () => page(["A"], 1, false),
+      }),
+      emit: vi.fn(),
       getPlayer: () => ({ stop: () => { audible = null; }, resetFailures: () => {} }),
       getQueueManager: () => queue,
       resolveAndPlay: async (track: Song) => {
@@ -110,7 +118,8 @@ describe("play-artist playback serialization", () => {
     app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
     app.use("/api/player/b/play-song", (_req, _res, next) => { notifySingleArrived(); next(); });
     app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
-    const artistRequest = request(app).post("/api/player/b/play-artist").send({ artistId: "artist", platform: "netease" }).then((res) => res);
+    const collectionRequest = request(app).post(`/api/player/b/play-${kind}`)
+      .send({ [`${kind}Id`]: "collection", platform: "netease" }).then((res) => res);
     await artistStarted;
     const singleRequest = request(app).post("/api/player/b/play-song").send({ song: song("B") }).then((res) => res);
     // Let the overlapping HTTP request enter the real route while A's URL is pending.
@@ -119,11 +128,181 @@ describe("play-artist playback serialization", () => {
     await Promise.resolve();
     const whileArtistPending = queue.current()?.id;
     releaseArtist();
-    const [artistResponse, singleResponse] = await Promise.all([artistRequest, singleRequest]);
-    expect(artistResponse.status).toBe(200);
+    const [collectionResponse, singleResponse] = await Promise.all([collectionRequest, singleRequest]);
+    expect(collectionResponse.status).toBe(200);
     expect(singleResponse.status).toBe(200);
     expect(whileArtistPending).toBe("A");
     expect(queue.current()?.id).toBe("B");
     expect(audible).toBe("B");
   });
+});
+
+describe("collection preflight", () => {
+  it.each(["playlist", "album", "artist"])("checks QQ %s availability using the room's playback account", async kind => {
+    const queue = new PlayQueue();
+    const personalTracks = [{ ...song("personal-library-track"), platform: "qq" }];
+    const readLibrary = vi.fn(async () => personalTracks);
+    const personal = {
+      platform: "qq",
+      getPlaylistSongs: readLibrary,
+      getAlbumSongs: readLibrary,
+      getArtistSongs: readLibrary,
+      getPlayableSongIds: vi.fn(async () => new Set<string>()),
+    };
+    const shared = {
+      platform: "qq",
+      withCookie: vi.fn(() => personal),
+      getPlayableSongIds: vi.fn(async () => new Set(["personal-library-track"])),
+    };
+    const bot = {
+      getProviderFor: () => shared,
+      getQueueManager: () => queue,
+      getPlayer: () => ({ stop: vi.fn(), resetFailures: vi.fn() }),
+      runExclusive: (work: () => Promise<unknown>) => work(),
+      resolveAndPlay: vi.fn(async () => true),
+      emit: vi.fn(),
+    };
+    const db = {
+      getUserMusicPreference: () => null,
+      getUserMusicCookie: () => null,
+      getGrantedMusicAccount: () => ({ cookie: "private-test-cookie", label: "Member's account", accountId: "account" }),
+    } as unknown as BotDatabase;
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as { user?: unknown }).user = { id: "member", role: "member", bots: new Set(["b"]), capabilities: new Set(["player.control"]) };
+      next();
+    });
+    app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any,
+      db, undefined, undefined, undefined, { perUserMusicAccounts: true }));
+
+    const response = await request(app).post(`/api/player/b/play-${kind}`)
+      .send({ [`${kind}Id`]: "id", platform: "qq" }).expect(200);
+
+    expect(response.body).toMatchObject({ ok: true });
+    expect(response.text).not.toContain("private-test-cookie");
+    expect(readLibrary).toHaveBeenCalledOnce();
+    expect(personal.getPlayableSongIds).not.toHaveBeenCalled();
+    expect(shared.getPlayableSongIds).toHaveBeenCalledWith(["personal-library-track"]);
+    expect(queue.current()?.id).toBe("personal-library-track");
+  });
+
+  it.each([
+    ["playlist", "empty", 200],
+    ["playlist", "unavailable", 200],
+    ["album", "empty", 200],
+    ["album", "error", 500],
+  ])("preserves current playback if the %s is %s", async (kind, result, status) => {
+    const queue = new PlayQueue();
+    queue.add(song("playing"));
+    queue.play();
+    const player = { stop: vi.fn(), resetFailures: vi.fn() };
+    const loadSongs = async () => {
+      if (result === "error") throw new Error("Upstream failed");
+      return result === "empty" ? [] : [song("next")];
+    };
+    const bot = {
+      getProviderFor: () => ({
+        platform: "qq",
+        getPlaylistSongs: loadSongs,
+        getAlbumSongs: loadSongs,
+        getPlayableSongIds: async () => new Set<string>(),
+      }),
+      getQueueManager: () => queue,
+      getPlayer: () => player,
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+    app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+
+    const response = await request(app).post(`/api/player/b/play-${kind}`).send({ [`${kind}Id`]: "id", platform: "qq" });
+
+    expect(response.status).toBe(status);
+    if (status === 200) expect(response.body).toMatchObject({ ok: false });
+    expect(player.stop).not.toHaveBeenCalled();
+    expect(player.resetFailures).not.toHaveBeenCalled();
+    expect(queue.current()?.id).toBe("playing");
+  });
+});
+
+describe("play a queue position", () => {
+  function fixture() {
+    const queue = new PlayQueue();
+    queue.add(song("playing"));
+    queue.add(song("unavailable"));
+    queue.play();
+    const player = { stop: vi.fn(), resetFailures: vi.fn(), getPlaybackSessionId: () => 1 };
+    const bot = {
+      getQueueManager: () => queue,
+      getPlayer: () => player,
+      runExclusive: (work: () => Promise<unknown>) => work(),
+      resolveAndPlay: vi.fn(async (_song: Song, onFailure?: (failure: { message: string }) => void) => {
+        onFailure?.({ message: "Source returned no stream" });
+        return false;
+      }),
+      emit: vi.fn(),
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+    app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+    return { app, bot, player, queue };
+  }
+
+  it("rejects fractional positions without stopping the playing track", async () => {
+    const { app, player, queue } = fixture();
+    expect((await request(app).post("/api/player/b/play-at").send({ index: 0.5 })).status).toBe(400);
+    expect(player.stop).not.toHaveBeenCalled();
+    expect(queue.current()?.id).toBe("playing");
+  });
+
+  it("returns the URL failure and publishes the selected stopped track", async () => {
+    const { app, bot, queue } = fixture();
+    const response = await request(app).post("/api/player/b/play-at").send({ index: 1 });
+    expect(response.body).toEqual({ ok: false, message: expect.stringContaining("Source returned no stream") });
+    expect(bot.emit).toHaveBeenCalledWith("stateChange");
+    expect(queue.current()?.id).toBe("unavailable");
+  });
+});
+
+it("reports a failed restart while the existing track is still playing", async () => {
+  const bot = {
+    runExclusive: (work: () => Promise<unknown>) => work(),
+    async playSingleSong(_song: Song, _requester: string, failure: (error: { message: string }, continues: boolean) => void) {
+      failure({ message: "No URL" }, true);
+      return false;
+    },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+  app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+
+  const response = await request(app).post("/api/player/b/play-song").send({ song: song("playing") });
+  expect(response.body).toEqual({ ok: false, message: expect.stringContaining("当前曲目继续播放") });
+});
+
+it("tries the newly appended track when idle and reports a failed URL lookup", async () => {
+  const queue = new PlayQueue();
+  queue.add(song("already-queued"));
+  const bot = {
+    getQueueManager: () => queue,
+    getPlayer: () => ({ getState: () => "idle", resetFailures: vi.fn() }),
+    runExclusive: (work: () => Promise<unknown>) => work(),
+    resolveAndPlay: vi.fn(async (_track: Song, onFailure?: (failure: { message: string }) => void) => {
+      onFailure?.({ message: "No URL" });
+      return false;
+    }),
+    emit: vi.fn(),
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+  app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+
+  const response = await request(app).post("/api/player/b/add-song").send({ song: song("newly-added") });
+  expect(bot.resolveAndPlay.mock.calls.map(([track]) => track.id)).toEqual(["newly-added"]);
+  expect(queue.list().map(track => track.id)).toEqual(["already-queued", "newly-added"]);
+  expect(response.body).toEqual({ ok: false, message: expect.stringContaining("No URL") });
 });

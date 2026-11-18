@@ -905,6 +905,10 @@ OAuth 相关端点：`/api/spotify/login`、`/api/spotify/callback`、`/api/spot
 
 ## 常见问题
 
+**点歌时提示网易云 `-460` 或酷狗 `20028` 怎么办？**
+
+网易云 `-460` 表示上游拒绝本次取流，可稍后用同一首歌重试。酷狗 `20028` 表示平台要求验证，请在酷狗检查账号状态。自动切歌时，机器人会在本次切歌中跳过要求验证或已限制请求的音源，并尝试队列里的其他音源。反馈时提供机器人版本、音源、歌曲 ID、时间点和错误码即可。
+
 **Q：支持 TeamSpeak 6 Server 吗？**
 A：支持。本项目内置 TS3/TS6 双协议支持，连接时会自动检测服务器类型。如果自动检测失败（例如 Query 端口被防火墙屏蔽），可以在创建机器人时手动指定 `serverProtocol: "ts6"`。TS6 Server 的 HTTP Query API（端口 10080）也已适配，需要时可配置 `ts6ApiKey`。
 
@@ -927,7 +931,7 @@ A：使用 `!move <频道名>` 命令，或在设置页面创建机器人时指�
 A：可以。在设置页面创建多个实例，分别连接不同的 TS 服务器或频道。
 
 **Q：端口 3200 被占用？**
-A：QQ 音乐 API 启动时会监听 `config.json` 里的 `qqMusicApiPort`（默认 **3200**），客户端也用同一个端口发请求，二者始终一致。如果之前的进程还在运行，程序会自动复用。如需改端口，改 `qqMusicApiPort` 后重启即可；如需重启可手动结束 `node` 进程。
+A：QQ 音乐 API 使用 `config.json` 的 `qqMusicApiPort`（默认 **3200**）。程序会验证已在该端口监听的 QQ 音乐 API，再复用它。如果端口被 WebUI、端口转发或其他服务占用，请将 `qqMusicApiPort` 改为另一个空闲端口并重启。
 
 **Q：日志里 `baseURL` 是 3200，但 QQ API 实际监听在 3300？（二维码不弹）**
 A：这是**旧版本**（或过期的 `latest` Docker 镜像）才有的问题：早期实现用的上游包默认端口是 3300，而客户端 `baseURL` 已经是 3200，两边对不上，取二维码时就 `ECONNREFUSED 127.0.0.1:3200`。当前版本已把内嵌 QQ 音乐 API **强制绑定到 `qqMusicApiPort`（默认 3200）**，并在启动前把上游包读取的 `PORT` 环境变量对齐到该端口，二者不可能再错位。修复方法：**拉取最新镜像并重启**（`docker compose pull && docker compose up -d`），或用 `npm ci && npm run build` 更新到最新代码。启动后可在日志里确认那行 `QQ Music API started`，其 `port` 字段就是实际监听端口。
@@ -993,7 +997,14 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.16.0：播放可靠性、音乐账号与 OpenProtocol
+### 最新版本 — v1.16.1 播放、续播与队列修复
+
+- B 站长视频中断后优先尝试其他 CDN。网易云、QQ 音乐和酷狗的完整曲目提前断流时，机器人会在有限次数内刷新地址，从已播位置续播。停止、切歌和断开连接会取消旧曲目的恢复。
+- 网页加载空歌单、预检失败或选择无效队列位置时会保留原播放。进度条会跟随实际音频进度，切歌失败会显示原因。更新机器人头像时结束的短曲也能正常推进队列。
+- QQ 音乐使用内嵌 API 支持的歌曲 MID 和音质参数。批量预检会区分上游错误与确实不可播的曲目，启动时也会识别 QQ 端口被其他服务占用。酷狗要求验证时会显示平台错误码。
+- 机器人只会因听众进入自己所在的频道而恢复自动暂停的播放。混合队列遇到音源限制时，会继续尝试其他音源。
+
+### v1.16.0：播放可靠性、音乐账号与 OpenProtocol
 
 - **播放恢复**：临时取流失败会按上限重试，支持的音源可尝试更低音质。`playUrlRetries` 默认为 2，可设为 0–5，设为 0 时关闭重试。切歌、停止或断线会取消旧请求。网易云返回上游限制时会提示具体类型，并停止同一来源的连续重试。网易云播放请求的 User-Agent 与登录客户端配置一致。 [#185](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/185) · [#190](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/190)
 - **B 站**：点播链接保留分 P 参数，修复部分 CDN 的 403。 [#191](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/191)

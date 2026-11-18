@@ -41,6 +41,20 @@ describe("normalizeRetryCount", () => {
 });
 
 describe("resolveUrlWithRetry", () => {
+  it("stops immediately when the provider asks the user to verify", async () => {
+    const error = new SongUrlUnavailable({
+      platform: "kugou", songId: "song", code: "provider_verification_required", message: "Verification required",
+    });
+    const resolve = vi.fn(async () => { throw error; });
+    const onExhausted = vi.fn();
+    const { sleep, delays } = recordingSleep();
+
+    expect(await resolveUrlWithRetry({ retries: 5, fallbacks: ["standard"], resolve, onExhausted, sleep })).toBeNull();
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(delays).toEqual([]);
+    expect(onExhausted).toHaveBeenCalledExactlyOnceWith({ error, quality: undefined });
+  });
+
   it("makes exactly one attempt when retries is 0", async () => {
     const resolve = vi.fn(async () => null);
     const { sleep } = recordingSleep();

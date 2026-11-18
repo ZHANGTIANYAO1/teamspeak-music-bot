@@ -67,7 +67,7 @@ describe("embedded API child lifecycle", () => {
     logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
     manager = createApiServerManager(options, logger);
   });
-  afterEach(async () => { manager.stop(); await flush(); vi.useRealTimers(); });
+  afterEach(async () => { manager.stop(); await flush(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
   it("isolates both APIs with ignored stdio, configured ports and IPC", async () => {
     await manager.start();
@@ -87,9 +87,21 @@ describe("embedded API child lifecycle", () => {
     manager = createApiServerManager({ ...options, neteaseEnabled: false, qqEnabled: false }, logger);
     await manager.start(); expect(state.probes).toHaveLength(0); expect(state.fork).not.toHaveBeenCalled();
     state.portFree = false;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ data: { message: "no songmid" } }), {
+      status: 400, headers: { "Content-Type": "application/json" },
+    }));
     manager = createApiServerManager({ ...options, neteaseEnabled: false }, logger);
     await manager.start(); expect(state.fork).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith({ port: 39217 }, expect.stringContaining("reusing"));
+  });
+  it("detects the wrong service on the QQ music port without assuming every occupied port is reusable", async () => {
+    state.portFree = false;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<html>WebUI</html>", { status: 200 }));
+    manager = createApiServerManager({ ...options, neteaseEnabled: false }, logger);
+    await manager.start();
+    expect(state.fork).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith({ provider: "qq", port: 39217, category: "port-in-use" }, expect.stringContaining("qqMusicApiPort"));
+    expect(() => manager.assertQqMusicApiPort()).toThrow(expect.objectContaining({ code: "QQ_API_PORT_CONFLICT" }));
   });
   it("inherits tsx loader arguments without unrelated parent runner flags", async () => {
     const previous = process.execArgv;

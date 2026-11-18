@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import { BotInstance } from "./instance.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue } from "../audio/queue.js";
+import type { Platform, SongUrlRequestOptions } from "../music/provider.js";
+import { BiliBiliProvider } from "../music/bilibili.js";
 import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
 
 function deferred<T>() {
@@ -39,6 +41,7 @@ function makeBot() {
   const tsClient = new EventEmitter() as any;
   tsClient.getClientsInChannel = vi.fn(async () => [{ id: 1 }, { id: 2 }]);
   tsClient.getClientId = () => 1;
+  tsClient.getChannelId = () => 3n;
   tsClient.sendVoiceData = vi.fn();
   tsClient.connect = vi.fn(async () => { tsClient.emit("connected"); });
   tsClient.disconnect = vi.fn(() => { tsClient.emit("disconnected"); });
@@ -78,10 +81,165 @@ function cancel(bot: any, action: string) {
   } else { bot.player.sessionId++; bot.player.state = "idle"; }
 }
 
+function makeMusicBot(platform: Platform = "netease") {
+  const bot = makeBot();
+  bot.queue.clear();
+  bot.queue.add({
+    id: "music", name: "Music", artist: "A", album: "", coverUrl: "",
+    platform, duration: 240, url: "https://cdn.test/old.wav",
+  });
+  bot.queue.playAt(0);
+  bot.player.elapsed = 60.28;
+  bot.effectiveDuration = 240;
+  bot.provider.getSongUrl.mockResolvedValue({ url: "https://cdn.test/new.wav" });
+  return bot;
+}
+
 beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
+describe("finite music CDN recovery", () => {
+  it.each(["netease", "qq", "kugou"] as const)("resumes %s at the real playback position", async platform => {
+    const bot = makeMusicBot(platform);
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.player.play).toHaveBeenCalledWith("https://cdn.test/new.wav", 60.28, 240);
+    expect(bot.playNext).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["netease", "higher"],
+    ["qq", "320"],
+  ] as const)("renews %s with its successful %s quality only for that song", async (platform, fallback) => {
+    const bot = makeMusicBot(platform);
+    const song = bot.queue.current();
+    bot.voteSkipUsers = new Set();
+    bot.database = { addPlayHistory: vi.fn() };
+    bot.provider.getFallbackQualities = () => [fallback];
+    bot.provider.getSongUrl.mockImplementation(async (id: string, quality?: string, options?: SongUrlRequestOptions) => {
+      if (id === song.id && quality !== fallback) return null;
+      return { url: options?.refresh ? "https://cdn.test/renewed.wav" : "https://cdn.test/initial.wav" };
+    });
+
+    const initial = bot.resolveAndPlay(song);
+    await vi.advanceTimersByTimeAsync(120);
+    await expect(initial).resolves.toBe(true);
+
+    bot.player.state = "idle";
+    bot.player.elapsed = 60.28;
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenLastCalledWith(song.id, fallback, { refresh: true });
+    expect(bot.player.play).toHaveBeenLastCalledWith("https://cdn.test/renewed.wav", 60.28, 240);
+    expect(bot.provider.getSongUrl).toHaveBeenCalledTimes(3);
+
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenLastCalledWith(song.id, fallback, { refresh: true });
+    expect(bot.provider.getSongUrl).toHaveBeenCalledTimes(4);
+
+    // A different queue entry may carry a cached URL, but it has no prior
+    // quality evidence even when the URL happens to match.
+    const next = { ...song, id: "another" };
+    bot.queue.add(next);
+    bot.queue.playAt(1);
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenLastCalledWith(next.id, undefined, { refresh: true });
+  });
+
+  it.each(["preview", "zero progress", "infinite duration", "local URL"])("does not recover %s streams", async condition => {
+    const bot = makeMusicBot();
+    if (condition === "preview") {
+      const song = bot.queue.current();
+      bot.currentStream = { song, url: song.url, isTrial: true };
+    }
+    if (condition === "zero progress") bot.player.elapsed = 0;
+    if (condition === "infinite duration") bot.effectiveDuration = Infinity;
+    if (condition === "local URL") bot.queue.current().url = "file:///example.wav";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).not.toHaveBeenCalled();
+    expect(bot.playNext).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resume a full track into a preview URL", async () => {
+    const bot = makeMusicBot("qq");
+    bot.provider.getSongUrl.mockResolvedValue({ url: "https://cdn.test/preview.wav", trialDuration: 30 });
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenCalledTimes(1);
+    expect(bot.player.play).not.toHaveBeenCalled();
+    expect(bot.playNext).toHaveBeenCalledTimes(1);
+  });
+
+  it("advances after exhausting the resume budget at the same position", async () => {
+    const bot = makeMusicBot("qq");
+    for (let i = 0; i < 4; i++) {
+      bot.player.state = "idle";
+      bot.player.emit("trackEnd");
+      await flush();
+    }
+    expect(bot.player.play).toHaveBeenCalledTimes(3);
+    expect(bot.playNext).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["stop", "disconnect"])("does not use a fresh URL after %s", async action => {
+    const bot = makeMusicBot("kugou");
+    const lookup = deferred<{ url: string }>();
+    bot.provider.getSongUrl.mockReturnValueOnce(lookup.promise);
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.provider.getSongUrl).toHaveBeenCalledTimes(1);
+    cancel(bot, action);
+    lookup.resolve({ url: "https://cdn.test/stale.wav" });
+    await flush();
+    expect(bot.player.play).not.toHaveBeenCalled();
+    expect(bot.playNext).not.toHaveBeenCalled();
+  });
+});
+
 describe("Bilibili recovery retries transient URL failures", () => {
+  it("rotates to untried CDN hosts after a long stream ends repeatedly at the same point", async () => {
+    const bot = makeBot();
+    const song = bot.queue.current();
+    song.url = "https://upos-primary.bilivideo.com/audio.m4s?deadline=1";
+    bot.player.elapsed = 2220;
+    bot.effectiveDuration = 4020;
+    song.duration = 4020;
+    const primary = "https://upos-primary.bilivideo.com/audio.m4s?deadline=2";
+    const backup = "https://upos-backup.bilivideo.com/audio.m4s?deadline=2";
+    const edge = "https://fixture.szbdyd.com/audio.m4s?deadline=2";
+    const provider = new BiliBiliProvider() as any;
+    provider.cidCache.set(song.id, 42);
+    provider.api = {
+      get: vi.fn(async () => ({
+        data: { data: { dash: { audio: [{ bandwidth: 192000, baseUrl: primary, backupUrl: [edge, backup] }] } } },
+      })),
+    };
+    bot.getProviderFor = () => provider;
+
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.player.play).toHaveBeenLastCalledWith(backup, 2220, 4020);
+
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.player.play).toHaveBeenLastCalledWith(edge, 2220, 4020);
+
+    // Once playback advances, a previously failed host can be used again.
+    bot.player.elapsed += 31;
+    bot.player.state = "idle";
+    bot.player.emit("trackEnd");
+    await flush();
+    expect(bot.player.play).toHaveBeenLastCalledWith(primary, 2251, 4020);
+    expect(bot.queue.current()).toBe(song);
+    expect(bot.playNext).not.toHaveBeenCalled();
+  });
+
   it("keeps the same queue and seek through a null lookup, then resumes after one second", async () => {
     const bot = makeBot();
     const song = bot.queue.current();
@@ -291,13 +449,35 @@ describe("occupancy responses belong to the current request and connection", () 
     const older = deferred<any[]>();
     bot.tsClient.getClientsInChannel.mockReturnValueOnce(older.promise).mockResolvedValueOnce([]);
     const first = bot.refreshOccupancy();
-    bot.tsClient.emit(event, { id: 2, targetChannelID: 3n });
+    bot.tsClient.emit(event, { id: 2, channelID: 3n, targetChannelID: 3n });
     await flush();
     older.resolve([{ id: 1 }]);
     await first;
     expect(bot.player.getState()).toBe("playing");
     expect(bot.autoPaused).toBe(false);
     expect(bot.idleTimer).toBeNull();
+  });
+
+  it("does not resume for a client entering another channel", async () => {
+    const bot = makeBot();
+    bot.player.state = "paused";
+    bot.autoPaused = true;
+    bot.tsClient.getClientsInChannel.mockResolvedValue([]);
+    bot.tsClient.emit("clientEnter", { id: 2, channelID: 4n });
+    await flush();
+    expect(bot.player.getState()).toBe("paused");
+    expect(bot.autoPaused).toBe(true);
+  });
+
+  it("resumes when a listener moves into the channel and the occupancy query fails", async () => {
+    const bot = makeBot();
+    bot.player.state = "paused";
+    bot.autoPaused = true;
+    bot.tsClient.getClientsInChannel.mockResolvedValue([]);
+    bot.tsClient.emit("clientMoved", { id: 2, targetChannelID: 3n });
+    await flush();
+    expect(bot.player.getState()).toBe("playing");
+    expect(bot.autoPaused).toBe(false);
   });
 
   it("a listener's return cannot be undone by an earlier alone response", async () => {
@@ -307,7 +487,7 @@ describe("occupancy responses belong to the current request and connection", () 
     const older = deferred<any[]>(), newer = deferred<any[]>();
     bot.tsClient.getClientsInChannel.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
     const first = bot.refreshOccupancy();
-    bot.tsClient.emit("clientEnter");
+    bot.tsClient.emit("clientEnter", { id: 2, channelID: 3n });
     expect(bot.player.getState()).toBe("playing");
     older.resolve([{ id: 1 }]);
     await first;

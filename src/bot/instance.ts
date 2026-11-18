@@ -9,7 +9,7 @@ import {
 } from "../ts-protocol/client.js";
 import { OpenProtocolManager } from "../ts-protocol/open-protocol.js";
 import { AudioPlayer } from "../audio/player.js";
-import { resolveUrlWithRetry } from "./url-retry.js";
+import { blocksProviderForAdvance, resolveUrlWithRetry } from "./url-retry.js";
 import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Platform, PlayFailure, Song, SongUrlResult } from "../music/provider.js";
@@ -58,6 +58,13 @@ import {
 
 /** Reply sent when a non-admin invokes an admin-only chat command. */
 export const COMMAND_DENIED_MESSAGE = "⛔ 需要管理员权限（该命令仅限管理员服务器组）";
+
+async function startTrackForCommand(bot: BotInstance, song: QueuedSong | null): Promise<string | undefined> {
+  if (!song) return "No track to play";
+  let reason: string | undefined;
+  const started = await bot.resolveAndPlay(song, failure => { reason = failure.message; });
+  if (!started) return reason ? `Cannot play: ${song.name} — ${reason}` : `Cannot play: ${song.name}`;
+}
 
 /** Maps the persisted / command-line play-mode string to the PlayMode enum.
  *  Shared by the !mode command and the restart-restore path (#125). */
@@ -226,8 +233,19 @@ export class BotInstance extends EventEmitter {
   private playbackRequest?: symbol;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
+  /** Format metadata belongs to the selected queue entry and its current URL. */
+  private currentStream?: { song: QueuedSong; url: string; quality?: string; isTrial: boolean };
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
-  private streamRecovery: { song: QueuedSong; attempts: number; position: number; session: number; generation: number; pauseRequested: boolean; inFlight: boolean } | null = null;
+  private streamRecovery: {
+    song: QueuedSong;
+    attempts: number;
+    position: number;
+    session: number;
+    generation: number;
+    pauseRequested: boolean;
+    inFlight: boolean;
+    failedHosts: Set<string>;
+  } | null = null;
   private playGate: Promise<unknown> = Promise.resolve();
   /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
    *  null when the wired provider has no reporting capability. */
@@ -542,12 +560,10 @@ export class BotInstance extends EventEmitter {
     // React near-instantly to channel membership changes. The 30s idle
     // poller remains the fallback if any of these events are missed.
     //
-    // clientEnter additionally arms auto-RESUME directly from the event,
-    // because the occupancy query (clientlist) times out whenever another
-    // client is present — i.e. exactly when a listener returns — so it cannot
-    // be used to confirm the return. See _resumeIfReturning().
-    this.tsClient.on("clientEnter", () => {
-      this._resumeIfReturning();
+    // Enter and move events can confirm a listener's arrival even if the
+    // occupancy query fails. Only arrivals in this channel can resume playback.
+    this.tsClient.on("clientEnter", (event: { id: number; channelID: bigint }) => {
+      this._resumeIfReturning(event.id, event.channelID);
       void this.refreshOccupancy();
     });
     this.tsClient.on("clientLeave", (event: { id: number }) => {
@@ -567,6 +583,7 @@ export class BotInstance extends EventEmitter {
         this.openProtocol?.scheduleAnnounce();
       } else {
         this.voiceDucking.removeSpeaker(event.id);
+        this._resumeIfReturning(event.id, event.targetChannelID);
       }
       void this.refreshOccupancy();
     });
@@ -612,20 +629,10 @@ export class BotInstance extends EventEmitter {
     }
   }
 
-  /**
-   * Resume playback when a listener returns after an auto-pause, driven by the
-   * clientEnter push event rather than a (timing-out) occupancy query.
-   *
-   * We only auto-pause while alone on the server, so `autoPaused` is a reliable
-   * "paused because empty" flag; any client appearing while it's set means a
-   * listener returned. Delegating to handleOccupancy(1) routes through
-   * decideOccupancyAction (resume iff autoPaused && paused) and also cancels the
-   * idle-disconnect timer. This path NEVER pauses — userCount is always > 0 —
-   * so a spurious or unrelated enter can only (harmlessly) resume, never stop
-   * playback. Pause remains exclusively on the authoritative clientlist path.
-   */
-  private _resumeIfReturning(): void {
-    if (!this.connected) return;
+  /** Resume an automatic pause after a listener arrives in the bot's channel. */
+  private _resumeIfReturning(listenerId: number, channelId: bigint): void {
+    if (!this.connected || listenerId <= 0 || listenerId === this.tsClient.getClientId() ||
+        channelId === 0n || channelId !== this.tsClient.getChannelId()) return;
     if (shouldResumeOnReturn(this.autoPaused, this.player.getState())) {
       this.handleOccupancy(1);
     }
@@ -960,7 +967,7 @@ export class BotInstance extends EventEmitter {
         return this.cmdStop();
       case "next":
       case "skip":
-        return this.cmdNext();
+        return (await this.skipToNext()).message;
       case "prev":
         return this.cmdPrev();
       case "vol":
@@ -1070,7 +1077,11 @@ export class BotInstance extends EventEmitter {
   }
 
   /** Resolve the URL and start playback if this request still owns the queue. */
-  async resolveAndPlay(song: QueuedSong, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
+  async resolveAndPlay(
+    song: QueuedSong,
+    onFailure?: (failure: PlayFailure) => void,
+    commitQueue?: () => void,
+  ): Promise<boolean> {
     const request = Symbol();
     this.playbackRequest = request;
     const generation = this.lifecycleGeneration;
@@ -1091,10 +1102,6 @@ export class BotInstance extends EventEmitter {
       fail("该机器人已关闭本地音频播放");
       return false;
     }
-    // Clear any accumulated skip votes — every fresh track starts with a
-    // clean slate, regardless of which code path loaded it (cmdPlay,
-    // cmdPlaylist, cmdAlbum, cmdFm, trackEnd auto-advance, etc.).
-    this.voteSkipUsers.clear();
     try {
       const provider = this.getProviderFor(song.platform);
       if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
@@ -1117,9 +1124,13 @@ export class BotInstance extends EventEmitter {
       // click, chat !play, auto-advance, FM — shares the same budget. The
       // policy lives in url-retry.ts so it is unit tested without a bot; a
       // config without the field means 0 retries, i.e. the previous behaviour.
+      let selectedQuality: string | undefined;
       const result = await resolveUrlWithRetry({
         retries: this.config?.playUrlRetries,
-        resolve: (quality) => provider.getSongUrl(song.id, quality),
+        resolve: (quality) => {
+          selectedQuality = quality;
+          return provider.getSongUrl(song.id, quality);
+        },
         // NetEase's quality ladder is not continuous: a track can play at 192k
         // while both 320k and 128k return null, so every lower level is tried.
         // Providers without a quality knob return [] and keep one attempt.
@@ -1138,7 +1149,7 @@ export class BotInstance extends EventEmitter {
               "URL resolve hit NetEase risk control (-460) — backing off",
             );
           } else if (error) {
-            this.logger.warn({ ...fields, err: error }, "URL resolve threw — retrying");
+            this.logger.warn({ ...fields, err: error }, "URL resolve attempt failed");
           } else if (attempt < total) {
             this.logger.debug(fields, "URL resolve returned no URL — retrying");
           }
@@ -1210,7 +1221,8 @@ export class BotInstance extends EventEmitter {
         // frame counter is not reset, so player.getElapsed() over-reads for the
         // 2nd+ consecutive Spotify track. Cosmetic only — the authoritative
         // elapsed shown to users is status.track.position from the backend poll.
-        if (!this.player.isExternalActive()) {
+        if (commitQueue) this.player.resetFailures();
+        if (commitQueue || !this.player.isExternalActive()) {
           this.player.playPcmStream(this.spotifyController.getPcmStream(), {
             // The sidecar PCM pipe is long-lived; per-track end arrives via the
             // controller "trackEnded" WS event, not stream EOF. A real EOF here
@@ -1239,45 +1251,41 @@ export class BotInstance extends EventEmitter {
           this.player.resume();
         }
         this.currentSourceIsSpotify = true;
-        this.jellyfinReporter?.onStop();
-        song.url = result.url;
-        // No trial clip for Spotify — full-track duration only (the near-end
-        // stall watchdog is disabled for the external stream anyway).
+        // Spotify has no preview clip or URL stall watchdog.
         this.effectiveDuration = song.duration;
-        this.autoPaused = false;
-        this.database.addPlayHistory({
-          botId: this.id,
-          songId: song.id,
-          songName: song.name,
-          artist: song.artist,
-          album: song.album,
-          platform: song.platform,
-          coverUrl: song.coverUrl,
-          requestedBy: song.requestedBy,
-        });
-        await this.syncProfileToSong(song);
-        this.emit("stateChange");
-        return true;
-      }
-      // Non-Spotify track: if we were on Spotify, pause the sidecar so it stops
-      // decoding ahead before the URL ffmpeg reclaims the PCM buffer.
-      if (this.currentSourceIsSpotify) {
-        this.spotifyController.pause().catch((err) =>
-          this.logger.warn({ err }, "Failed to pause Spotify sidecar on source switch"));
-        this.currentSourceIsSpotify = false;
+      } else {
+        // Pause the sidecar before URL playback reclaims the PCM buffer.
+        if (this.currentSourceIsSpotify) {
+          this.spotifyController.pause().catch((err) =>
+            this.logger.warn({ err }, "Failed to pause Spotify sidecar on source switch"));
+          this.currentSourceIsSpotify = false;
+        }
+        if (commitQueue) this.player.resetFailures();
+        this.effectiveDuration = result.trialDuration ?? song.duration;
+        this.player.play(result.url, 0, this.effectiveDuration);
       }
       song.url = result.url;
-      // 试听片段用试听时长（让 player nearEnd 正确触发自动切歌）；完整曲回退 song.duration
-      this.effectiveDuration = result.trialDuration ?? song.duration;
-      this.player.play(result.url, 0, this.effectiveDuration);
-      // Jellyfin playback reporting: open a session for jellyfin tracks (the
-      // reporter closes the previous one itself); close any open session when
-      // playback moves to another source. Fire-and-forget — never blocks play.
+      this.currentStream = { song, url: result.url, quality: selectedQuality, isTrial: result.trialDuration !== undefined };
+    } catch (err) {
+      if (isCancelled()) return false;
+      this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
+      onFailure?.(toPlayFailure(song.platform, song.id, err));
+      return false;
+    }
+
+    // A direct play request commits its queue only after playback starts.
+    commitQueue?.();
+    this.voteSkipUsers.clear();
+    // Playback has started. Failures in bookkeeping must not skip a track
+    // or turn an otherwise successful playback request into an error.
+    this.autoPaused = false;
+    try {
       if (song.platform === "jellyfin") this.jellyfinReporter?.onTrackStart(song.id);
       else this.jellyfinReporter?.onStop();
-      // Fresh playback (re)start — clear auto-pause so a later occupancy
-      // change won't try to "resume" a track the user already restarted.
-      this.autoPaused = false;
+    } catch (err) {
+      this.logger.warn({ err, songId: song.id }, "Failed to report playback session");
+    }
+    try {
       this.database.addPlayHistory({
         botId: this.id,
         songId: song.id,
@@ -1288,31 +1296,25 @@ export class BotInstance extends EventEmitter {
         coverUrl: song.coverUrl,
         requestedBy: song.requestedBy,
       });
-      // Keep TeamSpeak-side profile updates on the same path for play/next/FM.
-      await this.syncProfileToSong(song);
-      this.emit("stateChange");
-      return true;
     } catch (err) {
-      if (isCancelled()) return false;
-      this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
-      onFailure?.(toPlayFailure(song.platform, song.id, err));
-      return false;
+      this.logger.warn({ err, songId: song.id }, "Failed to save play history");
     }
+    this.emit("stateChange");
+    // Profile uploads can outlive a short track. Let the queue advance while
+    // the profile manager's generation checks discard superseded updates.
+    void this.syncProfileToSong(song);
+    return true;
   }
 
-  /** Platforms whose CDN stream can die mid-file on long content (#89, #161). */
-  private static readonly RESUMABLE_PLATFORMS: ReadonlySet<Platform> = new Set(["bilibili"]);
+  private static readonly RESUMABLE_PLATFORMS: ReadonlySet<Platform> = new Set(["bilibili", "netease", "qq", "kugou"]);
   /** A track that ends within this many seconds of its duration ended normally. */
   private static readonly STREAM_END_TOLERANCE_S = 30;
   private static readonly MAX_STREAM_RESUMES = 3;
   private static readonly MAX_STREAM_URL_LOOKUPS = 3;
 
   /**
-   * Called when the player reports a track end. If a B站 stream ended long
-   * before its known duration, the CDN dropped it (#161): fetch a fresh URL
-   * and continue from where it stopped instead of skipping the rest of a
-   * 2-3 hour video. Gives up after MAX_STREAM_RESUMES attempts that make no
-   * real progress, so a truly broken stream still advances the queue.
+   * Renew an interrupted finite CDN stream and seek to the audio clock at EOF.
+   * The existing recovery budget bounds restarts that make no progress.
    *
    * Returns true when it handled the end (resumed, or a newer track has
    * already taken over), false when the caller should advance the queue.
@@ -1322,12 +1324,21 @@ export class BotInstance extends EventEmitter {
     if (!song || !this.connected || !BotInstance.RESUMABLE_PLATFORMS.has(song.platform)) {
       return false;
     }
+    const bilibili = song.platform === "bilibili";
+    const source = song.url ? URL.parse(song.url) : null;
+    const playback = this.currentStream?.song === song && this.currentStream.url === song.url
+      ? this.currentStream : undefined;
     const duration = this.effectiveDuration ?? song.duration;
-    const position = Math.floor(this.player.getElapsed());
+    const elapsed = this.player.getElapsed();
+    const position = bilibili ? Math.floor(elapsed) : elapsed;
     const endedSession = this.player.getPlaybackSessionId();
-    if (!(duration > 0) || duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(position) || position < 0 ||
+        duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
       return false;
     }
+    // Music previews can start at a different offset than the full song.
+    if (!bilibili && (playback?.isTrial || position <= 0 ||
+        (source?.protocol !== "http:" && source?.protocol !== "https:"))) return false;
     if (this.player.getState() !== "idle") return true;
     const generation = this.lifecycleGeneration;
 
@@ -1339,7 +1350,10 @@ export class BotInstance extends EventEmitter {
       recovery.generation !== generation ||
       position - recovery.position > BotInstance.STREAM_END_TOLERANCE_S
     ) {
-      this.streamRecovery = { song, attempts: 0, position, session: endedSession, generation, pauseRequested: false, inFlight: false };
+      this.streamRecovery = {
+        song, attempts: 0, position, session: endedSession, generation,
+        pauseRequested: false, inFlight: false, failedHosts: new Set(),
+      };
     }
     const state = this.streamRecovery!;
     if (state.inFlight) return true;
@@ -1352,9 +1366,11 @@ export class BotInstance extends EventEmitter {
       return false;
     }
     state.position = position;
+    const failedHost = source?.hostname.replace(/\.$/, "");
+    if (bilibili && failedHost) state.failedHosts.add(failedHost);
 
     this.logger.warn(
-      { songId: song.id, position, duration, attempt: state.attempts + 1 },
+      { platform: song.platform, songId: song.id, position, duration, attempt: state.attempts + 1 },
       "Stream ended before the track did — resuming with a fresh URL",
     );
     state.inFlight = true;
@@ -1375,16 +1391,28 @@ export class BotInstance extends EventEmitter {
         let result: Awaited<ReturnType<MusicProvider["getSongUrl"]>> = null;
         let reason = "no-url";
         try {
-          result = await this.getProviderFor(song.platform).getSongUrl(song.id);
-        } catch {
+          result = await this.getProviderFor(song.platform).getSongUrl(
+            song.id, playback?.quality, bilibili ? { avoidHosts: state.failedHosts } : { refresh: true },
+          );
+        } catch (err) {
+          if (!isCurrent()) return cancelled();
+          if (blocksProviderForAdvance(toPlayFailure(song.platform, song.id, err).code)) return false;
           reason = "lookup-error";
         }
         // Skip, stop, reconnect, or a new playback session supersedes the lookup.
         if (!isCurrent()) return cancelled();
         if (result?.url) {
+          if (!bilibili) {
+            const stream = URL.parse(result.url);
+            if (result.trialDuration !== undefined || (stream?.protocol !== "http:" && stream?.protocol !== "https:")) {
+              this.logger.warn({ platform: song.platform, songId: song.id }, "Fresh URL cannot resume the full track");
+              return false;
+            }
+          }
           // Lookup retries do not consume the actual decoder resume budget.
           state.attempts++;
           song.url = result.url;
+          if (playback) playback.url = result.url;
           this.player.play(result.url, position, duration);
           state.session = this.player.getPlaybackSessionId();
           if (state.pauseRequested) this.player.pause();
@@ -1392,7 +1420,7 @@ export class BotInstance extends EventEmitter {
           return true;
         }
         this.logger.warn(
-          { platform: "bilibili", sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
+          { platform: song.platform, sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
           "Fresh stream URL lookup failed",
         );
       }
@@ -1480,56 +1508,53 @@ export class BotInstance extends EventEmitter {
     if (error) return error;
     const song0 = song!;
     let why: string | undefined;
-    const ok = await this.playSingleSong(song0, requesterName, failure => { why = failure.message; });
-    if (!ok) return why ? `Cannot play: ${song0.name} — ${why}` : `Cannot play: ${song0.name}`;
+    const ok = await this.playSingleSong(song0, requesterName, (failure, currentTrackContinues) => {
+      why = currentTrackContinues
+        ? `Could not restart ${song0.name}. The current track is still playing: ${failure.message}`
+        : `Cannot play: ${song0.name} — ${failure.message}`;
+    });
+    if (!ok) return why ?? `Cannot play: ${song0.name}`;
     return `Now playing: ${song0.name} - ${song0.artist}`;
   }
 
-  /**
-   * Play a single resolved song immediately, honoring config.playKeepsQueue:
-   *  - false (default): clear the queue and play only this song — today's
-   *    behavior. The prior track is stopped and released local uploads swept.
-   *  - true (and the queue is non-empty): insert the song after the current
-   *    track and jump to it (reusing addNext + playAt — no new queue logic), so
-   *    the rest of the queue survives and continues after it. FM auto-refill is
-   *    stopped (manual takeover), but existing queued songs are preserved.
-   *
-   * Shared by chat !play and the web /play-song route so the toggle decision
-   * lives in exactly one place (#119). Returns true if a track started playing.
-   */
-  async playSingleSong(song: QueuedSong, requesterName?: string, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
-    const s = this.withRequester(song, requesterName);
-    if (this.config.playKeepsQueue && !this.queue.isEmpty()) {
-      const insertedAt =
-        this.queue.getCurrentIndex() < 0
-          ? this.queue.size()
-          : this.queue.getCurrentIndex() + 1;
-      this.player.stop();
-      this.disableFmMode();
-      this.queue.addNext(s);
-      this.queue.playAt(insertedAt);
-      this.player.resetFailures();
-      // No sweep here: the queue is kept, so no local uploads were released.
-      return this.resolveAndPlay(this.queue.current()!, onFailure);
-    }
-    // Legacy replace behavior (default).
+  /** Start the requested song before changing the queue or stopping FM. */
+  async playSingleSong(
+    song: QueuedSong,
+    requesterName?: string,
+    onFailure?: (failure: PlayFailure, currentTrackContinues?: boolean) => void,
+  ): Promise<boolean> {
+    const requested = this.withRequester(song, requesterName);
     const previous = this.queue.current();
-    if (previous && !this.isSameSong(previous, s)) {
-      this.player.stop();
+    const previousSession = this.isSameSong(previous, requested) ? this.player.getPlaybackSessionId() : undefined;
+    const keepQueue = this.config.playKeepsQueue && !this.queue.isEmpty();
+    let failure: PlayFailure | undefined;
+    const started = await this.resolveAndPlay(requested, reason => { failure = reason; }, () => {
+      this.disableFmMode();
+      if (keepQueue) {
+        const currentIndex = this.queue.getCurrentIndex();
+        const index = currentIndex < 0 ? this.queue.size() : currentIndex + 1;
+        this.queue.addNext(requested);
+        this.queue.playAt(index);
+      } else {
+        this.queue.clear();
+        this.queue.add(requested);
+        this.queue.play();
+      }
+    });
+    if (!started) {
+      const currentTrackContinues = previousSession !== undefined &&
+        this.queue.current() === previous && this.player.getPlaybackSessionId() === previousSession &&
+        this.player.getState() === "playing";
+      onFailure?.(failure ?? {
+        platform: song.platform,
+        songId: song.id,
+        code: "unknown",
+        message: "播放请求已取消",
+      }, currentTrackContinues);
+      return false;
     }
-    this.queue.clear();
-    this.disableFmMode();
-    this.queue.add(s);
-    this.queue.play();
-
-    // Reset failure counter on user-initiated play
-    this.player.resetFailures();
-    const ok = await this.resolveAndPlay(this.queue.current()!, onFailure);
-    // Sweep AFTER the new song is queued+resolved: the replaced songs are no
-    // longer referenced (and get deleted), but the song — if it is the same
-    // local upload that was already playing — stays referenced and is preserved.
-    this.sweepLocalAudio("replaced");
-    return ok;
+    if (!keepQueue) this.sweepLocalAudio("replaced");
+    return true;
   }
 
   /**
@@ -1584,9 +1609,9 @@ export class BotInstance extends EventEmitter {
     if (wasIdle) {
       this.queue.playAt(this.queue.size() - 1);
       this.player.resetFailures();
-      await this.resolveAndPlay(this.queue.current()!);
+      const failure = await startTrackForCommand(this, this.queue.current());
       this.emit("stateChange");
-      return `Now playing: ${s.name} - ${s.artist}`;
+      return failure ?? `Now playing: ${s.name} - ${s.artist}`;
     }
 
     this.emit("stateChange");
@@ -1614,10 +1639,9 @@ export class BotInstance extends EventEmitter {
     if (wasIdle) {
       this.queue.playAt(insertedAt);
       this.player.resetFailures();
-      const ok = await this.resolveAndPlay(this.queue.current()!);
+      const failure = await startTrackForCommand(this, this.queue.current());
       this.emit("stateChange");
-      if (!ok) return `Cannot play: ${s.name}`;
-      return `Now playing: ${s.name} - ${s.artist}`;
+      return failure ?? `Now playing: ${s.name} - ${s.artist}`;
     }
 
     this.emit("stateChange");
@@ -1682,12 +1706,16 @@ export class BotInstance extends EventEmitter {
     return "Stopped and queue cleared";
   }
 
-  private async cmdNext(): Promise<string> {
-    await this.playNext();
+  async skipToNext(): Promise<{ ok: boolean; message: string }> {
+    if (!this.connected) throw new Error("Bot is not connected to TeamSpeak");
+    if (this.isAdvancing) return { ok: false, message: "正在切歌，请稍后" };
+    let reason: string | undefined;
+    const started = await this.playNext(3, failure => { reason = failure.message; });
     const current = this.queue.current();
-    if (current)
-      return `Now playing: ${current.name} - ${current.artist}`;
-    return "Queue is empty";
+    if (started && current) {
+      return { ok: true, message: `Now playing: ${current.name} - ${current.artist}` };
+    }
+    return { ok: false, message: reason ?? (current ? "没有可播放的下一首" : "队列为空") };
   }
 
   private async cmdPrev(): Promise<string> {
@@ -1876,10 +1904,10 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    return failure ?? `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
   }
 
   private async cmdAlbum(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1913,10 +1941,10 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    return failure ?? `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
   }
 
   private async cmdFm(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1954,11 +1982,11 @@ export class BotInstance extends EventEmitter {
     this.player.resetFailures();
 
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
     const label = provider.platform === "qq" ? "QQ Radar FM" : "Personal FM";
-    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}`;
+    return failure ?? `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}`;
   }
 
   private async cmdArtist(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1988,10 +2016,10 @@ export class BotInstance extends EventEmitter {
     this.player.resetFailures();
 
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    const failure = await startTrackForCommand(this, first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}`;
+    return failure ?? `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}`;
   }
 
   private async refillFm(): Promise<void> {
@@ -2232,10 +2260,25 @@ export class BotInstance extends EventEmitter {
     if (this.isAdvancing || !this.connected) return false;
     this.isAdvancing = true;
     let started = false;
-    let riskControlled = false;
+    const blockedProviders = new Set<string>();
     const captureFailure = (failure: PlayFailure) => {
-      riskControlled = failure.code === "risk_control";
+      if (blocksProviderForAdvance(failure.code)) blockedProviders.add(failure.platform);
       onFailure?.(failure);
+    };
+    const nextCandidate = (): QueuedSong | null => {
+      if (blockedProviders.size === 0) return this.queue.next();
+      const sequential = this.queue.getMode() === PlayMode.Sequential;
+      const currentIndex = this.queue.getCurrentIndex();
+      if (!this.queue.list().some((track, index) =>
+        (!sequential || index > currentIndex) && !blockedProviders.has(track.platform),
+      )) return null;
+      // Do not spend URL attempts on a blocked source. Allow for crossing a
+      // shuffle boundary, but always terminate in looping modes.
+      for (let i = 0; i < this.queue.size() * 2; i++) {
+        const candidate = this.queue.next();
+        if (!candidate || !blockedProviders.has(candidate.platform)) return candidate;
+      }
+      return null;
     };
     const generation = this.lifecycleGeneration;
     const unchanged = (song: QueuedSong, request: symbol | undefined) =>
@@ -2251,8 +2294,8 @@ export class BotInstance extends EventEmitter {
         started = await playback;
         if (!started && !unchanged(next, request)) return false;
         if (!started) {
-          for (let i = 0; i < maxRetries && this.connected && !riskControlled; i++) {
-            const retry = this.queue.next();
+          for (let i = 0; i < maxRetries && this.connected; i++) {
+            const retry = nextCandidate();
             if (!retry) break;
             const retryPlayback = this.resolveAndPlay(retry, captureFailure);
             const retryRequest = this.playbackRequest;

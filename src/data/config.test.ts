@@ -274,6 +274,13 @@ describe("config", () => {
     });
   });
 
+  it("retains a numeric QQ bitrate saved by an older settings API", () => {
+    const dir = makeTmpDir();
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ audioQuality: { qq: 128 } }));
+    expect(loadConfig(path).audioQuality.qq).toBe("128");
+  });
+
   it("creates config file on save", () => {
     const dir = makeTmpDir();
     const path = join(dir, "sub", "config.json");

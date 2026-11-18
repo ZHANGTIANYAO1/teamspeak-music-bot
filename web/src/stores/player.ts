@@ -82,6 +82,7 @@ export interface TimingState {
   serverElapsed: number;
   serverSyncTime: number;
   wasPlaying: boolean;
+  lastPolledElapsed?: number;
 }
 
 const HOME_CACHE_TTL = 5 * 60 * 1000;
@@ -312,6 +313,7 @@ export const usePlayerStore = defineStore('player', {
           serverElapsed: status.elapsed,
           serverSyncTime: Date.now(),
           wasPlaying: status.playing && !status.paused,
+          lastPolledElapsed: undefined,
         });
       }
 
@@ -321,6 +323,7 @@ export const usePlayerStore = defineStore('player', {
           serverElapsed: status.elapsed ?? 0,
           serverSyncTime: Date.now(),
           wasPlaying: status.playing && !status.paused,
+          lastPolledElapsed: undefined,
         });
       }
     },
@@ -396,20 +399,28 @@ export const usePlayerStore = defineStore('player', {
             serverElapsed: bot.elapsed,
             serverSyncTime: Date.now(),
             wasPlaying: bot.playing && !bot.paused,
+            lastPolledElapsed: undefined,
           });
         }
       }
     },
 
-    /** Poll server for real elapsed time for active bot */
-    async syncElapsed() {
-      if (!this.activeBotId || !this.isPlaying) return;
+    /** Poll the same bot for authoritative elapsed time. */
+    async syncElapsed(botId?: string) {
+      botId ??= this.activeBotId ?? undefined;
+      if (!botId || !this.bots.some(bot => bot.id === botId && bot.playing && !bot.paused)) return;
+      const timing = this.timings[botId];
       try {
-        const res = await axios.get(`/api/player/${this.activeBotId}/elapsed`);
-        this._setTiming(this.activeBotId, {
-          serverElapsed: res.data.elapsed,
+        const res = await axios.get(`/api/player/${botId}/elapsed`);
+        // A newer WebSocket update or poll supersedes this result.
+        if (this.timings[botId] !== timing) return;
+        const elapsed = res.data.elapsed;
+        if (!Number.isFinite(elapsed)) return;
+        this._setTiming(botId, {
+          serverElapsed: elapsed,
           serverSyncTime: Date.now(),
-          wasPlaying: true,
+          wasPlaying: timing?.lastPolledElapsed !== elapsed,
+          lastPolledElapsed: elapsed,
         });
       } catch {
         // ignore
@@ -417,13 +428,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async fetchQueue() {
-      if (!this.activeBotId) return;
-      try {
-        const res = await axios.get(`/api/player/${this.activeBotId}/queue`);
-        this.queues[this.activeBotId] = res.data.queue ?? [];
-      } catch {
-        // ignore
-      }
+      if (this.activeBotId) await this.fetchQueueForBot(this.activeBotId);
     },
 
     async fetchQueueForBot(botId: string) {
@@ -446,10 +451,11 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playAtIndex(index: number) {
-      if (!this.activeBotId) return;
-      await axios.post(`/api/player/${this.activeBotId}/play-at`, { index });
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
+      const botId = this.activeBotId;
+      if (!botId) return;
+      const res = await axios.post(`/api/player/${botId}/play-at`, { index });
+      if (res.data?.ok === false && res.data?.message) this.notify(res.data.message, 'error');
+      if (res.data?.ok === true) void this.syncElapsed(botId);
     },
 
     async play(query: string, platform = 'netease') {
@@ -533,7 +539,8 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playSong(song: Song, skipPartCheck = false) {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
         const handled = await this.checkBilibiliMultiPart(song, 'play');
         if (handled) return;
@@ -541,12 +548,11 @@ export const usePlayerStore = defineStore('player', {
       // Guests use the non-destructive "play now" (insert-next + skip) so they
       // can't wipe everyone else's queue; members/admins keep the normal behavior.
       const endpoint = useSession().isGuest.value ? 'play-now-song' : 'play-song';
-      const res = await axios.post(`/api/player/${this.activeBotId}/${endpoint}`, { song });
+      const res = await axios.post(`/api/player/${botId}/${endpoint}`, { song });
       if (res.data?.ok === false && res.data?.message) {
         this.notify(res.data.message, 'error');
       }
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
+      if (res.data?.ok === true) void this.syncElapsed(botId);
     },
 
     async playNextSong(song: Song, skipPartCheck = false) {
@@ -579,18 +585,19 @@ export const usePlayerStore = defineStore('player', {
         const handled = await this.checkBilibiliMultiPart(song, 'add');
         if (handled) return;
       }
-      await axios.post(`/api/player/${this.activeBotId}/add-song`, { song });
+      const res = await axios.post(`/api/player/${this.activeBotId}/add-song`, { song });
+      if (res.data?.ok === false && res.data?.message) this.notify(res.data.message, 'error');
     },
 
     async playPlaylist(playlistId: string, platform = 'netease') {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       try {
-        const res = await axios.post(`/api/player/${this.activeBotId}/play-playlist`, { playlistId, platform });
+        const res = await axios.post(`/api/player/${botId}/play-playlist`, { playlistId, platform });
         if (res.data?.message) {
           this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
         }
-        this._setTiming(this.activeBotId, { serverElapsed: 0 });
-        this._syncAfterAction();
+        if (res.data?.ok === true) void this.syncElapsed(botId);
       } catch (e: any) {
         // A 403 here means a guest lacks the "play entire collection" permission
         // (issue #103) — surface it instead of failing silently.
@@ -599,14 +606,14 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playAlbum(albumId: string, platform = 'netease') {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       try {
-        const res = await axios.post(`/api/player/${this.activeBotId}/play-album`, { albumId, platform });
+        const res = await axios.post(`/api/player/${botId}/play-album`, { albumId, platform });
         if (res.data?.message) {
           this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
         }
-        this._setTiming(this.activeBotId, { serverElapsed: 0 });
-        this._syncAfterAction();
+        if (res.data?.ok === true) void this.syncElapsed(botId);
       } catch (e: any) {
         this.notify(e?.response?.status === 403 ? '没有权限播放整个专辑' : '播放专辑失败', 'error');
       }
@@ -618,18 +625,18 @@ export const usePlayerStore = defineStore('player', {
      * trips, so the caller gets a "loading" notice first.
      */
     async playArtist(artistId: string, platform = 'netease') {
-      if (!this.activeBotId) return;
+      const botId = this.activeBotId;
+      if (!botId) return;
       this.notify('正在载入该歌手的全部歌曲…', 'info');
       try {
         const res = await axios.post(
-          `/api/player/${this.activeBotId}/play-artist`,
+          `/api/player/${botId}/play-artist`,
           { artistId, platform },
         );
         if (res.data?.message) {
           this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
         }
-        this._setTiming(this.activeBotId, { serverElapsed: 0 });
-        this._syncAfterAction();
+        if (res.data?.ok === true) void this.syncElapsed(botId);
       } catch (e: any) {
         const status = e?.response?.status;
         this.notify(
@@ -665,10 +672,11 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async next() {
-      if (!this.activeBotId) return;
-      await axios.post(`/api/player/${this.activeBotId}/next`);
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
+      const botId = this.activeBotId;
+      if (!botId) return;
+      const res = await axios.post(`/api/player/${botId}/next`);
+      if (res.data?.ok === false && res.data?.message) this.notify(res.data.message, 'error');
+      if (res.data?.ok === true) void this.syncElapsed(botId);
     },
 
     async prev() {
@@ -710,14 +718,16 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async startFm(platform: Source = 'netease') {
-      if (!this.activeBotId) return;
-      const res = await axios.post(`/api/player/${this.activeBotId}/fm`, { platform });
-      if (res.data?.message) {
+      const botId = this.activeBotId;
+      if (!botId) return;
+      const res = await axios.post(`/api/player/${botId}/fm`, { platform });
+      if (this.activeBotId === botId && res.data?.message) {
         this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
       }
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
-      this.fetchQueue();
+      if (res.data?.ok === true) {
+        void this.syncElapsed(botId);
+        void this.fetchQueueForBot(botId);
+      }
     },
 
     async fetchFavorites() {

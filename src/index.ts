@@ -88,7 +88,7 @@ async function main() {
   const qqSession = (process.env.QQ_MUSIC_MANAGED_SESSION ?? "1") === "1" && isProviderEnabled(config, "qq")
     ? new QQManagedSession(createQqLoginClient(), qqStore, logger)
     : undefined;
-  const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl(), qqSession);
+  const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl(), qqSession, apiServer.assertQqMusicApiPort);
   if (!qqSession) {
     try {
       const cookie = cookieStore.load("qq");

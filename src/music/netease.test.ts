@@ -480,6 +480,17 @@ describe("NetEase risk control (-460)", () => {
     expect(r?.url).toBe("http://cdn.example/x.mp3");
     expect(r?.trialDuration).toBe(60);
   });
+
+  it("requests a new sidecar cache key for interruption recovery", async () => {
+    const get = vi.fn(async (_url: string, _config: unknown) => ({
+      data: { data: [{ url: "http://cdn.example/track.mp3" }] },
+    }));
+    const provider = providerWithApi(get);
+    await provider.getSongUrl("1");
+    await provider.getSongUrl("1", undefined, { refresh: true });
+    expect(get.mock.calls[0][1]).not.toHaveProperty("params.timestamp");
+    expect(get.mock.calls[1][1]).toMatchObject({ params: { id: "1", timestamp: expect.any(Number) } });
+  });
 });
 
 // ---------------------------------------------------------------------------

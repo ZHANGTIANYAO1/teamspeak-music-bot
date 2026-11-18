@@ -6,6 +6,7 @@ import type {
   MusicProvider,
   Song,
   SongUrlResult,
+  SongUrlRequestOptions,
   Playlist,
   PlaylistDetail,
   LyricLine,
@@ -299,12 +300,16 @@ export class NeteaseProvider implements MusicProvider {
     return { songs, playlists, albums, artists };
   }
 
-  async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
+  async getSongUrl(songId: string, quality?: string, options?: SongUrlRequestOptions): Promise<SongUrlResult | null> {
     const level = quality ?? this.quality;
     let res;
     try {
       res = await this.api.get("/song/url/v1", {
-        params: { id: songId, level, ua: getPlaybackUserAgent(this.cookie), ...this.cookieParams },
+        params: {
+          id: songId, level, ua: getPlaybackUserAgent(this.cookie), ...this.cookieParams,
+          // The embedded sidecar caches successful responses for two minutes.
+          ...(options?.refresh && { timestamp: Date.now() }),
+        },
       });
     } catch (err) {
       // -460 arrives as HTTP 400, and left as-is it looks like "this track is

@@ -185,6 +185,11 @@ describe("pickStableAudioUrl (#161 long streams dying mid-play)", () => {
     expect(pickStableAudioUrl({ baseUrl: pcdn, backupUrl: [szbdyd] })).toBe(pcdn);
   });
 
+  it("allows a refreshed URL from the same host if no alternative is available", () => {
+    const host = new URL(upos).hostname;
+    expect(pickStableAudioUrl({ baseUrl: upos }, new Set([host]))).toBe(upos);
+  });
+
   it("returns undefined when there is no url at all", () => {
     expect(pickStableAudioUrl({})).toBeUndefined();
   });
