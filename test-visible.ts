@@ -10,12 +10,12 @@ import { QQMusicProvider } from "./src/music/qq.js";
 import { BotManager } from "./src/bot/manager.js";
 import { createWebServer } from "./src/web/server.js";
 import {
-  Client as TS3FullClient,
-  generateIdentity,
   listClients,
-  sendTextMessage,
-  consoleLogger,
-} from "@honeybbq/teamspeak-client";
+} from "@honeybbq/teamspeak";
+import {
+  Client as TS3FullClient,
+  generateIdentitySync,
+} from "@honeybbq/teamspeak/client";
 
 const logger = createLogger();
 let passed = 0;
@@ -83,7 +83,7 @@ async function main() {
   // ═══ Test 2: Verify bot is visible using a second client ═══
   log("\n═══ Test 2: Verify Bot Visibility ═══");
 
-  const verifyIdentity = generateIdentity(8);
+  const verifyIdentity = generateIdentitySync(8);
   const verifyClient = new TS3FullClient(
     verifyIdentity,
     "127.0.0.1:9987",
@@ -92,8 +92,7 @@ async function main() {
   );
 
   await verifyClient.connect();
-  await verifyClient.waitConnected();
-  log(`  Verification client connected (id=${verifyClient.clientID()})`);
+  log(`  Verification client connected (id=${verifyClient.clientID})`);
 
   try {
     const clients = await listClients(verifyClient);

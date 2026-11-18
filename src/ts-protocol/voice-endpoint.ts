@@ -1,10 +1,10 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { Resolver } from "@honeybbq/teamspeak-client/discovery";
+import { Resolver } from "@honeybbq/teamspeak/client";
 import type {
   AddrResolver,
   ResolvedAddr,
-} from "@honeybbq/teamspeak-client";
+} from "@honeybbq/teamspeak/client";
 
 export interface ResolvedVoiceEndpoint {
   host: string;
@@ -66,9 +66,12 @@ export class TrackingVoiceEndpointResolver implements AddrResolver {
     private readonly resolveHost: ResolveIpv4 = resolveIpv4,
   ) {}
 
-  async resolve(input: string, signal?: AbortSignal): Promise<ResolvedAddr[]> {
+  async resolve(
+    input: string,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<readonly ResolvedAddr[]> {
     this.endpoint = null;
-    const candidates = await this.delegate.resolve(input, signal);
+    const candidates = await this.delegate.resolve(input, options);
     const selected = candidates[0];
     if (!selected) return candidates;
 
