@@ -59,7 +59,7 @@ describe("playback request timing", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(["playSong", "playPlaylist", "playAlbum", "playArtist", "next", "playAtIndex"] as const)(
+  it.each(["playSong", "playPlaylist", "playAlbum", "playArtist", "next", "playAtIndex", "startFm"] as const)(
     "keeps the current clock when %s fails",
     async (action) => {
       const store = usePlayerStore();
@@ -69,6 +69,7 @@ describe("playback request timing", () => {
       vi.spyOn(axios, "post").mockResolvedValue({ data: { ok: false, message: "播放失败" } });
 
       if (action === "playSong") await store.playSong(track);
+      else if (action === "startFm") await store.startFm();
       else if (action === "next") await store.next();
       else if (action === "playAtIndex") await store.playAtIndex(1);
       else await store[action]("collection");

@@ -428,13 +428,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async fetchQueue() {
-      if (!this.activeBotId) return;
-      try {
-        const res = await axios.get(`/api/player/${this.activeBotId}/queue`);
-        this.queues[this.activeBotId] = res.data.queue ?? [];
-      } catch {
-        // ignore
-      }
+      if (this.activeBotId) await this.fetchQueueForBot(this.activeBotId);
     },
 
     async fetchQueueForBot(botId: string) {
@@ -723,14 +717,16 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async startFm(platform: Source = 'netease') {
-      if (!this.activeBotId) return;
-      const res = await axios.post(`/api/player/${this.activeBotId}/fm`, { platform });
-      if (res.data?.message) {
+      const botId = this.activeBotId;
+      if (!botId) return;
+      const res = await axios.post(`/api/player/${botId}/fm`, { platform });
+      if (this.activeBotId === botId && res.data?.message) {
         this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
       }
-      this._setTiming(this.activeBotId, { serverElapsed: 0 });
-      this._syncAfterAction();
-      this.fetchQueue();
+      if (res.data?.ok === true) {
+        void this.syncElapsed(botId);
+        void this.fetchQueueForBot(botId);
+      }
     },
 
     async fetchFavorites() {
