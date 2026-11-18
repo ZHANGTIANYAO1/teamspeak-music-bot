@@ -1,5 +1,10 @@
-import { RiskControlError } from "../music/provider.js";
-import type { SongUrlResult } from "../music/provider.js";
+import { RiskControlError, SongUrlUnavailable } from "../music/provider.js";
+import type { PlayFailureCode, SongUrlResult } from "../music/provider.js";
+
+/** These failures apply to the provider for the current queue transition. */
+export function blocksProviderForAdvance(code: PlayFailureCode | undefined): boolean {
+  return code === "risk_control" || code === "provider_verification_required";
+}
 
 /**
  * Silent re-resolve of a playable URL.
@@ -179,6 +184,7 @@ export async function resolveUrlWithRetry(
     lastError = error;
     lastQuality = step.quality;
     opts.onAttemptFailed?.({ attempt: i + 1, total: plan.length, quality: step.quality, error });
+    if (error instanceof SongUrlUnavailable && error.failure.code === "provider_verification_required") break;
     // Only same-quality attempts grow the backoff; a level switch resets it.
     sameQualityAttempt = step.fallback ? 0 : sameQualityAttempt + 1;
   }

@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import type { BotInstance } from "../../bot/instance.js";
+import { blocksProviderForAdvance } from "../../bot/url-retry.js";
 import type { QueuedSong } from "../../audio/queue.js";
 import type { BotManager } from "../../bot/manager.js";
 import type { BotDatabase } from "../../data/database.js";
@@ -127,7 +128,7 @@ export function createPlayerRouter(
       let failure: PlayFailure | undefined;
       const capture = (reason: PlayFailure) => { failure = reason; };
       let started = first ? await bot.resolveAndPlay(first, capture) : false;
-      if (first && !started && failure?.code !== "risk_control" && queue.current() === first) {
+      if (first && !started && !blocksProviderForAdvance(failure?.code) && queue.current() === first) {
         // Many collections contain several consecutive unavailable tracks.
         started = await bot.playNext(20, capture);
       }

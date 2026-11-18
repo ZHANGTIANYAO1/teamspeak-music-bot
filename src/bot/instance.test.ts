@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { BotInstance, COMMAND_DENIED_MESSAGE, spotifyPortsForBotId } from "./instance.js";
 import type { BotInstanceOptions } from "./instance.js";
-import { PlayQueue, PlayMode } from "../audio/queue.js";
+import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import { AudioPlayer } from "../audio/player.js";
 import { createDatabase, SHARED_QUEUE_OWNER } from "../data/database.js";
 import { parseCommand } from "./commands.js";
 import type { TS3TextMessage } from "../ts-protocol/client.js";
 import type { SpotifyController } from "../music/spotify/controller.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
-import type { MusicProvider } from "../music/provider.js";
+import type { MusicProvider, PlayFailure } from "../music/provider.js";
 import type { BotDatabase } from "../data/database.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { BotConfig } from "../data/config.js";
@@ -580,6 +580,36 @@ it("reports the reason when the next track cannot be started", async () => {
   expect(await BotInstance.prototype.skipToNext.call(ctx as unknown as BotInstance)).toEqual({
     ok: false,
     message: expect.stringContaining("-460"),
+  });
+});
+
+describe("queue advancement after a provider-wide failure", () => {
+  it.each([
+    ["netease", "risk_control"],
+    ["kugou", "provider_verification_required"],
+  ] as const)("skips queued %s tracks without spending retries for other sources", async (platform, code) => {
+    const queue = new PlayQueue();
+    for (let i = 0; i < 8; i++) queue.add({ ...spotifySong(), id: String(i), platform });
+    const available = { ...spotifySong(), id: "available", platform: "qq" as const };
+    queue.add(available);
+    const ctx = {
+      connected: true,
+      queue,
+      player: makePlayer(),
+      voteSkipUsers: new Set<string>(),
+      resolveAndPlay: vi.fn(async (track: QueuedSong, onFailure: (failure: PlayFailure) => void) => {
+        if (track.platform === "qq") return true;
+        onFailure({ platform, songId: track.id, code, message: "Provider unavailable" });
+        return false;
+      }),
+      profileManager: { onSongChange: vi.fn(async () => {}) },
+      sweepLocalAudio: vi.fn(),
+      emit: vi.fn(),
+    };
+
+    expect(await playNext.call(ctx)).toBe(true);
+    expect(ctx.resolveAndPlay.mock.calls.map(([track]) => track.id)).toEqual(["0", "available"]);
+    expect(queue.current()?.id).toBe("available");
   });
 });
 

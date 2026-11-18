@@ -9,7 +9,7 @@ import {
 } from "../ts-protocol/client.js";
 import { OpenProtocolManager } from "../ts-protocol/open-protocol.js";
 import { AudioPlayer } from "../audio/player.js";
-import { resolveUrlWithRetry } from "./url-retry.js";
+import { blocksProviderForAdvance, resolveUrlWithRetry } from "./url-retry.js";
 import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Platform, PlayFailure, Song, SongUrlResult } from "../music/provider.js";
@@ -1154,7 +1154,7 @@ export class BotInstance extends EventEmitter {
               "URL resolve hit NetEase risk control (-460) — backing off",
             );
           } else if (error) {
-            this.logger.warn({ ...fields, err: error }, "URL resolve threw — retrying");
+            this.logger.warn({ ...fields, err: error }, "URL resolve attempt failed");
           } else if (attempt < total) {
             this.logger.debug(fields, "URL resolve returned no URL — retrying");
           }
@@ -2247,10 +2247,25 @@ export class BotInstance extends EventEmitter {
     if (this.isAdvancing || !this.connected) return false;
     this.isAdvancing = true;
     let started = false;
-    let riskControlled = false;
+    const blockedProviders = new Set<string>();
     const captureFailure = (failure: PlayFailure) => {
-      riskControlled = failure.code === "risk_control";
+      if (blocksProviderForAdvance(failure.code)) blockedProviders.add(failure.platform);
       onFailure?.(failure);
+    };
+    const nextCandidate = (): QueuedSong | null => {
+      if (blockedProviders.size === 0) return this.queue.next();
+      const sequential = this.queue.getMode() === PlayMode.Sequential;
+      const currentIndex = this.queue.getCurrentIndex();
+      if (!this.queue.list().some((track, index) =>
+        (!sequential || index > currentIndex) && !blockedProviders.has(track.platform),
+      )) return null;
+      // Do not spend URL attempts on a blocked source. Allow for crossing a
+      // shuffle boundary, but always terminate in looping modes.
+      for (let i = 0; i < this.queue.size() * 2; i++) {
+        const candidate = this.queue.next();
+        if (!candidate || !blockedProviders.has(candidate.platform)) return candidate;
+      }
+      return null;
     };
     const generation = this.lifecycleGeneration;
     const unchanged = (song: QueuedSong, request: symbol | undefined) =>
@@ -2266,8 +2281,8 @@ export class BotInstance extends EventEmitter {
         started = await playback;
         if (!started && !unchanged(next, request)) return false;
         if (!started) {
-          for (let i = 0; i < maxRetries && this.connected && !riskControlled; i++) {
-            const retry = this.queue.next();
+          for (let i = 0; i < maxRetries && this.connected; i++) {
+            const retry = nextCandidate();
             if (!retry) break;
             const retryPlayback = this.resolveAndPlay(retry, captureFailure);
             const retryRequest = this.playbackRequest;
